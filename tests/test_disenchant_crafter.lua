@@ -369,6 +369,8 @@ do
 	check(app.getRecipeShoppingQty(rowBoP) == 0, "clearCraftingOrderQueue clears queued DE crafts cleanly")
 
 	-- Theme & Warcraft skin switching on Disenchantment Crafter
+	local prevSkin = Theme.GetSkin()
+	Theme.SetSkin("standard", true)
 	Theme.SetMode("light")
 	app.refresh()
 	check(Theme.GetMode() == "light" and view:IsShown(), "Light mode renders Disenchantment Crafter cleanly")
@@ -379,7 +381,9 @@ do
 		_G.MerchantMasterAPI.SetSkin("goblin")
 		app.refresh()
 		check(Theme.GetSkin() == "goblin" and view:IsShown(), "Goblin Warcraft skin renders Disenchantment Crafter cleanly")
-		_G.MerchantMasterAPI.SetSkin("standard")
+		_G.MerchantMasterAPI.SetSkin(prevSkin)
+	else
+		Theme.SetSkin(prevSkin, true)
 	end
 end
 
@@ -845,8 +849,12 @@ do
 		check(byKey and byKey.marginPct and byKey.avgProfit, "Loss row renders avgProfit & marginPct cells")
 		local lossMarginTxt = byKey.marginPct.fs:GetText() or ""
 		local lossColor = byKey.marginPct._textColor
-		check(lossMarginTxt:sub(1, 1) == "-" and lossColor and lossColor[1] > 0.6 and lossColor[2] < 0.45 and lossColor[1] > lossColor[2],
-			"Negative margin renders with '-' prefix and red tint, got " .. tostring(lossMarginTxt))
+		local palRed = Theme.GetActivePalette().accentRed
+		check(lossMarginTxt:sub(1, 1) == "-" and lossColor and palRed
+			and math.abs(lossColor[1] - palRed[1]) < 0.02
+			and math.abs(lossColor[2] - palRed[2]) < 0.02
+			and math.abs(lossColor[3] - palRed[3]) < 0.02,
+			"Negative margin renders with '-' prefix and active accentRed tint, got " .. tostring(lossMarginTxt))
 
 		-- Render unpriced-reagent row -> '-' for nil craftCost/avgProfit/marginPct
 		tbl.scrollBox._view._initFn(firstFrame, rowUnpriced)

@@ -4,11 +4,35 @@
 
 MerchantMaster analyzes live Auction House scans directly inside World of Warcraft Forever with zero external apps or companion dependencies required. Track daily craft profits, identify low-supply monopolies, optimize Merchant's Favor tokens and Craftsman's Writs, post auctions from an integrated **MM Sell** tab, plan 1-300 profession leveling routes, and track character gold and inventory in a clean ledger.
 
+![MerchantMaster Goblin Baron — Today's Overview](.previews/01-baron-dashboard.png)
+
 ---
 
 ## Themes & Typography
 
-Includes **Modern Glass** (Dark and Light modes) plus **5 Warcraft faction skins** (`Human`, `Night Elf`, `Orc`, `Undead`, and `Goblin Baron`) with bundled static **Inter** typography (`SIL OFL 1.1`) and automatic client-font fallback on non-Latin locales (`ruRU`, `koKR`, `zhCN`, `zhTW`). Switch themes any time from **Console -> Addon UI** or `/mm theme`.
+MerchantMaster ships with **Goblin Baron** as the default theme and signature look, plus extra optional themes—4 Warcraft faction skins (`Human`, `Night Elf`, `Orc`, `Undead`) and **Modern Glass** (Dark and Light clean UI)—all rendered with bundled static **Inter** typography (`SIL OFL 1.1`) and automatic client-font fallback on non-Latin locales (`ruRU`, `koKR`, `zhCN`, `zhTW`). Switch themes any time from **Console -> Addon UI** or `/mm theme`.
+
+---
+
+## Screenshots (Goblin Baron)
+
+### Daily Crafts (`Profit Spread`)
+![Daily Crafts Profit Spread](.previews/02-baron-profit-spread.png)
+
+### Waylaid Crates
+![Waylaid Crates](.previews/03-baron-crates.png)
+
+### Craftsman's Writs
+![Craftsman's Writs](.previews/04-baron-writs.png)
+
+### 1-300 Profession Leveling
+![1-300 Profession Leveling](.previews/05-baron-professor.png)
+
+### Profit & Wealth Ledger
+![Profit and Wealth Ledger](.previews/06-baron-analytics.png)
+
+### Shopping List & Sub-Craft Breakdown
+![Shopping List and Sub-Craft Breakdown](.previews/07-baron-shopping-cart.png)
 
 ---
 
@@ -64,7 +88,7 @@ Aliases: `/mm`, `/merchantmaster`, `/crates`, `/waylaid`
 | `/mm scan` | Run a Live AH market scan (`/mm refresh`) |
 | `/mm clearah` | Clear saved Live AH scan prices for the current economy |
 
-Additional UI & feature toggles: `/mm theme <standard | human | night_elf | orc | undead | goblin>`, `/mm crates`, `/mm writs`, `/mm recipes`, `/mm known`, `/mm sell` (while at the Auction House).
+Additional UI & feature toggles: `/mm theme <goblin | human | night_elf | orc | undead | standard>`, `/mm crates`, `/mm writs`, `/mm recipes`, `/mm known`, `/mm sell` (while at the Auction House).
 
 ---
 

@@ -12,7 +12,7 @@ All notable player-facing changes to **MerchantMaster** are documented in this f
 
 ### Visual Polish, Fonts & Localization
 *   **Bundled Static `Inter` Font (`SIL OFL 1.1`):** Unified typography across all panels on unmodified official `Inter-Regular.ttf` and `Inter-SemiBold.ttf`, with automatic `STANDARD_TEXT_FONT` fallback on non-Latin game clients (`ruRU`, `koKR`, `zhCN`, `zhTW`) and refined spacing across **Goblin Baron** KPI cards and table headers.
-*   **UI Skins & Table Styles:** Renamed skins and table styles for clarity (**Modern Glass** Dark/Light, **Human**, **Night Elf**, **Orc**, **Undead**, and **Goblin Baron**; **Ruled Lines**, **Deep Well**, and **Card Strips**) with optimized textures for faster loading and smaller downloads.
+*   **UI Skins & Table Styles:** Set **Goblin Baron** as the default skin and signature style, with **Human**, **Night Elf**, **Orc**, **Undead**, and **Modern Glass** (Dark/Light) available as extra optional themes alongside table styles (**Ruled Lines**, **Deep Well**, and **Card Strips**) and optimized textures for faster loading and smaller downloads.
 
 ### Privacy, Performance & Extensibility
 *   **Privacy-Safe Debug Bundle:** **Console -> Perf & Debug -> Generate Debug Bundle** now enables **Redact Names** by default, masking character and realm names for safe sharing in bug reports while reporting live addon version and WoW Forever build metadata.

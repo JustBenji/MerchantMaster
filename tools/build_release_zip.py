@@ -30,7 +30,7 @@ ALLOWED_ROOT_EXTRAS = (
     "README.md",
     "CHANGELOG.md",
 )
-FORBIDDEN_TOP_NAMES = {".git", ".github", ".gitignore", ".gitattributes", ".pkgmeta", ".release", "AGENTS.md", "docs", "tests", "tools"}
+FORBIDDEN_TOP_NAMES = {".git", ".github", ".gitignore", ".gitattributes", ".pkgmeta", ".previews", ".release", "AGENTS.md", "docs", "tests", "tools"}
 ZIP_ALLOWED_EXTS = {".lua", ".toc", ".blp", ".tga", ".ttf", ".txt", ".md"}
 ZIP_ALLOWED_EXACT_NAMES = {"LICENSE"}
 ZIP_TEXT_EXTS = {".lua", ".toc", ".md", ".txt"}

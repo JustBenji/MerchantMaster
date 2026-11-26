@@ -2124,12 +2124,12 @@ local function buildAddonUIView(parent)
 
 	do
 		local skins = {
-			{ key = "standard",  label = "Modern Glass",           swatch = { 0.36, 0.72, 1.0 } },
+			{ key = "goblin",    label = "Goblin (Trade Baron)",   swatch = { 0.18, 0.95, 0.56 } },
 			{ key = "human",     label = "Human (Stormwind)",      swatch = { 0.48, 0.69, 0.96 } },
 			{ key = "night_elf", label = "Night Elf (Kaldorei)",   swatch = { 0.40, 0.91, 0.98 } },
 			{ key = "orc",       label = "Orc (Orgrimmar)",        swatch = { 0.87, 0.65, 0.29 } },
 			{ key = "undead",    label = "Undead (Forsaken)",      swatch = { 0.38, 0.81, 0.78 } },
-			{ key = "goblin",    label = "Goblin (Trade Baron)",   swatch = { 0.18, 0.95, 0.56 } },
+			{ key = "standard",  label = "Modern Glass",           swatch = { 0.36, 0.72, 1.0 } },
 		}
 		for i, info in ipairs(skins) do
 			local col = (i - 1) % 2
@@ -2476,7 +2476,7 @@ local function buildAddonUIView(parent)
 
 	function uv.renderPreview()
 		local T = getTheme()
-		local curSkin = (T and T.GetSkin and T.GetSkin()) or "standard"
+		local curSkin = (T and T.GetSkin and T.GetSkin()) or "goblin"
 		local curMode = (T and T.GetMode and T.GetMode()) or "dark"
 		local curTbl = (T and T.GetTableStyle and T.GetTableStyle()) or "t5_ruled"
 		local curPrice = (T and T.GetPriceDisplayMode and T.GetPriceDisplayMode()) or "compact"
@@ -2591,7 +2591,7 @@ local function buildAddonUIView(parent)
 
 	function uv.sync()
 		local T = getTheme()
-		local curSkin = (T and T.GetSkin and T.GetSkin()) or "standard"
+		local curSkin = (T and T.GetSkin and T.GetSkin()) or "goblin"
 		local curMode = (T and T.GetMode and T.GetMode()) or "dark"
 		local curTbl = (T and T.GetTableStyle and T.GetTableStyle()) or "t5_ruled"
 		local curPrice = (T and T.GetPriceDisplayMode and T.GetPriceDisplayMode()) or "compact"

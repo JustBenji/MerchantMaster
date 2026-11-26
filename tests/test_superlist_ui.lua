@@ -299,6 +299,8 @@ check(pool[1].cells[16].fs:GetText()=='Merchant','Source displays clean Merchant
 check(pool[1].cells[17].fs:GetText()=='150 Favor','actual Favor currency shown without copper or abbreviation')
 check(pool[1].cells[18].fs:GetText()=='Honored','Rep displays standing name')
 check(pool[1].cells[19].fs:GetText()=='Best','Best displays existing effect-class evaluation without asterisk')
+local prevLightSkin = ns.Theme.GetSkin()
+ns.Theme.SetSkin('standard', true)
 ns.Theme.SetMode('light')
 box._view._initFn(pool[1],rich)
 local lightWhy=pool[1].cells[6].fs:GetText() or ''
@@ -320,6 +322,7 @@ box._view._initFn(pool[1],rich)
 local cdColDark=pool[1].cellGroup.cellsByKey.cdSort.fs._lastColor
 check(cdColDark and cdColDark[1]==1 and cdColDark[2]==1 and cdColDark[3]==1 and cdColDark[4]==1,'CD hyphen uses primary white text in dark mode')
 check((pool[1].cells[6].fs:GetText() or ''):find('|cff',1,true)~=nil and not (pool[1].cells[6].fs:GetText() or ''):find('|cff9e4b00',1,true),'Why It Sells restores dark theme')
+ns.Theme.SetSkin(prevLightSkin, true)
 rich.sourceCost.copper=100
 box._view._initFn(pool[1],rich)
 check(pool[1].cells[17].fs:GetText()==ns.FormatMoneyCompact(100)..' + 150 Favor','explicit mixed cost remains visible for auditing')
@@ -1968,6 +1971,8 @@ local function checkRecipeQuickLook()
         end
 
         local line=chart.trace.lines[7]
+        local prevQlSkin=ns.Theme.GetSkin()
+        ns.Theme.SetSkin('standard',true)
         for _, mode in ipairs({'light','dark'}) do
             ns.Theme.SetMode(mode)
             local pal,assets=ns.Theme.PALETTES[mode],ns.Theme.ASSETS
@@ -2032,6 +2037,7 @@ local function checkRecipeQuickLook()
             assertTextContrast(frame.dayReadout,readoutBackground,'chart readout text')
             hit:GetScript('OnLeave')(hit)
         end
+        ns.Theme.SetSkin(prevQlSkin,true)
     end
     scroll:Click('LeftButton')
     check(chart:IsShown() and chart.title:GetText()=='Recipe scroll — 7d' and chart.trace.dots[7]:IsShown(),
@@ -2945,7 +2951,8 @@ do
     local ui, db = app.ui, MerchantMasterDB
     local savedChars, savedActive = db.chars, ns.activeChar
     local savedKnown, savedUnlock, savedAll = db.knownRecipesOnly, db.unlockFilter, db.craftableAllChars
-    local savedTab = app.activeTab
+    local savedTab, savedSkin = app.activeTab, ns.Theme.GetSkin()
+    ns.Theme.SetSkin('standard', true)
     local ok, err = pcall(function()
         local bankChar = { name='BankerUI', realm='Forever', faction='Horde', economy=ns.CurrentEconomyInfo().effectiveKey,
             knownSpells={}, knownOutputs={}, knownNames={}, scannedProfs={}, cooldowns={}, cooldownGroups={}, writCooldowns={} }
@@ -3004,6 +3011,7 @@ do
     db.knownRecipesOnly, db.unlockFilter, db.craftableAllChars = savedKnown, savedUnlock, savedAll
     if app.invalidateCraftableScope then app.invalidateCraftableScope() end
     app.setTab(savedTab)
+    ns.Theme.SetSkin(savedSkin, true)
     if not ok then error(err, 0) end
 end
 

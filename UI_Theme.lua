@@ -31,19 +31,20 @@ function Theme.GetSkinAsset(skinKey, name)
 end
 
 function Theme.GetCartMedallionAsset(skinKey)
-	local key = skinKey or (Theme.GetSkin and Theme.GetSkin()) or "standard"
+	local key = skinKey or (Theme.GetSkin and Theme.GetSkin()) or "goblin"
 	return Theme.GetSkinAsset(key, "cart_medallion")
 		or Theme.GetSkinAsset(key, "portrait")
 		or ns.ADDON_ICON_SMALL
 end
 
+Theme.DEFAULT_SKIN = "goblin"
 Theme.UI_SKINS = {
-	{ key = "standard",  label = "Modern Glass",           short = "Modern Glass" },
+	{ key = "goblin",    label = "Goblin (Trade Baron)",   short = "Goblin" },
 	{ key = "human",     label = "Human (Stormwind)",      short = "Human" },
 	{ key = "night_elf", label = "Night Elf (Kaldorei)",   short = "Night Elf" },
 	{ key = "orc",       label = "Orc (Orgrimmar)",        short = "Orc" },
 	{ key = "undead",    label = "Undead (Forsaken)",      short = "Undead" },
-	{ key = "goblin",    label = "Goblin (Trade Baron)",   short = "Goblin" },
+	{ key = "standard",  label = "Modern Glass",           short = "Modern Glass" },
 }
 ns.UI_SKINS = Theme.UI_SKINS
 
@@ -458,7 +459,7 @@ Theme.SKIN_PALETTES = {
 Theme.COLORS = {}
 Theme.PALETTE = {}
 local currentMode = "dark"
-local currentSkin = "standard"
+local currentSkin = "goblin"
 local currentTableStyle = "t5_ruled"
 local modeCallbacks = {}
 local skinCallbacks = {}
@@ -494,7 +495,9 @@ local function syncColorsTable(mode)
 		end
 	end
 end
-syncColorsTable(currentMode)
+syncColorsTable(paletteKey())
+Theme.skin = currentSkin
+Theme.mode = currentSkin ~= "standard" and "dark" or currentMode
 
 -- Effective appearance: "dark" / "light" on the Standard skin, always "dark" on a Warcraft skin
 -- (every Warcraft palette is a dark one), so legacy `GetMode() == "light"` ink checks stay correct.
@@ -575,7 +578,7 @@ end
 function Theme.ApplySavedSettings(mode, tableStyle, skinKey, deferRepaint)
 	local nextMode = (mode == "light") and "light" or "dark"
 	local nextStyle = Theme.IsValidTableStyle(tableStyle) and tableStyle or "t5_ruled"
-	local nextSkin = Theme.IsValidSkin(skinKey) and skinKey or "standard"
+	local nextSkin = Theme.IsValidSkin(skinKey) and skinKey or "goblin"
 	currentMode = nextMode
 	currentTableStyle = nextStyle
 	currentSkin = nextSkin
@@ -658,7 +661,7 @@ end
 -- Switches the whole UI between Modern Glass (keeps the player's Dark / Light choice)
 -- and a Warcraft skin. Re-paints every registered widget; `silent` skips the change callbacks.
 function Theme.SetSkin(skinKey, silent)
-	local nextSkin = Theme.IsValidSkin(skinKey) and skinKey or "standard"
+	local nextSkin = Theme.IsValidSkin(skinKey) and skinKey or "goblin"
 	local changed = (nextSkin ~= currentSkin)
 	currentSkin = nextSkin
 	Theme.skin = nextSkin

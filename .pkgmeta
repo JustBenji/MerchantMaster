@@ -8,6 +8,7 @@ ignore:
   - tools
   - docs
   - .github
+  - .previews
   - .gitignore
   - .gitattributes
   - .private_denylist.txt

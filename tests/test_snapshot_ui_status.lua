@@ -252,7 +252,7 @@ do
 		"Auto + fresh Blizzard snapshot should show 'Blizz 12m', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
 	check(ui.statusServerFs:GetText():find("Blizz 12m", 1, true) ~= nil,
 		"statusServerFs should include 'Blizz 12m', got '" .. tostring(ui.statusServerFs:GetText()) .. "'")
-	check(near(ui.statusDot._vertexColor, Theme.PALETTES.dark.accentGreen),
+	check(near(ui.statusDot._vertexColor, Theme.GetActivePalette().accentGreen),
 		"Status dot should tint green when fresh Blizzard snapshot is active")
 end
 

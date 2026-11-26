@@ -166,6 +166,7 @@ end
 local ns, createdFrames, hostEnv = dofile(testsDir .. "host_fixture.lua")
 local Theme = ns.Theme
 local app = ns.app
+Theme.SetSkin("standard", true)
 
 -- 3A. Theme palettes match Fable 5.2 Design 1 core tokens
 do
@@ -549,7 +550,8 @@ do
 		local function checkNoFlatHighlight(frame, label)
 			for _, region in ipairs({ frame:GetRegions() }) do
 				local anchor = region._points and region._points[1]
-				check(not (region._colorTexture and region:GetHeight() == 1 and anchor and anchor[1]:match("^TOP")),
+				local shown = (region.IsShown == nil) or region:IsShown()
+				check(not (shown and region._colorTexture and region:GetHeight() == 1 and anchor and anchor[1]:match("^TOP")),
 					label .. " has no flat 1px top highlight")
 			end
 		end

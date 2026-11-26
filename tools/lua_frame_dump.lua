@@ -7,13 +7,19 @@ local unpack = unpack or table.unpack
 
 local scriptDir = (debug and debug.getinfo(1, "S").source:sub(2):match("^(.*[/\\])")) or "./"
 local addonDir = scriptDir .. "../"
--- CLI: `lua_frame_dump.lua [outDir] [--audit] [--skins] [--cart-ah-only]` (flags and outDir in any order).
+-- CLI: `lua_frame_dump.lua [outDir] [--audit] [--skins] [--cart-ah-only] [--only=a,b]` (flags and outDir in any order).
 -- --skins additionally dumps the Warcraft-skin scenes (Standard dark/light + 5 skins + options/market/recipes + cart/ah-buyer).
-local audit, skinsMode, cartAhOnly, outDirArg = false, false, false, nil
+local audit, skinsMode, cartAhOnly, onlyScenes, outDirArg = false, false, false, nil, nil
 for _, a in ipairs(arg or {}) do
 	if a == "--audit" then audit = true
 	elseif a == "--skins" then skinsMode = true
 	elseif a == "--cart-ah-only" then cartAhOnly = true; skinsMode = true
+	elseif a:sub(1, 7) == "--only=" then
+		onlyScenes = onlyScenes or {}
+		skinsMode = true
+		for name in a:sub(8):gmatch("[^,]+") do
+			onlyScenes[name] = true
+		end
 	elseif not outDirArg then outDirArg = a end
 end
 local outDir = outDirArg or (scriptDir .. "scene_dumps")
@@ -2089,6 +2095,9 @@ local function emitClipBox(w)
 end
 
 local function dumpScene(sceneName, winFrameOverride, extraMeta)
+	if onlyScenes and not onlyScenes[sceneName] then
+		return
+	end
 	if cartAhOnly and not (sceneName:sub(1, 10) == "live-cart-" or sceneName:sub(1, 13) == "live-ahbuyer-" or sceneName:sub(1, 5) == "flow-") then
 		return
 	end
@@ -2349,6 +2358,9 @@ end
 -- Capture All 6 Required Views
 ---------------------------------------------------------------------------------------------------
 local function setThemeMode(mode)
+	if ns.Theme and ns.Theme.SetSkin and ns.Theme.GetSkin and ns.Theme.GetSkin() ~= "standard" then
+		ns.Theme.SetSkin("standard")
+	end
 	if _G.MerchantMasterDB then _G.MerchantMasterDB.uiThemeMode = mode end
 	if ns.Theme and ns.Theme.SetMode then
 		ns.Theme.SetMode(mode)
@@ -2361,11 +2373,11 @@ local function setThemeMode(mode)
 	flushPendingLayout()
 end
 
-local dumpWindowWidth = 1840
+local dumpWindowWidth, dumpWindowHeight = 1840, 730
 local function switchTab(tabKey)
 	if tabKey ~= "recipes" and _G.MerchantMasterDB and _G.MerchantMasterDB.window then
 		_G.MerchantMasterDB.window.width = dumpWindowWidth
-		_G.MerchantMasterDB.window.height = 730
+		_G.MerchantMasterDB.window.height = dumpWindowHeight
 		if app.ui and app.ui.winChrome and app.ui.winChrome.window then
 			app.ui.winChrome.window:SetMinimumWidth(1320)
 			app.ui.winChrome.window:ApplyFull()
@@ -2383,7 +2395,7 @@ end
 
 local withVendorCrafterSeed
 
-if not cartAhOnly then
+if not cartAhOnly and not onlyScenes then
 -- 1. overview-dark
 setThemeMode("dark")
 switchTab("dashboard")
@@ -2682,7 +2694,7 @@ local function dumpShoppingScene(mode, sceneName)
 	dumpScene(sceneName)
 end
 
-if not cartAhOnly then
+if not cartAhOnly and not onlyScenes then
 dumpShoppingScene("dark", "shopping-dark")
 dumpShoppingScene("light", "shopping-light")
 app.toggleShoppingWindow(false)
@@ -3365,20 +3377,23 @@ if skinsMode then
 		flushPendingLayout()
 	end
 
-	local function sizeSkinViewport(key)
+	local function sizeSkinViewport(key, customW, customH, customVpW, customVpH)
 		local custom = key ~= "standard"
-		VIEWPORT_W, VIEWPORT_H = custom and 1440 or 1920, custom and 900 or 960
-		dumpWindowWidth = custom and 1320 or 1840
+		VIEWPORT_W = custom and (customVpW or 1440) or 1920
+		VIEWPORT_H = custom and (customVpH or 900) or 960
+		dumpWindowWidth = custom and (customW or 1320) or 1840
+		dumpWindowHeight = custom and (customH or 730) or 730
 		_G.UIParent:SetSize(VIEWPORT_W, VIEWPORT_H)
 		local saved = _G.MerchantMasterDB.window
-		saved.width, saved.height = dumpWindowWidth, 730
+		saved.width, saved.height = dumpWindowWidth, dumpWindowHeight
 		app.ui.winChrome.window:SetMinimumWidth(1320)
 		app.ui.winChrome.window:ApplyFull()
 	end
 
-	local function skinScene(sceneName, key, mode, tab, extraMeta)
+	local function skinScene(sceneName, key, mode, tab, extraMeta, customW, customH, customVpW, customVpH)
+		if onlyScenes and not onlyScenes[sceneName] then return end
 		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
-		sizeSkinViewport(key)
+		sizeSkinViewport(key, customW, customH, customVpW, customVpH)
 		applySkin(key)
 		if key == "standard" then setThemeMode(mode or "dark") end
 		switchTab(tab or "dashboard")
@@ -3401,6 +3416,7 @@ if not cartAhOnly then
 	skinScene("overview-goblin-bright", "goblin", nil, "dashboard", { brightBackdrop = true })
 
 	-- options-goblin: the Interface > AddOns options page shown on its own with the UI Theme dropdown open.
+	if not onlyScenes or onlyScenes["options-goblin"] then
 	do
 		applySkin("goblin")
 		switchTab("dashboard")
@@ -3439,12 +3455,18 @@ if not cartAhOnly then
 			app.panel:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 0)
 		end
 	end
+	end
 
 	skinScene("market-goblin", "goblin", nil, "profit_spread")
 	skinScene("leveling-goblin", "goblin", nil, "prof_path")
+	skinScene("allrecipes-goblin", "goblin", nil, "recipes")
+	skinScene("turnins-goblin", "goblin", nil, "crates", nil, 1600, 880, 1728, 1080)
+	skinScene("writs-goblin", "goblin", nil, "writs", nil, 1600, 880, 1728, 1080)
+	skinScene("ledger-goblin", "goblin", nil, "an_overview")
 	skinScene("allrecipes-night_elf", "night_elf", nil, "recipes")
 
 	-- ah-minimap-brand: live Auction House SearchBar (28x28 Logo A open button) + live Minimap button (30x30, ring-free).
+	if not onlyScenes or onlyScenes["ah-minimap-brand"] then
 	do
 		sizeSkinViewport("goblin")
 		applySkin("goblin")
@@ -3608,8 +3630,19 @@ if not cartAhOnly then
 		end
 	end
 	end
+	end
 
 	-- Live Option A Sales Cart & Option B Minimized AH Buying Mode scenes (Goblin Baron + Dark + Light).
+	local runCartBlock = not onlyScenes
+	if onlyScenes then
+		for k in pairs(onlyScenes) do
+			if k:sub(1, 10) == "live-cart-" or k:sub(1, 13) == "live-ahbuyer-" or k:sub(1, 5) == "flow-" then
+				runCartBlock = true
+				break
+			end
+		end
+	end
+	if runCartBlock then
 	do
 		local function fireEv(ev, ...)
 			for _, w in ipairs(allWidgets) do
@@ -4091,6 +4124,7 @@ if not cartAhOnly then
 		prepCleanAHFrame(false)
 		_G.MerchantMasterDB.ahBuyerExtended = savedExtended
 		app.panel:Show()
+	end
 	end
 
 	-- Restore the pre-sweep state.

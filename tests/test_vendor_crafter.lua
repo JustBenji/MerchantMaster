@@ -1022,6 +1022,8 @@ do
 	end
 
 	-- Dark / Light / Warcraft skin switching works cleanly
+	local prevSkin = Theme.GetSkin()
+	Theme.SetSkin("standard", true)
 	Theme.SetMode("light")
 	app.refresh()
 	check(Theme.GetMode() == "light" and view:IsShown(), "Light mode renders Vendor Crafter cleanly")
@@ -1034,6 +1036,9 @@ do
 			app.refresh()
 			check(Theme.GetSkin() == sk and view:IsShown(), "Warcraft skin '" .. sk .. "' switches cleanly on Vendor Crafter")
 		end
+		_G.MerchantMasterAPI.SetSkin(prevSkin)
+	else
+		Theme.SetSkin(prevSkin, true)
 	end
 
 	-- Variable yield range + Ledger measured yields + End-to-end buy-cap flow to Shopping Cart & CartBuyer

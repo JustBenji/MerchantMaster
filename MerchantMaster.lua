@@ -2148,8 +2148,8 @@ app.applyPriceDisplayMode = applyPriceDisplayMode
 -- Options button, /mm theme and MerchantMasterAPI.SetSkin all funnel through app.applyUiSkin.
 local function uiSkinShortLabel()
 	local T = ns.Theme
-	local info = T and T.GetSkinInfo and T.GetSkinInfo(T.GetSkin and T.GetSkin() or "standard")
-	return (info and info.short) or "Modern Glass"
+	local info = T and T.GetSkinInfo and T.GetSkinInfo(T.GetSkin and T.GetSkin() or "goblin")
+	return (info and info.short) or "Goblin"
 end
 
 local function updateUiSkinButton(button)
@@ -2167,8 +2167,8 @@ end
 
 function app.applyUiSkin(skinKey)
 	local T = ns.Theme
-	if not (T and T.SetSkin) then return "standard" end
-	if not (T.IsValidSkin and T.IsValidSkin(skinKey)) then skinKey = "standard" end
+	if not (T and T.SetSkin) then return "goblin" end
+	if not (T.IsValidSkin and T.IsValidSkin(skinKey)) then skinKey = "goblin" end
 	if MerchantMasterDB then MerchantMasterDB.uiSkin = skinKey end
 	app._skinSwitching = true
 	local ok, err = pcall(T.SetSkin, skinKey)
@@ -4221,7 +4221,7 @@ do
 	ns.Theme.SkinButton(uiSkinBtn, { dropdown = true })
 	uiSkinBtn:SetScript("OnClick", function(self, mouseBtn)
 		if mouseBtn == "RightButton" then
-			app.applyUiSkin("standard")
+			app.applyUiSkin("goblin")
 		else
 			ns.Theme.OpenDropDown(self, ns.Theme.UI_SKINS, ns.Theme.GetSkin(), app.applyUiSkin, 230)
 		end
@@ -20950,7 +20950,7 @@ do
 	ns.Theme.SkinButton(optUiSkinBtn, { dropdown = true })
 	optUiSkinBtn:SetScript("OnClick", function(self, mouseBtn)
 		if mouseBtn == "RightButton" then
-			app.applyUiSkin("standard")
+			app.applyUiSkin("goblin")
 		else
 			ns.Theme.OpenDropDown(self, ns.Theme.UI_SKINS, ns.Theme.GetSkin(), app.applyUiSkin, 230)
 		end
@@ -21959,7 +21959,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
 				MerchantMasterDB.tableStyle = "t5_ruled"
 			end
 			if not (ns.Theme.IsValidSkin and ns.Theme.IsValidSkin(MerchantMasterDB.uiSkin)) then
-				MerchantMasterDB.uiSkin = "standard"
+				MerchantMasterDB.uiSkin = "goblin"
 			end
 			if ns.Theme.ApplySavedSettings then
 				ns.Theme.ApplySavedSettings(
@@ -22679,7 +22679,7 @@ end)
 
 SLASH_MERCHANTMASTER1 = "/mm"
 local UI_SKIN_ALIASES = {
-	standard = "standard", apple = "standard", default = "standard",
+	standard = "standard", apple = "standard", glass = "standard", modern = "standard", default = "goblin",
 	human = "human", stormwind = "human", alliance = "human",
 	night_elf = "night_elf", nightelf = "night_elf", ne = "night_elf", kaldorei = "night_elf",
 	orc = "orc", orgrimmar = "orc", horde = "orc",

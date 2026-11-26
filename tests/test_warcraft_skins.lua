@@ -7,7 +7,7 @@ local function check(ok, message)
 	count = count + 1
 	if not ok then error("WARCRAFT SKINS FAIL [" .. count .. "]: " .. tostring(message), 2) end
 end
-local skins = { "standard", "human", "night_elf", "orc", "undead", "goblin" }
+local skins = { "goblin", "human", "night_elf", "orc", "undead", "standard" }
 local customSkins = { "human", "night_elf", "orc", "undead", "goblin" }
 local API, panel, ui = MerchantMasterAPI, app.panel, app.ui
 local function click(button, mouseButton)
@@ -56,10 +56,10 @@ for _, mode in ipairs({ "dark", "light" }) do
 		check(Theme.GetUserMode() == mode and MerchantMasterDB.uiThemeMode == mode, "reload restores appearance " .. mode)
 	end
 end
-check(API.SetSkin("invalid") == "standard" and MerchantMasterDB.uiSkin == "standard", "API invalid key falls back to Standard")
+check(API.SetSkin("invalid") == "goblin" and MerchantMasterDB.uiSkin == "goblin", "API invalid key falls back to Goblin")
 MerchantMasterDB.uiSkin = "removed_skin"
 fire("ADDON_LOADED")
-check(API.GetSkin() == "standard" and MerchantMasterDB.uiSkin == "standard", "saved unknown skin recovers to Standard")
+check(API.GetSkin() == "goblin" and MerchantMasterDB.uiSkin == "goblin", "saved unknown skin recovers to Goblin")
 
 -- Exercise the actual shared dropdown rows, rather than replacing OpenDropDown with a spy.
 for _, buttonName in ipairs({ "optUiSkinBtn", "uiSkinBtn" }) do
@@ -86,11 +86,11 @@ for _, buttonName in ipairs({ "optUiSkinBtn", "uiSkinBtn" }) do
 		end
 	end
 	click(button, "RightButton")
-	check(API.GetSkin() == "standard", buttonName .. " right-click resets Standard")
+	check(API.GetSkin() == "goblin", buttonName .. " right-click resets Goblin")
 end
 
 local aliases = {
-	{ "apple", "standard" }, { "default", "standard" }, { "stormwind", "human" }, { "alliance", "human" },
+	{ "apple", "standard" }, { "default", "goblin" }, { "stormwind", "human" }, { "alliance", "human" },
 	{ "nightelf", "night_elf" }, { "ne", "night_elf" }, { "kaldorei", "night_elf" }, { "night elf", "night_elf" },
 	{ "night-elf", "night_elf" }, { "orgrimmar", "orc" }, { "horde", "orc" }, { "forsaken", "undead" },
 	{ "ud", "undead" }, { "baron", "goblin" }, { "trade", "goblin" }, { "tradebaron", "goblin" },

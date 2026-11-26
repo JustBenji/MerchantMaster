@@ -2548,7 +2548,7 @@ do
 		checkStanding(lockedSpread, false, "Daily Crafts")
 		checkStanding(metOutlier, true, "Monopolies after faction changes in the same evaluation")
 		checkStanding(metSpread, true, "Daily Crafts after faction changes in the same evaluation")
-		local palette = ns.Theme.PALETTES[ns.Theme.GetMode()]
+		local palette = ns.Theme.GetActivePalette()
 		for _, view in ipairs({ { ns.app.ui.outliersTable, lockedOutlier, metOutlier },
 			{ ns.app.ui.profitSpreadTable, lockedSpread, metSpread } }) do
 			view[1].setRows({ view[2], view[3] })

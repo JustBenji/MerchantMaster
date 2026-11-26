@@ -259,10 +259,13 @@ view.resetButton:Click("LeftButton")
 check(MerchantMasterDB.allItemsProfFilter == "all", "Reset button resets db.allItemsProfFilter to 'all'")
 
 -- Theme switch Light -> Dark renders cleanly without error
+local prevSkin = Theme.GetSkin()
+Theme.SetSkin("standard", true)
 Theme.SetMode("light")
 check(Theme.GetMode() == "light" and view:IsShown(), "Light mode renders All Items cleanly")
 Theme.SetMode("dark")
 check(Theme.GetMode() == "dark" and view:IsShown(), "Dark mode renders All Items cleanly")
+Theme.SetSkin(prevSkin, true)
 
 -- 4. Craft completion (ownership + cooldown + skills) updates ONLY affected row(s) without restarting load or scroll
 do
