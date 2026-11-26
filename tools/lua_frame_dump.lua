@@ -1462,8 +1462,16 @@ local function guessSkinIconPath(numId, low)
 			or low:find("leaf", 1, true) or low:find("thorn", 1, true) or low:find("kelp", 1, true)
 			or low:find("tear", 1, true) or low:find("mushroom", 1, true) or low:find("gromsblood", 1, true)
 			or low:find("sansam", 1, true) or low:find("herb", 1, true) then base = "INV_Misc_Herb_07"
-		elseif low:find("cloth", 1, true) or low:find("bolt", 1, true) or low:find("linen", 1, true) then base = "INV_Fabric_Linen_01"
-		elseif low:find("hide", 1, true) or low:find("leather", 1, true) then base = "INV_Misc_LeatherScrap_02"
+		elseif low:find("cloth", 1, true) or low:find("bolt", 1, true) or low:find("linen", 1, true)
+			or low:find("silk", 1, true) or low:find("wool", 1, true) or low:find("mageweave", 1, true)
+			or low:find("runecloth", 1, true) or low:find("hood", 1, true) then base = "INV_Fabric_Linen_01"
+		elseif low:find("hide", 1, true) or low:find("leather", 1, true) or low:find("glove", 1, true)
+			or low:find("bracer", 1, true) or low:find("belt", 1, true) or low:find("boot", 1, true)
+			or low:find("cloak", 1, true) or low:find("pants", 1, true) then base = "INV_Misc_LeatherScrap_02"
+		elseif low:find("flame", 1, true) or low:find("fire", 1, true) or low:find("sac", 1, true) then base = "INV_Potion_24"
+		elseif low:find("oil", 1, true) or low:find("frost", 1, true) then base = "INV_Potion_83"
+		elseif low:find("water", 1, true) or low:find("snapper", 1, true) or low:find("fish", 1, true) then base = "INV_Potion_100"
+		elseif low:find("essence", 1, true) or low:find("dust", 1, true) or low:find("shard", 1, true) then base = "INV_Potion_25"
 		else base = SKIN_POTION_ICONS[(numId % #SKIN_POTION_ICONS) + 1] end
 	end
 	return "Interface\\Icons\\" .. base
@@ -3671,6 +3679,7 @@ if not cartAhOnly then
 		end
 
 		local function dumpCartLiveScene(sceneName, skinKey, mode, makeEmpty, opts)
+			if onlyScenes and not onlyScenes[sceneName] then return end
 			opts = opts or {}
 			VIEWPORT_W, VIEWPORT_H = 1440, 900
 			_G.UIParent:SetSize(VIEWPORT_W, VIEWPORT_H)
@@ -3880,6 +3889,7 @@ if not cartAhOnly then
 		end
 
 		local function dumpAHBuyerLiveScene(sceneName, skinKey, mode, ahOpen, extended, filterDestName, selectIdx)
+			if onlyScenes and not onlyScenes[sceneName] then return end
 			VIEWPORT_W, VIEWPORT_H = 1440, 900
 			_G.UIParent:SetSize(VIEWPORT_W, VIEWPORT_H)
 			applySkin(skinKey)
@@ -4011,6 +4021,7 @@ if not cartAhOnly then
 			end
 
 			local function dumpFlowScene(sceneName, stageKey, extended, opts)
+				if onlyScenes and not onlyScenes[sceneName] then return end
 				VIEWPORT_W, VIEWPORT_H = 1440, 900
 				_G.UIParent:SetSize(VIEWPORT_W, VIEWPORT_H)
 				applySkin("goblin")

@@ -209,6 +209,8 @@ FILEID_ALIASES: Dict[str, str] = {
     "134939": "wow_scroll_classic",
     "134187": "wow_herbalism",
     "134830": "wow_mana_potion",
+    "134812": "wow_shroud_potion",
+    "134400": "wow_gold_bag",
 }
 
 # (keyword in lower-case basename, file stem) fallbacks, first hit wins.
@@ -218,8 +220,15 @@ ICON_KEYWORDS: List[Tuple[str, str]] = [
     ("herb", "wow_herbalism"), ("flower", "wow_herbalism"), ("leaf", "wow_herbalism"),
     ("vial", "wow_crystal_vial"), ("drink", "wow_crystal_vial"),
     ("elixir", "wow_arcane_elixir"), ("flask", "wow_flask_blight"), ("potion", "wow_mana_potion"),
-    ("oil", "wow_frost_oil"), ("fabric", "wow_linen_cloth"), ("cloth", "wow_linen_cloth"),
-    ("leather", "wow_hide"), ("hide", "wow_hide"), ("coin", "wow_gold_bag"), ("gold", "wow_gold_bag"),
+    ("oil", "wow_frost_oil"),
+    ("fabric", "wow_linen_cloth"), ("cloth", "wow_linen_cloth"), ("silk", "wow_linen_cloth"),
+    ("wool", "wow_linen_cloth"), ("mageweave", "wow_linen_cloth"), ("runecloth", "wow_linen_cloth"),
+    ("leather", "wow_hide"), ("hide", "wow_hide"),
+    ("flame", "wow_fire_totem"), ("fire", "wow_fire_totem"),
+    ("water", "wow_water_flask"), ("snapper", "wow_water_flask"),
+    ("essence", "wow_leyline"), ("dust", "wow_leyline"), ("shard", "wow_leyline"),
+    ("ore", "wow_gold_bag"), ("bar", "wow_gold_bag"), ("stone", "wow_gold_bag"),
+    ("coin", "wow_gold_bag"), ("gold", "wow_gold_bag"),
 ]
 
 
