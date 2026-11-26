@@ -61,22 +61,76 @@ do
 		"CollectStorageSnapshot exposes 14 SavedVariables tables when MapPins companion is registered, got " .. tostring(#stWithPins.savedTables))
 	app.mapPinsProvider = prevMapPins
 
-	-- Standalone Console UI hides console_setup, Snapshot Storage KPI, and SQLite rows
+	-- Standalone Console UI keeps Snapshot Settings visible with standalone guide,
+	-- while still hiding Snapshot Storage KPI and SQLite rows
 	app.togglePanel("console_overview")
 	assertCheck(app.activeTab == "console_overview" and UI.IsShown() and UI._state.built,
 		"Opening Console builds UI lazily and activates console_overview")
-	assertCheck(UI._state.subTabBar and UI._state.subTabBar.buttons.console_setup
-		and not UI._state.subTabBar.buttons.console_setup:IsShown(),
-		"Standalone Console hides Setup sub-tab button")
+	local setupTabBtn = UI._state.subTabBar and UI._state.subTabBar.buttons.console_setup
+	assertCheck(setupTabBtn and setupTabBtn:IsShown(),
+		"Standalone Console keeps Snapshot Settings sub-tab button visible")
+	assertCheck(setupTabBtn.fs and setupTabBtn.fs:GetText() == "Snapshot Settings",
+		"Snapshot Settings sub-tab button is labeled 'Snapshot Settings', got " .. tostring(setupTabBtn.fs and setupTabBtn.fs:GetText()))
 	local ovStandalone = UI._state.overviewView
 	assertCheck(ovStandalone and ovStandalone.kpis and ovStandalone.kpis[2] and not ovStandalone.kpis[2].frame:IsShown(),
 		"Standalone Console Overview hides Snapshot Storage (Disk) KPI card")
 	app.setTab("console_database")
 	assertCheck(#UI._state.dbItems == 13,
 		"Standalone Database inspector lists strictly 13 SavedVariables tables (0 SQLite), got " .. tostring(#UI._state.dbItems))
+
+	-- Standalone Snapshot Settings tab opens cleanly with OS install boxes and hidden connectedPanel
 	app.setTab("console_setup")
-	assertCheck(UI.GetActiveSubTab() == "console_overview",
-		"Standalone console_setup redirects safely to console_overview")
+	assertCheck(UI.GetActiveSubTab() == "console_setup" and app.activeTab == "console_setup",
+		"Standalone console_setup opens directly without redirecting")
+	local suStandalone = UI._state.setupView
+	assertCheck(suStandalone and suStandalone.standalonePanel and suStandalone.standalonePanel:IsShown(),
+		"Standalone console_setup shows standalonePanel")
+	assertCheck(suStandalone.connectedPanel and not suStandalone.connectedPanel:IsShown(),
+		"Standalone console_setup hides connectedPanel")
+	assertCheck((suStandalone.stTitle:GetText() or ""):find("Not Installed", 1, true) ~= nil,
+		"Standalone status title shows Optional Add-On - Not Installed")
+	assertCheck((suStandalone.stFolders:GetText() or ""):find("No in-game folder setup needed", 1, true) ~= nil,
+		"Standalone status folder line explains zero in-game folder setup")
+	assertCheck((suStandalone.winInstallBox:GetText() or ""):find("setup-gui", 1, true) ~= nil,
+		"Standalone Windows install box populated")
+	assertCheck((suStandalone.linuxInstallBox:GetText() or ""):find("install_linux.py", 1, true) ~= nil,
+		"Standalone Linux / Steam Deck install box uses install_linux.py")
+	assertCheck((suStandalone.macInstallBox:GetText() or ""):find("python3 -m pip install", 1, true) ~= nil,
+		"Standalone macOS install box populated")
+	assertCheck((suStandalone.guideBox:GetText() or ""):find("MerchantMaster-Snapshots", 1, true) ~= nil
+		and (suStandalone.guideBox:GetText() or ""):find("install_linux.py", 1, true) ~= nil,
+		"Standalone guide box contains repo guide and direct Linux script URL")
+
+	-- Standalone fallback presets & OS-aware command builder
+	local fallbackPresets = CE.GetServerPresets()
+	assertCheck(type(fallbackPresets) == "table" and #fallbackPresets == 13,
+		"CE.GetServerPresets() returns 13 default WoW Forever presets standalone, got " .. tostring(fallbackPresets and #fallbackPresets))
+	local winCmds = CE.BuildSetupCommands({ osMode = "windows", region = "eu", presetKey = "Normal-Horde" })
+	local linCmds = CE.BuildSetupCommands({ osMode = "linux", region = "us", presetKey = "PvP-Alliance" })
+	local macCmds = CE.BuildSetupCommands({ osMode = "macos", region = "eu", presetKey = "RP-Horde" })
+	assertCheck(winCmds and winCmds.guiCmd:find("python -m snapshot_builder setup-gui", 1, true) ~= nil
+		and winCmds.apiKeyCmd:find("setx BLIZZARD_CLIENT_ID", 1, true) ~= nil,
+		"Fallback Windows commands use python -m snapshot_builder and setx")
+	assertCheck(linCmds and linCmds.guiCmd == "~/.local/bin/mm-snapshots setup-gui"
+		and linCmds.configureCmd:find("--prompt-creds", 1, true) ~= nil
+		and linCmds.configureCmd:find("1:110=PvP-Alliance", 1, true) ~= nil
+		and linCmds.apiKeyCmd:find('--clear-houses --house "1:110=PvP-Alliance" --prompt-creds', 1, true) ~= nil,
+		"Fallback Linux commands use ~/.local/bin/mm-snapshots with --prompt-creds and --clear-houses --house")
+	assertCheck(macCmds and macCmds.guiCmd == "python3 -m snapshot_builder setup-gui"
+		and macCmds.configureCmd:find("--prompt-creds", 1, true) ~= nil
+		and macCmds.configureCmd:find("3:120=RP-Horde", 1, true) ~= nil
+		and macCmds.apiKeyCmd:find('--clear-houses --house "3:120=RP-Horde" --prompt-creds', 1, true) ~= nil,
+		"Fallback macOS commands use python3 -m snapshot_builder with --prompt-creds and --clear-houses --house")
+
+	-- Standalone /mm snapshots and /mm setup open console_setup
+	app.setTab("dashboard")
+	SlashCmdList.MERCHANTMASTER("snapshots")
+	assertCheck(app.activeTab == "console_setup" and UI.GetActiveSubTab() == "console_setup",
+		"/mm snapshots opens console_setup standalone")
+	app.setTab("dashboard")
+	SlashCmdList.MERCHANTMASTER("setup")
+	assertCheck(app.activeTab == "console_setup" and UI.GetActiveSubTab() == "console_setup",
+		"/mm setup opens console_setup standalone")
 	app.setTab("dashboard")
 end
 
@@ -114,6 +168,8 @@ do
 		taskStatus = "Ready",
 		taskEnabled = true,
 		houseMap = "2:114=Normal-Horde",
+		dbPath = "~/.local/share/MerchantMaster/snapshots.sqlite3",
+		outDir = "<WoW>/_forever_/Interface/AddOns/MerchantMaster_Snapshots",
 		dbBytes = 4194304,
 		walBytes = 32768,
 		shmBytes = 32768,
@@ -387,9 +443,51 @@ do
 	app.applyTableStyle("t5_ruled")
 	app.applyPriceDisplayMode("compact")
 
-	-- Slash Routing (including /mm ui and /mm data)
+	-- Slash Routing (including /mm snapshots, /mm ui and /mm data)
+	SlashCmdList.MERCHANTMASTER("snapshots")
+	assertCheck(app.activeTab == "console_setup", "/mm snapshots opens console_setup")
+	SlashCmdList.MERCHANTMASTER("snapshot")
+	assertCheck(app.activeTab == "console_setup", "/mm snapshot opens console_setup")
 	SlashCmdList.MERCHANTMASTER("setup")
 	assertCheck(app.activeTab == "console_setup", "/mm setup opens console_setup")
+
+	-- Connected Snapshot Settings: live dbPath/outDir display, connectedPanel visible, OS switcher
+	local suConn = UI._state.setupView
+	assertCheck(suConn and suConn.connectedPanel and suConn.connectedPanel:IsShown(),
+		"Connected console_setup shows connectedPanel")
+	assertCheck(suConn.standalonePanel and not suConn.standalonePanel:IsShown(),
+		"Connected console_setup hides standalonePanel")
+	assertCheck((suConn.stTitle:GetText() or ""):find("Active Background Helper", 1, true) ~= nil,
+		"Connected status title shows Active Background Helper")
+	local folderTxt = suConn.stFolders:GetText() or ""
+	assertCheck(folderTxt:find("snapshots.sqlite3", 1, true) ~= nil
+		and folderTxt:find("AddOns/MerchantMaster_Snapshots", 1, true) ~= nil
+		and folderTxt:find("No in-game redirect needed", 1, true) ~= nil,
+		"Connected stFolders shows live sys.dbPath, sys.outDir, and move note: " .. folderTxt)
+
+	UI._state.setupOpts.osMode = "windows"
+	suConn.updateCommands()
+	assertCheck((suConn.osBtn.fs:GetText() or "") == "OS: Windows"
+		and (suConn.guiBox:GetText() or ""):find("python -m snapshot_builder setup-gui", 1, true) ~= nil
+		and (suConn.keyBox:GetText() or ""):find("setx BLIZZARD_CLIENT_ID", 1, true) ~= nil,
+		"Connected OS=windows generates Windows PowerShell commands")
+
+	UI._state.setupOpts.osMode = "linux"
+	suConn.updateCommands()
+	assertCheck((suConn.osBtn.fs:GetText() or "") == "OS: Linux"
+		and (suConn.guiBox:GetText() or ""):find("~/.local/bin/mm-snapshots setup-gui", 1, true) ~= nil
+		and (suConn.keyBox:GetText() or ""):find("--prompt-creds", 1, true) ~= nil,
+		"Connected OS=linux switches to ~/.local/bin/mm-snapshots and --prompt-creds")
+
+	UI._state.setupOpts.osMode = "macos"
+	suConn.updateCommands()
+	assertCheck((suConn.osBtn.fs:GetText() or "") == "OS: macOS"
+		and (suConn.guiBox:GetText() or ""):find("python3 -m snapshot_builder setup-gui", 1, true) ~= nil
+		and (suConn.keyBox:GetText() or ""):find("--prompt-creds", 1, true) ~= nil,
+		"Connected OS=macos switches to python3 -m snapshot_builder and --prompt-creds")
+	UI._state.setupOpts.osMode = "windows"
+	suConn.updateCommands()
+
 	SlashCmdList.MERCHANTMASTER("debug")
 	assertCheck(app.activeTab == "console_perf", "/mm debug opens console_perf")
 	SlashCmdList.MERCHANTMASTER("db")
@@ -533,6 +631,74 @@ do
 	_G.app = prevGlobalApp
 	_G.MerchantMaster_MapPinsDB = prevMapPinsDB
 	app.mapPinsProvider = prevProvider
+end
+
+---------------------------------------------------------------------------------------------------
+-- 10. Cold LoadOnDemand /mm snapshots & Live RegisterSnapshotExtension SyncExtensions Regression
+---------------------------------------------------------------------------------------------------
+do
+	local savedExt = app.snapshotExtension
+	local savedRaw = ns.snapshotRaw
+	local savedCLoad = _G.C_AddOns and _G.C_AddOns.LoadAddOn
+	local savedGLoad = _G.LoadAddOn
+	local loadCalls = 0
+
+	-- Part A: Cold /mm snapshots after /reload (panel hidden, LoadOnDemand companion not yet loaded)
+	app.panel:Hide()
+	UI.Hide()
+	app.snapshotExtension = nil
+	ns.snapshotRaw = {}
+	if type(ns.ResetSnapshotsLoadAttempt) == "function" then
+		ns.ResetSnapshotsLoadAttempt()
+	end
+
+	local lazyLoader = function(name)
+		if name == "MerchantMaster_Snapshots" then
+			loadCalls = loadCalls + 1
+			MerchantMasterAPI.RegisterSnapshotExtension({
+				apiVersion = 1,
+				version = "1.1.0",
+				supportsOsMode = true,
+			})
+			return true
+		end
+		return false
+	end
+	if _G.C_AddOns then _G.C_AddOns.LoadAddOn = lazyLoader end
+	_G.LoadAddOn = lazyLoader
+
+	SlashCmdList.MERCHANTMASTER("snapshots")
+	local suLazy = UI._state.setupView
+	assertCheck(loadCalls >= 1 and CE.HasSnapshotExtension() == true,
+		"Cold /mm snapshots triggers EnsureSnapshotsLoaded and loads LoadOnDemand MerchantMaster_Snapshots")
+	assertCheck(app.activeTab == "console_setup" and UI.GetActiveSubTab() == "console_setup"
+		and suLazy and suLazy.connectedPanel:IsShown() and not suLazy.standalonePanel:IsShown(),
+		"Cold /mm snapshots immediately renders connectedPanel instead of standalonePanel")
+	assertCheck((suLazy.stTitle:GetText() or ""):find("Active Background Helper", 1, true) ~= nil,
+		"Cold /mm snapshots status title reflects Active Background Helper")
+
+	-- Part B: Late RegisterSnapshotExtension while console_setup is already open in standalone mode
+	if _G.C_AddOns then _G.C_AddOns.LoadAddOn = function() return false end end
+	_G.LoadAddOn = function() return false end
+	app.snapshotExtension = nil
+	UI.SyncExtensions()
+	assertCheck(suLazy.standalonePanel:IsShown() and not suLazy.connectedPanel:IsShown(),
+		"SyncExtensions switches open Snapshot Settings back to standalonePanel when extension is cleared")
+	MerchantMasterAPI.RegisterSnapshotExtension({
+		apiVersion = 1,
+		version = "1.1.0",
+		supportsOsMode = true,
+	})
+	assertCheck(suLazy.connectedPanel:IsShown() and not suLazy.standalonePanel:IsShown(),
+		"RegisterSnapshotExtension calls consoleProvider.SyncExtensions and immediately flips open view to connectedPanel")
+
+	-- Restore environment
+	if _G.C_AddOns then _G.C_AddOns.LoadAddOn = savedCLoad end
+	_G.LoadAddOn = savedGLoad
+	app.snapshotExtension = savedExt
+	ns.snapshotRaw = savedRaw
+	UI.SyncExtensions()
+	app.panel:Hide()
 end
 
 print(string.format("CONSOLE_TESTS: PASS (%d assertions)", assertions))

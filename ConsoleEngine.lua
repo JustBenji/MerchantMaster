@@ -464,20 +464,178 @@ function CE.GetSnapshotExtension()
 	return (ns.app and type(ns.app.snapshotExtension) == "table") and ns.app.snapshotExtension or nil
 end
 
+local DEFAULT_SERVER_PRESETS = {
+	{ key = "Normal-Horde", label = "Normal-Horde (2:114)", rid = 2, hid = 114 },
+	{ key = "Normal-Alliance", label = "Normal-Alliance (2:111)", rid = 2, hid = 111 },
+	{ key = "Normal-Blackwater", label = "Normal-Blackwater (2:117)", rid = 2, hid = 117 },
+	{ key = "PvP-Horde", label = "PvP-Horde (1:113)", rid = 1, hid = 113 },
+	{ key = "PvP-Alliance", label = "PvP-Alliance (1:110)", rid = 1, hid = 110 },
+	{ key = "PvP-Blackwater", label = "PvP-Blackwater (1:116)", rid = 1, hid = 116 },
+	{ key = "RP-Horde", label = "RP-Horde (3:120)", rid = 3, hid = 120 },
+	{ key = "RP-Alliance", label = "RP-Alliance (3:119)", rid = 3, hid = 119 },
+	{ key = "RP-Blackwater", label = "RP-Blackwater (3:121)", rid = 3, hid = 121 },
+	{ key = "RPPvP-Horde", label = "RPPvP-Horde (15:124)", rid = 15, hid = 124 },
+	{ key = "RPPvP-Alliance", label = "RPPvP-Alliance (15:123)", rid = 15, hid = 123 },
+	{ key = "RPPvP-Blackwater", label = "RPPvP-Blackwater (15:125)", rid = 15, hid = 125 },
+	{ key = "custom", label = "Custom (ruleset:house=Economy)" },
+}
+
+CE.INSTALL_COMMANDS = {
+	windows = "py -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; py -m snapshot_builder setup-gui",
+	linux = "curl -fsSL https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py -o install_linux.py && python3 install_linux.py",
+	macos = "python3 -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip && python3 -m snapshot_builder setup-gui",
+	guideUrl = "https://github.com/JustBenji/MerchantMaster-Snapshots",
+	linuxScriptUrl = "https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py",
+}
+
+local function quoteShellArg(s)
+	return '"' .. tostring(s or ""):gsub('"', '\\"') .. '"'
+end
+
+local function normalizeOsMode(v)
+	local m = safeStr(v, "windows"):lower()
+	if m == "linux" or m == "macos" then
+		return m
+	end
+	return "windows"
+end
+
 function CE.GetServerPresets()
 	local ext = CE.GetSnapshotExtension()
-	if ext and type(ext.serverPresets) == "table" then
+	if ext and type(ext.serverPresets) == "table" and #ext.serverPresets > 0 then
 		return ext.serverPresets
 	end
-	return {}
+	return DEFAULT_SERVER_PRESETS
+end
+
+local function buildFallbackSetupCommands(cfg)
+	local opts = type(cfg) == "table" and cfg or {}
+	local osMode = normalizeOsMode(opts.osMode)
+	local snapDir = safeStr(opts.snapDir, "")
+	if snapDir == "" then snapDir = safeStr(opts.mmDir, "") end
+	if snapDir == "" then snapDir = safeStr(opts.dir, "") end
+
+	local region = safeStr(opts.region, "eu"):lower()
+	if region ~= "eu" and region ~= "us" and region ~= "kr" and region ~= "tw" then
+		region = "eu"
+	end
+
+	local presetKey = safeStr(opts.presetKey, "Normal-Horde")
+	local houseArg = "2:114=Normal-Horde"
+	if presetKey == "custom" then
+		local cust = safeStr(opts.customHouse, ""):match("^%s*(.-)%s*$")
+		houseArg = cust ~= "" and cust or "2:114=Normal-Horde"
+	else
+		local presets = CE.GetServerPresets()
+		for _, p in ipairs(presets) do
+			if p.key == presetKey and p.rid and p.hid then
+				houseArg = format("%d:%d=%s", p.rid, p.hid, p.key)
+				break
+			end
+		end
+	end
+
+	local intervalMin = max(1, min(1439, floor(tonumber(opts.intervalMin) or 15)))
+	local retentionDays = max(7, min(365, floor(tonumber(opts.retentionDays) or 30)))
+	local maxExportMB = max(2, min(64, floor(tonumber(opts.maxExportMB) or 8)))
+	local dbPath = safeStr(opts.dbPath, ""):match("^%s*(.-)%s*$")
+	local outDir = safeStr(opts.outDir, ""):match("^%s*(.-)%s*$")
+
+	local cmdPrefix
+	if osMode == "linux" then
+		if snapDir ~= "" then
+			cmdPrefix = format("cd %s && ~/.local/bin/mm-snapshots ", quoteShellArg(snapDir))
+		else
+			cmdPrefix = "~/.local/bin/mm-snapshots "
+		end
+	elseif osMode == "macos" then
+		local py = safeStr(opts.pythonExe, "")
+		if py == "" then py = "python3" end
+		if snapDir ~= "" then
+			cmdPrefix = format("cd %s && %s -m snapshot_builder ", quoteShellArg(snapDir), quoteShellArg(py))
+		elseif py ~= "python3" then
+			cmdPrefix = format("%s -m snapshot_builder ", quoteShellArg(py))
+		else
+			cmdPrefix = "python3 -m snapshot_builder "
+		end
+	else
+		local py = safeStr(opts.pythonExe, "")
+		if py == "" then py = "python" end
+		if snapDir ~= "" then
+			cmdPrefix = format("cd %s; & %s -m snapshot_builder ", quoteShellArg(snapDir), quoteShellArg(py))
+		elseif py ~= "python" then
+			cmdPrefix = format("& %s -m snapshot_builder ", quoteShellArg(py))
+		else
+			cmdPrefix = "python -m snapshot_builder "
+		end
+	end
+
+	local guiCmd = cmdPrefix .. "setup-gui"
+
+	local cfgParts = { "configure" }
+	if osMode ~= "windows" then
+		cfgParts[#cfgParts + 1] = "--prompt-creds"
+	end
+	cfgParts[#cfgParts + 1] = "--region"
+	cfgParts[#cfgParts + 1] = region
+	cfgParts[#cfgParts + 1] = "--clear-houses"
+	cfgParts[#cfgParts + 1] = "--house"
+	cfgParts[#cfgParts + 1] = quoteShellArg(houseArg)
+	cfgParts[#cfgParts + 1] = "--every-minutes"
+	cfgParts[#cfgParts + 1] = tostring(intervalMin)
+	cfgParts[#cfgParts + 1] = "--retention-days"
+	cfgParts[#cfgParts + 1] = tostring(retentionDays)
+	cfgParts[#cfgParts + 1] = "--max-export-mb"
+	cfgParts[#cfgParts + 1] = tostring(maxExportMB)
+	if dbPath ~= "" then
+		cfgParts[#cfgParts + 1] = "--db-path"
+		cfgParts[#cfgParts + 1] = quoteShellArg(dbPath)
+	end
+	if outDir ~= "" then
+		cfgParts[#cfgParts + 1] = "--out-dir"
+		cfgParts[#cfgParts + 1] = quoteShellArg(outDir)
+	end
+	cfgParts[#cfgParts + 1] = "--apply-task"
+	cfgParts[#cfgParts + 1] = "--sync-now"
+	local configureCmd = cmdPrefix .. table.concat(cfgParts, " ")
+
+	local apiKeyCmd
+	if osMode == "windows" then
+		apiKeyCmd = table.concat({
+			'setx BLIZZARD_CLIENT_ID "<YOUR_CLIENT_ID>";',
+			'setx BLIZZARD_CLIENT_SECRET "<YOUR_CLIENT_SECRET>";',
+			format("setx BLIZZARD_REGION %s;", region),
+			format("%sdiscover --region %s --save-house %s", cmdPrefix, region, quoteShellArg(houseArg)),
+		}, "\n")
+	else
+		apiKeyCmd = table.concat({
+			format("%sconfigure --region %s --clear-houses --house %s --prompt-creds", cmdPrefix, region, quoteShellArg(houseArg)),
+			format("%sdiscover --region %s --save-house %s", cmdPrefix, region, quoteShellArg(houseArg)),
+		}, "\n")
+	end
+
+	local discoverCmd = format("%sdiscover --region %s", cmdPrefix, region)
+
+	return {
+		guiCmd = guiCmd,
+		configureCmd = configureCmd,
+		apiKeyCmd = apiKeyCmd,
+		discoverCmd = discoverCmd,
+		houseSpec = houseArg,
+		region = region,
+		osMode = osMode,
+	}
 end
 
 function CE.BuildSetupCommands(cfg)
+	local opts = type(cfg) == "table" and cfg or {}
+	local osMode = normalizeOsMode(opts.osMode)
 	local ext = CE.GetSnapshotExtension()
-	if ext and type(ext.buildSetupCommands) == "function" then
-		return ext.buildSetupCommands(cfg)
+	if ext and type(ext.buildSetupCommands) == "function"
+		and (ext.supportsOsMode or osMode == "windows") then
+		return ext.buildSetupCommands(opts)
 	end
-	return nil
+	return buildFallbackSetupCommands(opts)
 end
 
 function CE.CollectStorageSnapshot()

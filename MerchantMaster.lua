@@ -17669,7 +17669,7 @@ local VIEW_TITLES = {
 	console_overview = "Console - Overview",
 	console_database = "Console - Database",
 	console_perf     = "Console - Performance & Debug",
-	console_setup    = "Console - Setup",
+	console_setup    = "Console - Snapshot Settings",
 	console_settings = "Console - Settings",
 	console_ui       = "Console - Addon UI",
 	console_data     = "Console - Data & Maintenance",
@@ -21092,6 +21092,7 @@ do
 		{ cmd = "/mm shopping", desc = "toggle detachable Shopping List window" },
 		{ cmd = "/mm options",  desc = "open Settings (/mm blizzoptions for Blizzard Options)" },
 		{ cmd = "/mm console",  desc = "open Console diagnostics & maintenance" },
+		{ cmd = "/mm snapshots", desc = "open Console -> Snapshot Settings (optional background helper)" },
 		{ cmd = "/mm scan",     desc = "refresh Live AH prices (at an Auctioneer)" },
 		{ cmd = "/mm clearah",  desc = "clear saved Live AH prices for active economy" },
 		{ cmd = "/mm theme",    desc = "switch UI Theme (standard, human, night_elf, orc, undead, goblin)" },
@@ -22713,12 +22714,8 @@ SlashCmdList.MERCHANTMASTER = function(msg)
 		app.togglePanel("console_database")
 	elseif msg == "perf" or msg == "debug" or msg == "profiler" then
 		app.togglePanel("console_perf")
-	elseif msg == "setup" then
-		if app.snapshotExtension then
-			app.togglePanel("console_setup")
-		else
-			say("Setup is part of the optional MerchantMaster_Snapshots companion addon.")
-		end
+	elseif msg == "setup" or msg == "snapshots" or msg == "snapshot" then
+		app.togglePanel("console_setup")
 	elseif msg == "ui" or msg == "appearance" then
 		app.togglePanel("console_ui")
 	elseif msg == "data" or msg == "maintenance" then
@@ -22958,7 +22955,9 @@ _G.MerchantMasterAPI = {
 		end
 		app.snapshotExtension = provider
 		if app.consoleProvider then
-			if type(app.consoleProvider.OnSnapshotExtensionRegistered) == "function" then
+			if type(app.consoleProvider.SyncExtensions) == "function" then
+				pcall(app.consoleProvider.SyncExtensions)
+			elseif type(app.consoleProvider.OnSnapshotExtensionRegistered) == "function" then
 				pcall(app.consoleProvider.OnSnapshotExtensionRegistered, provider)
 			elseif type(app.consoleProvider.RefreshTabs) == "function" then
 				pcall(app.consoleProvider.RefreshTabs)
@@ -23005,8 +23004,13 @@ _G.MerchantMasterAPI = {
 		if app.charKey and type(provider.Init) == "function" then
 			provider.Init(_G.MerchantMasterAPI.GetMapPinsHostContext())
 		end
-		if app.consoleProvider and type(app.consoleProvider.SyncSettings) == "function" then
-			pcall(app.consoleProvider.SyncSettings)
+		if app.consoleProvider then
+			if type(app.consoleProvider.SyncExtensions) == "function" then
+				pcall(app.consoleProvider.SyncExtensions)
+			end
+			if type(app.consoleProvider.SyncSettings) == "function" then
+				pcall(app.consoleProvider.SyncSettings)
+			end
 		end
 		if panel:IsShown() and app.refresh then
 			app.refresh()

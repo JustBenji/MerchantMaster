@@ -2,6 +2,13 @@
 
 All notable player-facing changes to **MerchantMaster** are documented in this file.
 
+## v3.3.1 — Always-Visible Snapshot Settings & Cross-Platform Helper Setup
+
+*   **Always-Visible Console -> Snapshot Settings (`/mm snapshots`):** Renamed Console's **Setup** sub-tab to **Snapshot Settings** and made it always accessible (including via `/mm snapshots`, `/mm snapshot`, and `/mm setup`), even when playing 100% standalone.
+*   **Standalone Cross-Platform Setup Guide:** When the optional Snapshot Helper is not installed, **Snapshot Settings** displays clear 3-step instructions and copyable 1-line install commands for **Windows**, **Linux / Steam Deck** (`install_linux.py`), and **macOS**, while continuing to keep Snapshot Storage KPI, SQLite Database rows, and `[Scan Snapshot]` buttons cleanly hidden standalone.
+*   **OS-Aware Command Builder & Live Folder Summary:** When the Snapshot Helper is installed, **Snapshot Settings** displays the active **Database Folder** and **WoW AddOn Folder** paths and adds an **OS** selector (`Windows`, `Linux`, `macOS`) to generate OS-accurate GUI, config, and masked API key commands.
+*   **Built-In WoW Forever Server Presets:** Added all 13 WoW Forever server presets directly in `ConsoleEngine.lua` as a standalone and older-companion fallback.
+
 ## v3.3.0 — Initial Standalone Public Release (WoW Forever `16001`)
 
 ### Standalone Live Auction House & First-Run Experience

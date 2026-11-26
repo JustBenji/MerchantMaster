@@ -3,7 +3,7 @@
 --   1. Overview            (RAM, SavedVariables, Live AH scans, Health, optional Snapshot cards)
 --   2. Database            (WoW SavedVariables schema inspector + optional SQLite companion tables)
 --   3. Perf & Debug        (Zero-overhead opt-in runtime profiler & privacy-safe Debug Bundle)
---   4. Setup               (Optional snapshot companion setup commands; hidden when absent)
+--   4. Snapshot Settings   (Always-visible optional snapshot setup, folders & OS command builder)
 --   5. Settings            (Synced /mm options, Leveling guide, tooltip settings)
 --   6. Addon UI            (Theme/skin, table style & price format switcher with live preview)
 --   7. Data & Maintenance  (Two-click cache/ledger cleanup with hover tooltips, CSV export, slash help)
@@ -133,6 +133,7 @@ local state = {
 		redactNames = true,
 	},
 	setupOpts = {
+		osMode = "windows",
 		region = "eu",
 		presetKey = "Normal-Horde",
 		customHouse = "2:114=Normal-Horde",
@@ -921,7 +922,7 @@ local function buildOverviewView(parent)
 		end
 		sLines[#sLines + 1] = ""
 		if sys then
-			sLines[#sLines + 1] = format("Windows Runner Task: %s (enabled=%s, every %dm, retain %dd)",
+			sLines[#sLines + 1] = format("Background Runner Task: %s (enabled=%s, every %dm, retain %dd)",
 				tostring(sys.taskStatus), tostring(sys.taskEnabled), sys.intervalMin or 15, sys.retentionDays or 30)
 			sLines[#sLines + 1] = format("Region: %s  |  API Credentials: %s  |  Houses: %s",
 				tostring(sys.region),
@@ -936,7 +937,7 @@ local function buildOverviewView(parent)
 				sLines[#sLines + 1] = colorHex("hexDanger", "Last Runner Error: " .. sys.lastError, pal)
 			end
 		else
-			sLines[#sLines + 1] = colorHex("hexMuted", "SYSTEM telemetry unavailable from snapshot companion. Open Setup tab or run export.", pal)
+			sLines[#sLines + 1] = colorHex("hexMuted", "SYSTEM telemetry unavailable from snapshot companion. Open Snapshot Settings tab or run export.", pal)
 		end
 		ov.snapDetailFs:SetText(table.concat(sLines, "\n"))
 	end
@@ -1467,7 +1468,7 @@ local function buildPerfView(parent)
 end
 
 ---------------------------------------------------------------------------------------------------
--- Sub-View 4: Setup & Companion Config (console_setup)
+-- Sub-View 4: Snapshot Settings & Companion Setup (console_setup)
 ---------------------------------------------------------------------------------------------------
 
 local function buildSetupView(parent)
@@ -1479,59 +1480,153 @@ local function buildSetupView(parent)
 		frame = frame,
 	}
 
+	-- Top Status & Folder Summary Card (always visible)
 	local statusCard = createSurfaceCard(frame, "glass_r12", "cardBg")
 	statusCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
 	statusCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
-	statusCard:SetHeight(74)
+	statusCard:SetHeight(96)
+	su.statusCard = statusCard
 
 	local stTitle = makeFs(statusCard, 13, "semibold", "text")
 	stTitle:SetPoint("TOPLEFT", statusCard, "TOPLEFT", 14, -10)
-	stTitle:SetText("Blizzard API & Scheduled Runner Status")
+	stTitle:SetPoint("TOPRIGHT", statusCard, "TOPRIGHT", -14, -10)
+	stTitle:SetText("Snapshot Settings (Optional Add-On - Not Installed)")
+	su.stTitle = stTitle
 
 	local stBody = makeFs(statusCard, 11, "regular", "textSecondary")
 	stBody:SetPoint("TOPLEFT", statusCard, "TOPLEFT", 14, -30)
 	stBody:SetPoint("TOPRIGHT", statusCard, "TOPRIGHT", -14, -30)
+	stBody:SetHeight(30)
+	if stBody.SetJustifyV then stBody:SetJustifyV("TOP") end
 	if stBody.SetWordWrap then stBody:SetWordWrap(true) end
 	su.stBody = stBody
 
+	local stFolders = makeFs(statusCard, 11, "regular", "textBlue")
+	stFolders:SetPoint("BOTTOMLEFT", statusCard, "BOTTOMLEFT", 14, 10)
+	stFolders:SetPoint("BOTTOMRIGHT", statusCard, "BOTTOMRIGHT", -14, 10)
+	if stFolders.SetWordWrap then stFolders:SetWordWrap(true) end
+	su.stFolders = stFolders
+
+	-- Sub-Container A: Standalone Guide & Cross-Platform 1-Line Installers
+	local standalonePanel = CreateFrame("Frame", nil, frame)
+	standalonePanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -104)
+	standalonePanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+	su.standalonePanel = standalonePanel
+
+	local stepsCard = createSurfaceCard(standalonePanel, "glass_r12", "cardBg")
+	stepsCard:SetPoint("TOPLEFT", standalonePanel, "TOPLEFT", 0, 0)
+	stepsCard:SetPoint("TOPRIGHT", standalonePanel, "TOPRIGHT", 0, 0)
+	stepsCard:SetHeight(112)
+	su.stepsCard = stepsCard
+
+	local stepsTitle = makeFs(stepsCard, 13, "semibold", "text")
+	stepsTitle:SetPoint("TOPLEFT", stepsCard, "TOPLEFT", 14, -10)
+	stepsTitle:SetText("Quick 3-Step Setup (Windows, Linux / Steam Deck, macOS)")
+
+	local stepsBody = makeFs(stepsCard, 11, "regular", "textSecondary")
+	stepsBody:SetPoint("TOPLEFT", stepsCard, "TOPLEFT", 14, -32)
+	stepsBody:SetPoint("BOTTOMRIGHT", stepsCard, "BOTTOMRIGHT", -14, 10)
+	if stepsBody.SetJustifyV then stepsBody:SetJustifyV("TOP") end
+	if stepsBody.SetWordWrap then stepsBody:SetWordWrap(true) end
+	stepsBody:SetText(table.concat({
+		"1. Create a free Battle.net API key at https://develop.battle.net/access/clients (gives your computer permission to read Blizzard's public AH prices).",
+		"2. Copy and run the single install line for your operating system below. It auto-detects your WoW AddOns folder and opens a setup window.",
+		"3. Paste your API key, choose your server, click Save & Sync, then type /reload in WoW. This tab automatically switches to live helper settings.",
+	}, "\n"))
+	su.stepsBody = stepsBody
+
+	local installCard = createSurfaceCard(standalonePanel, "glass_r12", "cardBg")
+	installCard:SetPoint("TOPLEFT", standalonePanel, "TOPLEFT", 0, -120)
+	installCard:SetPoint("BOTTOMRIGHT", standalonePanel, "BOTTOMRIGHT", 0, 0)
+	su.installCard = installCard
+
+	local installTitle = makeFs(installCard, 13, "semibold", "text")
+	installTitle:SetPoint("TOPLEFT", installCard, "TOPLEFT", 14, -10)
+	installTitle:SetText("Copyable 1-Line Install Commands (Click Select, then Ctrl+C)")
+
+	local function makeCopyRow(yOff, labelText, btnVariant)
+		local lbl = makeFs(installCard, 11, "semibold", "text")
+		lbl:SetPoint("TOPLEFT", installCard, "TOPLEFT", 14, yOff)
+		lbl:SetPoint("TOPRIGHT", installCard, "TOPRIGHT", -14, yOff)
+		lbl:SetText(labelText)
+
+		local box = createSingleLineBox(installCard, 720, 24)
+		box:SetPoint("TOPLEFT", installCard, "TOPLEFT", 14, yOff - 18)
+		box:SetPoint("TOPRIGHT", installCard, "TOPRIGHT", -104, yOff - 18)
+
+		local selBtn = createButton(installCard, "Select", 78, 24, {
+			variant = btnVariant or "secondary",
+			pill = (btnVariant == "primary"),
+			fontSize = 11,
+		})
+		selBtn:SetPoint("TOPRIGHT", installCard, "TOPRIGHT", -14, yOff - 18)
+		selBtn:SetScript("OnClick", function() selectAllInBox(box) end)
+		return box, selBtn, lbl
+	end
+
+	su.winInstallBox, su.winSelectBtn = makeCopyRow(-36, "1. Windows (PowerShell - requires Python 3.11+):", "primary")
+	su.linuxInstallBox, su.linuxSelectBtn = makeCopyRow(-88, "2. Linux / Steam Deck (Terminal - runs install_linux.py):", "secondary")
+	su.macInstallBox, su.macSelectBtn = makeCopyRow(-140, "3. macOS (Terminal - requires Python 3.11+):", "secondary")
+	su.guideBox, su.guideSelectBtn = makeCopyRow(-192, "4. Full Setup Guide & Direct Linux Script URL:", "secondary")
+
+	local installNote = makeFs(installCard, 11, "regular", "textSecondary")
+	installNote:SetPoint("TOPLEFT", installCard, "TOPLEFT", 14, -244)
+	installNote:SetPoint("TOPRIGHT", installCard, "TOPRIGHT", -14, -244)
+	if installNote.SetWordWrap then installNote:SetWordWrap(true) end
+	installNote:SetText("Tip: On Windows, if 'py' is not recognized, replace both 'py' commands with 'python'. On Linux or Steam Deck, install_linux.py sets up an isolated Python environment and background timer automatically.")
+	su.installNote = installNote
+
+	-- Sub-Container B: Connected Companion Config & OS Command Builder
+	local connectedPanel = CreateFrame("Frame", nil, frame)
+	connectedPanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -104)
+	connectedPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+	su.connectedPanel = connectedPanel
+
 	-- Config Builder Card
-	local cfgCard = createSurfaceCard(frame, "glass_r12", "cardBg")
-	cfgCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -82)
-	cfgCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -82)
+	local cfgCard = createSurfaceCard(connectedPanel, "glass_r12", "cardBg")
+	cfgCard:SetPoint("TOPLEFT", connectedPanel, "TOPLEFT", 0, 0)
+	cfgCard:SetPoint("TOPRIGHT", connectedPanel, "TOPRIGHT", 0, 0)
 	cfgCard:SetHeight(148)
+	su.cfgCard = cfgCard
 
 	local cfgTitle = makeFs(cfgCard, 13, "semibold", "text")
 	cfgTitle:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 14, -10)
-	cfgTitle:SetText("Companion Config Builder (Generates PowerShell Commands Below)")
+	cfgTitle:SetText("Companion Config Builder (Generates Windows PowerShell Commands Below)")
+	su.cfgTitle = cfgTitle
 
-	local regionBtn = createButton(cfgCard, "Region: EU", 110, 24, { dropdown = true, fontSize = 11 })
-	regionBtn:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 14, -38)
+	local osBtn = createButton(cfgCard, "OS: Windows", 112, 24, { dropdown = true, fontSize = 11 })
+	osBtn:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 14, -38)
+	su.osBtn = osBtn
+
+	local regionBtn = createButton(cfgCard, "Region: EU", 96, 24, { dropdown = true, fontSize = 11 })
+	regionBtn:SetPoint("LEFT", osBtn, "RIGHT", 6, 0)
 	su.regionBtn = regionBtn
 
-	local presetBtn = createButton(cfgCard, "Server: Normal-Horde (2:114)", 230, 24, { dropdown = true, fontSize = 11 })
-	presetBtn:SetPoint("LEFT", regionBtn, "RIGHT", 8, 0)
+	local presetBtn = createButton(cfgCard, "Server: Normal-Horde (2:114)", 212, 24, { dropdown = true, fontSize = 11 })
+	presetBtn:SetPoint("LEFT", regionBtn, "RIGHT", 6, 0)
 	su.presetBtn = presetBtn
 
-	local intervalBtn = createButton(cfgCard, "Every: 15 min", 120, 24, { dropdown = true, fontSize = 11 })
-	intervalBtn:SetPoint("LEFT", presetBtn, "RIGHT", 8, 0)
+	local intervalBtn = createButton(cfgCard, "Every: 15 min", 110, 24, { dropdown = true, fontSize = 11 })
+	intervalBtn:SetPoint("LEFT", presetBtn, "RIGHT", 6, 0)
 	su.intervalBtn = intervalBtn
 
-	local retainBtn = createButton(cfgCard, "Retain: 30d", 115, 24, { dropdown = true, fontSize = 11 })
-	retainBtn:SetPoint("LEFT", intervalBtn, "RIGHT", 8, 0)
+	local retainBtn = createButton(cfgCard, "Retain: 30d", 104, 24, { dropdown = true, fontSize = 11 })
+	retainBtn:SetPoint("LEFT", intervalBtn, "RIGHT", 6, 0)
 	su.retainBtn = retainBtn
 
-	local capBtn = createButton(cfgCard, "Cap: 8 MB", 105, 24, { dropdown = true, fontSize = 11 })
-	capBtn:SetPoint("LEFT", retainBtn, "RIGHT", 8, 0)
+	local capBtn = createButton(cfgCard, "Cap: 8 MB", 96, 24, { dropdown = true, fontSize = 11 })
+	capBtn:SetPoint("LEFT", retainBtn, "RIGHT", 6, 0)
 	su.capBtn = capBtn
 
-	local resetCfgBtn = createButton(cfgCard, "Reset Defaults", 110, 24, { variant = "ghost", fontSize = 11 })
-	resetCfgBtn:SetPoint("LEFT", capBtn, "RIGHT", 8, 0)
+	local resetCfgBtn = createButton(cfgCard, "Reset Defaults", 106, 24, { variant = "ghost", fontSize = 11 })
+	resetCfgBtn:SetPoint("LEFT", capBtn, "RIGHT", 6, 0)
+	su.resetCfgBtn = resetCfgBtn
 
 	local customLbl = makeFs(cfgCard, 11, "regular", "textSecondary")
 	customLbl:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 14, -76)
 	customLbl:SetText("Custom House (ruleset:house=Econ):")
 
-	local customBox = createSingleLineBox(cfgCard, 195, 22, function(self)
+	local customBox = createSingleLineBox(cfgCard, 190, 22, function(self)
 		state.setupOpts.customHouse = (self.GetText and self:GetText()) or ""
 		state.setupOpts.presetKey = "custom"
 		su.updateCommands()
@@ -1541,35 +1636,38 @@ local function buildSetupView(parent)
 	su.customBox = customBox
 
 	local dbLbl = makeFs(cfgCard, 11, "regular", "textSecondary")
-	dbLbl:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 224, -76)
-	dbLbl:SetText("SQLite DB Path (blank = default):")
+	dbLbl:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 216, -76)
+	dbLbl:SetText("Database Folder / File (blank = default):")
 
 	local dbBox = createSingleLineBox(cfgCard, 270, 22, function(self)
 		state.setupOpts.dbPath = (self.GetText and self:GetText()) or ""
 		su.updateCommands()
 	end)
-	dbBox:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 224, -96)
+	dbBox:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 216, -96)
 	su.dbBox = dbBox
 
 	local outLbl = makeFs(cfgCard, 11, "regular", "textSecondary")
-	outLbl:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 508, -76)
-	outLbl:SetText("Export Out Dir (blank = AddOns\\MerchantMaster_Snapshots):")
+	outLbl:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 498, -76)
+	outLbl:SetText("WoW Export Folder (blank = auto AddOns/MerchantMaster_Snapshots):")
 
-	local outBox = createSingleLineBox(cfgCard, 300, 22, function(self)
+	local outBox = createSingleLineBox(cfgCard, 320, 22, function(self)
 		state.setupOpts.outDir = (self.GetText and self:GetText()) or ""
 		su.updateCommands()
 	end)
-	outBox:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 508, -96)
+	outBox:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 498, -96)
+	outBox:SetPoint("TOPRIGHT", cfgCard, "TOPRIGHT", -14, -96)
 	su.outBox = outBox
 
 	-- Bottom Command Boxes Card
-	local cmdCard = createSurfaceCard(frame, "glass_r12", "cardBg")
-	cmdCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -238)
-	cmdCard:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+	local cmdCard = createSurfaceCard(connectedPanel, "glass_r12", "cardBg")
+	cmdCard:SetPoint("TOPLEFT", connectedPanel, "TOPLEFT", 0, -156)
+	cmdCard:SetPoint("BOTTOMRIGHT", connectedPanel, "BOTTOMRIGHT", 0, 0)
+	su.cmdCard = cmdCard
 
 	local c1Lbl = makeFs(cmdCard, 11, "semibold", "text")
 	c1Lbl:SetPoint("TOPLEFT", cmdCard, "TOPLEFT", 14, -10)
 	c1Lbl:SetText("1. Launch Visual Setup GUI (Windows Desktop Form for API Key, Server & Task):")
+	su.c1Lbl = c1Lbl
 
 	local guiBox = createSingleLineBox(cmdCard, 720, 24)
 	guiBox:SetPoint("TOPLEFT", cmdCard, "TOPLEFT", 14, -28)
@@ -1583,6 +1681,7 @@ local function buildSetupView(parent)
 	local c2Lbl = makeFs(cmdCard, 11, "semibold", "text")
 	c2Lbl:SetPoint("TOPLEFT", cmdCard, "TOPLEFT", 14, -60)
 	c2Lbl:SetText("2. Apply Settings, Server & Windows Task in PowerShell:")
+	su.c2Lbl = c2Lbl
 
 	local cfgBox = createSingleLineBox(cmdCard, 720, 24)
 	cfgBox:SetPoint("TOPLEFT", cmdCard, "TOPLEFT", 14, -78)
@@ -1596,6 +1695,7 @@ local function buildSetupView(parent)
 	local c3Lbl = makeFs(cmdCard, 11, "semibold", "text")
 	c3Lbl:SetPoint("TOPLEFT", cmdCard, "TOPLEFT", 14, -110)
 	c3Lbl:SetText("3. Set Blizzard API Key in Windows User Env (Never saved in addon files) & Discover:")
+	su.c3Lbl = c3Lbl
 
 	local keyCard, keyBox = createMultiLineArea(cmdCard)
 	keyCard:SetPoint("TOPLEFT", cmdCard, "TOPLEFT", 14, -130)
@@ -1606,6 +1706,11 @@ local function buildSetupView(parent)
 	keySelBtn:SetPoint("TOPRIGHT", cmdCard, "TOPRIGHT", -14, -130)
 	keySelBtn:SetScript("OnClick", function() selectAllInBox(keyBox) end)
 
+	local OS_OPTS = {
+		{ key = "windows", label = "Windows (PowerShell)" },
+		{ key = "linux", label = "Linux / Steam Deck (Terminal)" },
+		{ key = "macos", label = "macOS (Terminal)" },
+	}
 	local REGION_OPTS = {
 		{ key = "eu", label = "EU (Europe)" },
 		{ key = "us", label = "US (Americas)" },
@@ -1636,6 +1741,30 @@ local function buildSetupView(parent)
 	function su.updateCommands()
 		local CE = getCE()
 		if not CE then return end
+		local osMode = tostring(state.setupOpts.osMode or "windows"):lower()
+		if osMode ~= "linux" and osMode ~= "macos" then
+			osMode = "windows"
+		end
+		local osLabel = (osMode == "linux" and "Linux") or (osMode == "macos" and "macOS") or "Windows"
+		setButtonLabel(osBtn, "OS: " .. osLabel)
+
+		if osMode == "linux" then
+			cfgTitle:SetText("Companion Config Builder (Generates Linux / Steam Deck Terminal Commands Below)")
+			c1Lbl:SetText("1. Launch Visual Setup GUI (Linux / Steam Deck Desktop Form):")
+			c2Lbl:SetText("2. Apply Settings, Server & systemd Background Timer in Terminal:")
+			c3Lbl:SetText("3. Save Blizzard API Key Securely (Masked Prompt) & Discover in Terminal:")
+		elseif osMode == "macos" then
+			cfgTitle:SetText("Companion Config Builder (Generates macOS Terminal Commands Below)")
+			c1Lbl:SetText("1. Launch Visual Setup GUI (macOS Desktop Form):")
+			c2Lbl:SetText("2. Apply Settings, Server & launchd Background Job in Terminal:")
+			c3Lbl:SetText("3. Save Blizzard API Key Securely (Masked Prompt) & Discover in Terminal:")
+		else
+			cfgTitle:SetText("Companion Config Builder (Generates Windows PowerShell Commands Below)")
+			c1Lbl:SetText("1. Launch Visual Setup GUI (Windows Desktop Form for API Key, Server & Task):")
+			c2Lbl:SetText("2. Apply Settings, Server & Windows Task in PowerShell:")
+			c3Lbl:SetText("3. Set Blizzard API Key in Windows User Env (Never saved in addon files) & Discover:")
+		end
+
 		local presets = (type(CE.GetServerPresets) == "function" and CE.GetServerPresets()) or {}
 		local presetLabel = state.setupOpts.presetKey or "Normal-Horde"
 		for _, p in ipairs(presets) do
@@ -1662,6 +1791,15 @@ local function buildSetupView(parent)
 		end
 	end
 
+	osBtn:SetScript("OnClick", function(self)
+		local T = getTheme()
+		if T and T.OpenDropDown then
+			T.OpenDropDown(self, OS_OPTS, state.setupOpts.osMode or "windows", function(k)
+				state.setupOpts.osMode = k
+				su.updateCommands()
+			end, 220)
+		end
+	end)
 	regionBtn:SetScript("OnClick", function(self)
 		local T = getTheme()
 		if T and T.OpenDropDown then
@@ -1710,6 +1848,7 @@ local function buildSetupView(parent)
 		end
 	end)
 	resetCfgBtn:SetScript("OnClick", function()
+		state.setupOpts.osMode = "windows"
 		state.setupOpts.region = "eu"
 		state.setupOpts.presetKey = "Normal-Horde"
 		state.setupOpts.customHouse = "2:114=Normal-Horde"
@@ -1728,6 +1867,17 @@ local function buildSetupView(parent)
 		local CE = getCE()
 		if not CE then return end
 		local pal = getPal()
+		local installed = hasSnapshotExt()
+		su.standalonePanel:SetShown(not installed)
+		su.connectedPanel:SetShown(installed)
+		if not installed then
+			su.stTitle:SetText("Snapshot Settings (Optional Add-On - Not Installed)")
+			su.stBody:SetText("MerchantMaster works 100% standalone from your in-game Auction House scans. Install the free optional Snapshot Helper below if you also want automatic background scans while WoW is closed, 30-day history, and 7x24 heatmaps.")
+			su.stFolders:SetText("No in-game folder setup needed: WoW automatically loads AddOns/MerchantMaster_Snapshots once the helper runs.")
+			return
+		end
+
+		su.stTitle:SetText("Snapshot Settings (Active Background Helper)")
 		local sys = su._lastSys
 		if sys then
 			su.stBody:SetText(format(
@@ -1738,16 +1888,36 @@ local function buildSetupView(parent)
 				sys.intervalMin or 15, sys.retentionDays or 30,
 				tostring(sys.houseMap or ""),
 				CE.FormatTimestamp(sys.exportedAt)))
+			local dbLabel = (type(sys.dbPath) == "string" and sys.dbPath ~= "") and sys.dbPath or "(default data folder)"
+			local outLabel = (type(sys.outDir) == "string" and sys.outDir ~= "") and sys.outDir or "AddOns/MerchantMaster_Snapshots (auto)"
+			su.stFolders:SetText(format(
+				"Database Folder: %s  |  WoW AddOn Folder: %s  (No in-game redirect needed if you move the DB.)",
+				dbLabel, outLabel))
 		else
-			su.stBody:SetText("Runner SYSTEM status unavailable from snapshot companion. Configure below and paste command #2 or #3 in PowerShell.")
+			su.stBody:SetText("Snapshot Helper detected, waiting for first sync export. Choose your OS below and run command #1 or #2.")
+			su.stFolders:SetText("Database Folder: (pending first sync)  |  WoW AddOn Folder: AddOns/MerchantMaster_Snapshots  (No in-game redirect needed if you move the DB.)")
 		end
 	end
 
 	function su.refresh()
 		local CE = getCE()
 		if not CE then return end
-		su._lastSys = ns.Pricing and type(ns.Pricing.GetSnapshotSystemMeta) == "function"
+		local installed = hasSnapshotExt()
+		su._lastSys = installed and ns.Pricing and type(ns.Pricing.GetSnapshotSystemMeta) == "function"
 			and ns.Pricing.GetSnapshotSystemMeta() or nil
+
+		local installCmds = CE.INSTALL_COMMANDS
+		if type(installCmds) == "table" then
+			if su.winInstallBox and su.winInstallBox.SetText then su.winInstallBox:SetText(installCmds.windows or "") end
+			if su.linuxInstallBox and su.linuxInstallBox.SetText then su.linuxInstallBox:SetText(installCmds.linux or "") end
+			if su.macInstallBox and su.macInstallBox.SetText then su.macInstallBox:SetText(installCmds.macos or "") end
+			if su.guideBox and su.guideBox.SetText then
+				local g = installCmds.guideUrl or ""
+				local l = installCmds.linuxScriptUrl or ""
+				su.guideBox:SetText((g ~= "" and l ~= "") and (g .. "  |  " .. l) or (g ~= "" and g or l))
+			end
+		end
+
 		su.retheme()
 		su.updateCommands()
 	end
@@ -2899,20 +3069,14 @@ end
 local function syncSubTabVisibility()
 	local bar = state.subTabBar
 	if not bar or not bar.buttons or not bar._defs then return end
-	local showSetup = hasSnapshotExt()
 	local x = 4
 	for _, d in ipairs(bar._defs) do
 		local b = bar.buttons[d.key]
 		if b then
-			local visible = (d.key ~= "console_setup") or showSetup
-			if visible then
-				b:ClearAllPoints()
-				b:SetPoint("LEFT", bar, "LEFT", x, 0)
-				b:Show()
-				x = x + (d.width or 86) + 4
-			else
-				b:Hide()
-			end
+			b:ClearAllPoints()
+			b:SetPoint("LEFT", bar, "LEFT", x, 0)
+			b:Show()
+			x = x + (d.width or 86) + 4
 		end
 	end
 	bar.rightStart = x + 6
@@ -2920,13 +3084,13 @@ end
 
 local function buildSubTabBar(root)
 	local defs = {
-		{ key = "console_overview", label = "Overview", width = 86, hint = "Addon RAM, SavedVariables, Live AH scans & health" },
-		{ key = "console_database", label = "Database", width = 86, hint = "WoW SavedVariables schema inspector" },
-		{ key = "console_perf", label = "Perf & Debug", width = 104, hint = "Opt-in runtime profiler & support debug bundle" },
-		{ key = "console_setup", label = "Setup", width = 72, hint = "Snapshot companion setup & runner config" },
-		{ key = "console_settings", label = "Settings", width = 82, hint = "Market, inventory scope, Leveling filter & item tooltips" },
-		{ key = "console_ui", label = "Addon UI", width = 86, hint = "Window skins, dark/light mode, table styles & price formats with live preview" },
-		{ key = "console_data", label = "Data & Maintenance", width = 148, hint = "Cache clears, Ledger pruning, CSV export & slash commands" },
+		{ key = "console_overview", label = "Overview", width = 78, hint = "Addon RAM, SavedVariables, Live AH scans & health" },
+		{ key = "console_database", label = "Database", width = 78, hint = "WoW SavedVariables schema inspector" },
+		{ key = "console_perf", label = "Perf & Debug", width = 98, hint = "Opt-in runtime profiler & support debug bundle" },
+		{ key = "console_setup", label = "Snapshot Settings", width = 132, hint = "Optional background AH snapshots setup, folders & OS commands" },
+		{ key = "console_settings", label = "Settings", width = 76, hint = "Market, inventory scope, Leveling filter & item tooltips" },
+		{ key = "console_ui", label = "Addon UI", width = 78, hint = "Window skins, dark/light mode, table styles & price formats with live preview" },
+		{ key = "console_data", label = "Data & Maintenance", width = 140, hint = "Cache clears, Ledger pruning, CSV export & slash commands" },
 	}
 	local function onSelect(key)
 		if ns.app and type(ns.app.setTab) == "function" then
@@ -3045,14 +3209,14 @@ end
 
 function UI.Show(subTab)
 	if not state.root then return false end
+	if not (ns.app and ns.app.snapshotExtension) and type(ns.EnsureSnapshotsLoaded) == "function" then
+		ns.EnsureSnapshotsLoaded()
+	end
 	ensureBuilt()
 	syncSubTabVisibility()
 	local wasShown = UI.IsShown()
 	local prevTab = state.activeSubTab
 	local target = SUB_TABS[subTab] and subTab or "console_overview"
-	if target == "console_setup" and not hasSnapshotExt() then
-		target = "console_overview"
-	end
 	if wasShown and prevTab == target and not state.dirty then
 		return true
 	end
@@ -3140,14 +3304,7 @@ end
 function UI.SyncExtensions()
 	if not state.built then return end
 	syncSubTabVisibility()
-	if state.activeSubTab == "console_setup" and not hasSnapshotExt() then
-		state.dirty = true
-		if UI.IsShown() then
-			UI.Show("console_overview")
-		else
-			state.activeSubTab = "console_overview"
-		end
-	elseif UI.IsShown() then
+	if UI.IsShown() then
 		UI.Layout()
 		UI.Refresh("extension_changed")
 	else
@@ -3161,18 +3318,6 @@ function UI.Refresh(reason)
 		return
 	end
 	syncSubTabVisibility()
-	if state.activeSubTab == "console_setup" and not hasSnapshotExt() then
-		state.activeSubTab = "console_overview"
-		if state.subTabBar and state.subTabBar.SetActiveKey then
-			state.subTabBar:SetActiveKey("console_overview")
-		end
-		for k, v in pairs(viewMap()) do
-			if v and v.frame then
-				if k == "console_overview" then v.frame:Show() else v.frame:Hide() end
-			end
-		end
-		UI.Layout()
-	end
 	if reason == "app_refresh" then
 		if state.activeSubTab == "console_settings"
 			or state.activeSubTab == "console_ui"

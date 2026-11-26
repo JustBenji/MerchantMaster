@@ -61,15 +61,26 @@ On a fresh install, the top status capsule displays **No AH Scan Yet** and the D
 
 ## Optional: Automatic AH Snapshots & 7x24 Heatmaps
 
-MerchantMaster runs 100% standalone from live in-game scans. If you also want automatic 15-minute Blizzard Auction House snapshots, a 30-day local market database, 7x24 heatmaps, and 7-day sales velocity running in the background while WoW is closed, install the separate lightweight companion [JustBenji/MerchantMaster-Snapshots](https://github.com/JustBenji/MerchantMaster-Snapshots) (pure Python stdlib, zero executables, zero files added to the WowUp addon `.zip`):
+MerchantMaster works 100% standalone from your in-game Auction House scans. If you also want automatic Auction House price updates every 15 minutes while WoW is closed, 30 days of price history, 7x24 heatmaps, and 7-day sales speed, you can install the free optional companion helper [JustBenji/MerchantMaster-Snapshots](https://github.com/JustBenji/MerchantMaster-Snapshots).
 
-*   **Requirements:** **Python 3.11+** ([python.org/downloads](https://www.python.org/downloads/) or `winget install Python.Python.3.12`) and a free [Battle.net API key](https://develop.battle.net/access/clients).
-*   **1-Line PowerShell Install & Setup GUI:**
+You can copy the exact setup command for your computer anytime inside WoW under **Console -> Snapshot Settings** (`/mm snapshots`).
+
+*   **What you need:** A free [Battle.net API key](https://develop.battle.net/access/clients) (this gives your computer permission to read Blizzard's public Auction House prices) and **Python 3.11+** on Windows or macOS.
+*   **Windows (PowerShell):**
     ```powershell
     py -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; py -m snapshot_builder setup-gui
     ```
-    *(If `py` is not recognized, replace both `py` with `python`.)*
-*   **Zero In-Game Folder Setup:** The Setup GUI auto-detects `<WoW>\_forever_\Interface\AddOns` (or lets you click **Browse...**), writes the sibling `MerchantMaster_Snapshots` addon automatically, and schedules background syncs—just enter your API key, choose your server, click **Save, Schedule & Sync Now**, and run `/reload` in WoW.
+    *(If Windows says `py` is not recognized, replace both `py` words with `python`.)*
+*   **Linux & Steam Deck (Terminal):**
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py -o install_linux.py && python3 install_linux.py
+    ```
+    You can also inspect or download the [Linux installer script (`install_linux.py`)](https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py) directly. It sets up its own isolated Python folder, finds your WoW AddOns folder, and configures background updates automatically.
+*   **macOS (Terminal):**
+    ```bash
+    python3 -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip && python3 -m snapshot_builder setup-gui
+    ```
+*   **No in-game folder setup needed:** The helper writes the sibling `MerchantMaster_Snapshots` addon directly into your `<WoW>/_forever_/Interface/AddOns` folder. Paste your API key, pick your server, click **Save & Sync**, and type `/reload` in WoW. You can check your active database and export folders anytime in **Console -> Snapshot Settings**.
 
 ---
 
@@ -99,6 +110,7 @@ Aliases: `/mm`, `/merchantmaster`, `/crates`, `/waylaid`
 | `/mm shopping` | Toggle the detachable Shopping List window (`/mm shop`) |
 | `/mm options` | Open **Console -> Settings** (or `/mm blizzoptions` for WoW Settings) |
 | `/mm console` | Open **Console** overview, diagnostics, and Debug Bundle tools |
+| `/mm snapshots` | Open **Console -> Snapshot Settings** (optional background helper setup & OS commands) |
 | `/mm scan` | Run a Live AH market scan (`/mm refresh`) |
 | `/mm clearah` | Clear saved Live AH scan prices for the current economy |
 

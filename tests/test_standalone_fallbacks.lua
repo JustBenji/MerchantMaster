@@ -289,17 +289,36 @@ do
 end
 
 ---------------------------------------------------------------------------------------------------
--- 6. Snapshot UI Surfaces Hidden When Absent
+-- 6. Snapshot UI Surfaces Standalone Rules (Always-Visible Snapshot Settings vs Hidden Telemetry)
 ---------------------------------------------------------------------------------------------------
 do
-	-- 6a. Console Setup sub-tab & Overview Snapshot Storage KPI hidden
+	-- 6a. Console Snapshot Settings sub-tab IS visible standalone (with standalonePanel),
+	-- while Overview Snapshot Storage KPI and Database SQLite rows stay hidden
 	app.setTab("console_overview")
-	check(UIConsole._state.subTabBar and UIConsole._state.subTabBar.buttons.console_setup
-		and not UIConsole._state.subTabBar.buttons.console_setup:IsShown(),
-		"Console -> Setup sub-tab is hidden when snapshot extension is absent")
+	local setupBtn = UIConsole._state.subTabBar and UIConsole._state.subTabBar.buttons.console_setup
+	check(setupBtn and setupBtn:IsShown() and setupBtn.fs and setupBtn.fs:GetText() == "Snapshot Settings",
+		"Console -> Snapshot Settings sub-tab is visible standalone")
 	check(UIConsole._state.overviewView and UIConsole._state.overviewView.kpis[2]
 		and not UIConsole._state.overviewView.kpis[2].frame:IsShown(),
 		"Console -> Overview Snapshot Storage card is hidden standalone")
+	app.setTab("console_database")
+	local hasSqliteRow = false
+	for _, entry in ipairs(UIConsole._state.dbItems or {}) do
+		if entry.kindTag == "SQLite" then hasSqliteRow = true; break end
+	end
+	check(not hasSqliteRow, "Console -> Database hides SQLite rows standalone")
+
+	SlashCmdList.MERCHANTMASTER("snapshots")
+	check(app.activeTab == "console_setup" and UIConsole.GetActiveSubTab() == "console_setup",
+		"/mm snapshots opens Snapshot Settings tab standalone")
+	local su = UIConsole._state.setupView
+	check(su and su.standalonePanel and su.standalonePanel:IsShown()
+		and su.connectedPanel and not su.connectedPanel:IsShown(),
+		"Standalone Snapshot Settings shows standalonePanel and hides connectedPanel")
+	check((su.winInstallBox:GetText() or ""):find("setup-gui", 1, true) ~= nil
+		and (su.linuxInstallBox:GetText() or ""):find("install_linux.py", 1, true) ~= nil
+		and (su.macInstallBox:GetText() or ""):find("python3 -m pip install", 1, true) ~= nil,
+		"Standalone Snapshot Settings displays Windows, Linux (install_linux.py), and macOS install commands")
 
 	-- 6b. Gap Sniper & Vendor Sniper [Scan Snapshot] buttons hidden
 	app.setTab("sniper_gap")
