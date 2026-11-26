@@ -6,13 +6,9 @@ MerchantMaster analyzes live Auction House scans directly inside World of Warcra
 
 ---
 
-## Screenshots
+## Themes & Typography
 
-| Modern Glass (Dark / Light) | Goblin Baron (Warcraft Skin) |
-|---|---|
-| *Placeholder: `docs/screenshots/modern-glass-dashboard.png`* | *Placeholder: `docs/screenshots/goblin-baron-market.png`* |
-
-Includes **Modern Glass** (Dark and Light modes) plus **5 Warcraft faction skins** (`Human`, `Night Elf`, `Orc`, `Undead`, and `Goblin Baron`) with bundled static **Inter** typography (`SIL OFL 1.1`) and automatic client-font fallback on non-Latin locales (`ruRU`, `koKR`, `zhCN`, `zhTW`).
+Includes **Modern Glass** (Dark and Light modes) plus **5 Warcraft faction skins** (`Human`, `Night Elf`, `Orc`, `Undead`, and `Goblin Baron`) with bundled static **Inter** typography (`SIL OFL 1.1`) and automatic client-font fallback on non-Latin locales (`ruRU`, `koKR`, `zhCN`, `zhTW`). Switch themes any time from **Console -> Addon UI** or `/mm theme`.
 
 ---
 
