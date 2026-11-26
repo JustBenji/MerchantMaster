@@ -491,10 +491,14 @@ do
 		check(txt == exp, string.format("Sidebar section %d expected '%s', got '%s'", i, exp, tostring(txt)))
 	end
 
-	-- 16 nav items including All Items, Vendor Crafter & Disenchantment Crafter in MARKET, Forged Delivery in TURN-INS, Snipers in SNIPER, and Console in SYSTEM.
-	check(type(ui.navOrder) == "table" and #ui.navOrder == 16,
-		"Sidebar exposes 16 nav items, got " .. tostring(ui.navOrder and #ui.navOrder))
+	-- 17 nav items including Watchlist in OVERVIEW, All Items, Vendor Crafter & Disenchantment Crafter in MARKET, Forged Delivery in TURN-INS, Snipers in SNIPER, and Console in SYSTEM.
+	check(type(ui.navOrder) == "table" and #ui.navOrder == 17,
+		"Sidebar exposes 17 nav items, got " .. tostring(ui.navOrder and #ui.navOrder))
 	check(ui.navBtns.auction_house == nil, "Standalone Auction House nav button has been removed")
+	local wlBtn = ui.navBtns.watchlist
+	check(wlBtn and wlBtn.key == "watchlist" and wlBtn.targetTab == "watchlist"
+		and wlBtn.labelFs:GetText() == "Watchlist",
+		"Watchlist has a sidebar button routed to the watchlist tab")
 	local aiBtn = ui.navBtns.all_items
 	check(aiBtn and aiBtn.key == "all_items" and aiBtn.targetTab == "all_items"
 		and aiBtn.labelFs:GetText() == "All Items",
@@ -542,7 +546,7 @@ do
 	local navBottomY = lastNav._points[1][5] - lastNav:GetHeight()
 	local walletTopY = -(sidebarHeight - 12 - ui.walletCard:GetHeight())
 	check(app.panel:GetHeight() == 730 and navBottomY > walletTopY,
-		string.format("The 16th nav item clears the wallet card at 730px min height (navBottomY=%s > walletTopY=%s)",
+		string.format("The 17th nav item clears the wallet card at 730px min height (navBottomY=%s > walletTopY=%s)",
 			tostring(navBottomY), tostring(walletTopY)))
 
 	local priorTab, priorSavedTab = app.activeTab, MerchantMasterDB.activeTab
@@ -555,6 +559,11 @@ do
 					label .. " has no flat 1px top highlight")
 			end
 		end
+		wlBtn:Click("LeftButton")
+		check(app.activeTab == "watchlist" and ui.watchlistView and ui.watchlistView:IsShown(),
+			"Clicking Watchlist switches to its visible view")
+		checkNoFlatHighlight(ui.watchlistView, "Watchlist view")
+
 		aiBtn:Click("LeftButton")
 		check(app.activeTab == "all_items" and ui.allItemsView and ui.allItemsView:IsShown(),
 			"Clicking All Items switches to its visible view")

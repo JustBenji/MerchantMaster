@@ -452,6 +452,17 @@ local function getCompanionStatus(addonName, provider)
 	return "absent"
 end
 
+function CE.GetAddonState(addonName)
+	local app = ns.app
+	local provider = nil
+	if addonName == "MerchantMaster_Snapshots" then
+		provider = app and app.snapshotExtension or nil
+	elseif addonName == "MerchantMaster_MapPins" then
+		provider = app and app.mapPinsProvider or nil
+	end
+	return getCompanionStatus(addonName, provider)
+end
+
 function CE.HasSnapshotExtension()
 	return (ns.app and ns.app.snapshotExtension ~= nil) and true or false
 end
@@ -482,6 +493,7 @@ local DEFAULT_SERVER_PRESETS = {
 
 CE.INSTALL_COMMANDS = {
 	windows = "py -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; py -m snapshot_builder setup-gui",
+	windowsAlt = "python -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; python -m snapshot_builder setup-gui",
 	linux = "curl -fsSL https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py -o install_linux.py && python3 install_linux.py",
 	macos = "python3 -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip && python3 -m snapshot_builder setup-gui",
 	guideUrl = "https://github.com/JustBenji/MerchantMaster-Snapshots",
@@ -741,7 +753,7 @@ function CE.CollectStorageSnapshot()
 		label = "Addon Settings & Queues",
 		rows = miscRows,
 		estBytes = miscBytes,
-		fields = "economy, priceSource, uiSkin, uiThemeMode, tableStyle, consolePerfEnabled, consoleStats, queues",
+		fields = "economy, priceSource, useTSMPrices, uiSkin, uiThemeMode, tableStyle, consolePerfEnabled, consoleStats, queues",
 	}
 
 	-- MerchantMasterLedgerDB breakdown
@@ -828,6 +840,51 @@ function CE.CollectStorageSnapshot()
 		npcPins = npcPinCount,
 	}
 
+	local addonState = CE.GetAddonState("MerchantMaster_Snapshots")
+	local dbBytes = sysMeta and (tonumber(sysMeta.dbBytes) or 0) or 0
+	local walBytes = sysMeta and (tonumber(sysMeta.walBytes) or 0) or 0
+	local shmBytes = sysMeta and (tonumber(sysMeta.shmBytes) or 0) or 0
+	local logBytes = sysMeta and (tonumber(sysMeta.logBytes) or 0) or 0
+	local exportBytes = sysMeta and (tonumber(sysMeta.exportBytes) or 0) or 0
+	local exportCapBytes = sysMeta and (tonumber(sysMeta.exportCapBytes) or 0) or 0
+	local sqliteBytes = dbBytes + walBytes + shmBytes
+	local dataDirBytes = 0
+	if sysMeta then
+		dataDirBytes = max(sqliteBytes + logBytes, tonumber(sysMeta.localDataDirBytes) or 0)
+	end
+	local snapshotDiskTotalBytes = dataDirBytes + exportBytes
+	local snapshotRows = 0
+	for _, st in ipairs(sqliteTables) do
+		if st.key == "snapshots" then
+			snapshotRows = tonumber(st.rows) or 0
+			break
+		end
+	end
+	local diskSummary = {
+		addonState = addonState,
+		hasSnapshots = hasSnap,
+		dbBytes = dbBytes,
+		walBytes = walBytes,
+		shmBytes = shmBytes,
+		logBytes = logBytes,
+		exportBytes = exportBytes,
+		exportCapBytes = exportCapBytes,
+		sqliteBytes = sqliteBytes,
+		dataDirBytes = dataDirBytes,
+		snapshotDiskTotalBytes = snapshotDiskTotalBytes,
+		savedVarsBytes = totalSavedBytes,
+		combinedTotalBytes = snapshotDiskTotalBytes + totalSavedBytes,
+		snapshotRuns = sysMeta and (tonumber(sysMeta.totalRuns) or 0) or 0,
+		snapshotRows = snapshotRows,
+		retentionDays = sysMeta and (tonumber(sysMeta.retentionDays) or 30) or 0,
+		errRuns = sysMeta and (tonumber(sysMeta.errRuns) or 0) or 0,
+		intervalMin = sysMeta and (tonumber(sysMeta.intervalMin) or 15) or 0,
+		truncated = sysMeta and (sysMeta.truncated == true) or false,
+		dbPath = sysMeta and tostring(sysMeta.dbPath or "") or "",
+		outDir = sysMeta and tostring(sysMeta.outDir or "") or "",
+		exportedAt = sysMeta and (tonumber(sysMeta.exportedAt) or 0) or 0,
+	}
+
 	return {
 		ram = {
 			merchantMasterKB = mmMemKB,
@@ -839,6 +896,7 @@ function CE.CollectStorageSnapshot()
 		totalSavedBytes = totalSavedBytes,
 		sqliteTables = sqliteTables,
 		sysMeta = sysMeta,
+		diskSummary = diskSummary,
 		staticCatalog = staticCatalog,
 	}
 end

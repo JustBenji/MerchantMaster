@@ -603,4 +603,244 @@ do
 	end
 end
 
+-- 6. Feature A: Row dividers, lighter top bar, aligned headers/cells, and Quick Look favButton
+do
+	local function approx(a, b, eps)
+		return type(a) == "number" and type(b) == "number" and math.abs(a - b) <= (eps or 0.005)
+	end
+
+	view.resetButton:Click("LeftButton")
+	app.refresh()
+
+	-- 6a. Lighter top bar, card surface, barSep on headerBar (not top of view), uniform heights & tooltips
+	check(view._mmCard ~= nil, "All Items view has NineApple glass_r10 cardBg surface")
+	check(view.headerBar and view.headerBar:GetHeight() == 40, "All Items headerBar stays single 40px height")
+	check(view.barSep ~= nil and view.barSep:GetHeight() == 1 and view.barSep._parent == view.headerBar,
+		"All Items barSep is 1px anchored on headerBar (never directly on view top edge)")
+	local barSepPts = view.barSep and view.barSep._points or {}
+	check(#barSepPts >= 2 and barSepPts[1][1] == "BOTTOMLEFT" and barSepPts[2][1] == "BOTTOMRIGHT",
+		"barSep spans BOTTOMLEFT to BOTTOMRIGHT of headerBar")
+
+	for idx, btn in ipairs(view.profOrder or {}) do
+		local expectedW = math.max(28, #(btn.fs and btn.fs:GetText() or "") * 6 + 12)
+		check(btn:GetHeight() == 22, "Prof pill #" .. idx .. " height is uniform 22px, got " .. tostring(btn:GetHeight()))
+		check(btn:GetWidth() == expectedW,
+			string.format("Prof pill #%d width matches formula (%d == %d)", idx, btn:GetWidth(), expectedW))
+	end
+
+	local rightBtns = {
+		{ btn = view.colSettingsBtn, w = 54, h = 26, name = "Cols" },
+		{ btn = view.shopButton,     w = 62, h = 26, name = "Shop" },
+		{ btn = view.resetButton,    w = 58, h = 26, name = "Reset" },
+		{ btn = view.filtersButton,  w = 66, h = 26, name = "Filters" },
+	}
+	for _, spec in ipairs(rightBtns) do
+		check(spec.btn and spec.btn:GetWidth() == spec.w and spec.btn:GetHeight() == spec.h,
+			string.format("%s button is %dx%d", spec.name, spec.w, spec.h))
+		GameTooltip:Hide()
+		check(spec.btn._scripts and type(spec.btn._scripts.OnEnter) == "function",
+			spec.name .. " button registers OnEnter tooltip handler")
+		spec.btn._scripts.OnEnter(spec.btn)
+		check(GameTooltip:IsShown(), spec.name .. " button hover shows GameTooltip")
+		spec.btn._scripts.OnLeave(spec.btn)
+		check(not GameTooltip:IsShown(), spec.name .. " button leave hides GameTooltip")
+	end
+
+	check(view.shiftBadge and view.shiftBadge._pill and view.shiftBadge._pill.label ~= nil,
+		"shiftBadge upgraded to Theme.CreateBadgePill with ._pill.label")
+	check(view.shiftBadge:GetHeight() == 22, "shiftBadge height is 22px")
+	view.shiftBadge._scripts.OnEnter(view.shiftBadge)
+	check(GameTooltip:IsShown(), "shiftBadge hover shows Quick-Add tooltip")
+	view.shiftBadge._scripts.OnLeave(view.shiftBadge)
+	check(not GameTooltip:IsShown(), "shiftBadge leave hides tooltip")
+
+	ns.AllItems.SetShiftMode(true)
+	local sumRightWhenShift = view.summary and view.summary._points and view.summary._points[2]
+	check(sumRightWhenShift and sumRightWhenShift[2] == view.shiftBadge,
+		"summary anchors left of shiftBadge while Shift Quick-Add mode is active")
+	ns.AllItems.SetShiftMode(false)
+	local sumRightNormal = view.summary and view.summary._points and view.summary._points[2]
+	check(sumRightNormal and sumRightNormal[2] == view.filtersButton,
+		"summary anchors left of filtersButton when Shift Quick-Add mode is off")
+
+	-- 6b. Row divider deduplication & Theme.RegisterWidget callback race across all skins & modes
+	local sampleRow
+	for _, fr in ipairs((tbl.scrollBox and tbl.scrollBox._frames) or {}) do
+		if fr.data and fr.cellGroup then sampleRow = fr; break end
+	end
+	check(sampleRow ~= nil and sampleRow.sep ~= nil and sampleRow.stripe ~= nil,
+		"Sample visible All Items row exposes sep and stripe textures")
+
+	local origSep = sampleRow.sep
+	local origStripe = sampleRow.stripe
+	local origHl = sampleRow.hl
+	local origRegionCount = #{ sampleRow:GetRegions() }
+	for _ = 1, 5 do
+		ns.AllItems.RepaintVisible()
+	end
+	check(sampleRow.sep == origSep and sampleRow.stripe == origStripe and sampleRow.hl == origHl,
+		"Rebinding pooled row never recreates sep/stripe/hl textures")
+	check(#{ sampleRow:GetRegions() } == origRegionCount,
+		string.format("Rebinding pooled row does not stack regions (%d == %d)", #{ sampleRow:GetRegions() }, origRegionCount))
+	check(sampleRow._sepAnchored == true and sampleRow.sep:GetHeight() == 1,
+		"Row separator is anchored once at 1px height")
+	local sepPts = sampleRow.sep._points or {}
+	check(#sepPts >= 2 and sepPts[1][1] == "BOTTOMLEFT" and sepPts[1][4] == 16
+		and sepPts[2][1] == "BOTTOMRIGHT" and sepPts[2][4] == -16,
+		"Row separator spans BOTTOMLEFT (+16) to BOTTOMRIGHT (-16)")
+	check(sampleRow.stripe._colorTexture and approx(sampleRow.stripe._colorTexture[4], 0),
+		"Row stripe texture is cleared to transparent on row bind")
+
+	-- Check cell height matches rowH (22)
+	local rowH = tbl.rowHeight or 22
+	for _, cell in ipairs(sampleRow.cells or {}) do
+		check(cell:GetHeight() == rowH, "Row cell height matches table rowHeight (" .. tostring(rowH) .. ")")
+	end
+
+	-- Sweep Standard Light/Dark + all 5 Warcraft skins to confirm soft separator wins callback race & headers style cleanly
+	local savedSkin = Theme.GetSkin()
+	local savedMode = Theme.GetMode()
+	local skinSweep = {
+		{ skin = "standard",  mode = "dark",  styled = false },
+		{ skin = "standard",  mode = "light", styled = false },
+		{ skin = "goblin",    mode = "dark",  styled = true  },
+		{ skin = "human",     mode = "dark",  styled = true  },
+		{ skin = "night_elf", mode = "dark",  styled = true  },
+		{ skin = "orc",       mode = "dark",  styled = true  },
+		{ skin = "undead",    mode = "dark",  styled = true  },
+	}
+	ns.AllItems.SetColumnVisible("wowheadURL", true)
+	for _, sw in ipairs(skinSweep) do
+		Theme.SetSkin(sw.skin, true)
+		if sw.skin == "standard" then Theme.SetMode(sw.mode) end
+		local pal = Theme.GetActivePalette and Theme.GetActivePalette() or Theme.PALETTE
+		local expectedSepA = ((pal and pal.separator and pal.separator[4]) or 0.45) * 0.45
+		local sc = sampleRow.sep._colorTexture
+		check(sc ~= nil and approx(sc[4], expectedSepA, 0.01),
+			string.format("Row sep stays soft under %s/%s (alpha=%.3f expected=%.3f)",
+				sw.skin, sw.mode, tonumber(sc and sc[4]) or -1, expectedSepA))
+		local expectedBarSepA = ((pal and pal.separator and pal.separator[4]) or 0.45) * 0.65
+		local bsc = view.barSep._colorTexture
+		check(bsc ~= nil and approx(bsc[4], expectedBarSepA, 0.01),
+			string.format("headerBar barSep stays soft under %s/%s (alpha=%.3f expected=%.3f)",
+				sw.skin, sw.mode, tonumber(bsc and bsc[4]) or -1, expectedBarSepA))
+		-- Verify styled headers: 26px height, sep hidden, bg cleared, uppercase on custom skins, chevron on active sort, CENTER align honored
+		local activeSort = app.sortState.all_items
+		for i, col in ipairs(tbl.columns or {}) do
+			local hbtn = tbl.headerBtns and tbl.headerBtns[i]
+			check(hbtn and hbtn:GetHeight() == 26, "Header btn height is 26 under " .. sw.skin)
+			if hbtn.sep then
+				check(not hbtn.sep:IsShown(), "Header btn.sep hidden under " .. sw.skin)
+			end
+			if hbtn.bg and hbtn.bg._colorTexture then
+				check(approx(hbtn.bg._colorTexture[4], 0), "Header btn.bg cleared under " .. sw.skin)
+			end
+			if col.key == "wowheadURL" and hbtn.fs then
+				check(hbtn.fs._justifyH == "CENTER", "Header honors col.align='CENTER' for wowheadURL")
+			end
+			if activeSort and col.key == activeSort.col and hbtn.fs then
+				local txt = hbtn.fs:GetText() or ""
+				check(txt:find("icon_chevron_down", 1, true) ~= nil,
+					"Active sort header uses inline icon_chevron_down texture under " .. sw.skin)
+				if sw.styled then
+					check(txt:find(string.upper(col.label), 1, true) ~= nil,
+						"Styled skin uppercases active header label under " .. sw.skin)
+				end
+			end
+		end
+	end
+	ns.AllItems.ResetColumns()
+	Theme.SetSkin(savedSkin, true)
+	if savedSkin == "standard" then Theme.SetMode(savedMode) end
+
+	-- 6c. Quick Look HUD Favorite Star Button (hud.favButton)
+	local origWatchlist = ns.Watchlist
+	local okQL, errQL = pcall(function()
+		ns.Watchlist = nil
+		app.openQuickLook("item", ssRow, { toggle = false })
+		local hud = app.superListProvider and app.superListProvider.GetQuickLookFrame()
+		check(hud ~= nil and hud:IsShown(), "Quick Look opens for favButton geometry check")
+		check(hud.title and hud.title:GetWidth() == 418,
+			"Quick Look hud.title narrowed to 418px, got " .. tostring(hud.title and hud.title:GetWidth()))
+		check(hud.favButton ~= nil and hud.favButton:GetWidth() == 25 and hud.favButton:GetHeight() == 25,
+			"Quick Look hud.favButton created at 25x25")
+		local favPt = hud.favButton._points and hud.favButton._points[1]
+		check(favPt and favPt[4] == 484 and favPt[5] == -20,
+			string.format("hud.favButton anchored at x=484, y=-20 (got x=%s, y=%s)", tostring(favPt and favPt[4]), tostring(favPt and favPt[5])))
+		local thPt = hud.titleHover and hud.titleHover._points and hud.titleHover._points[1]
+		check(hud.titleHover and thPt and (thPt[4] + hud.titleHover:GetWidth()) < 484,
+			"titleHover right edge clears hud.favButton at x=484")
+		-- Footer buttons untouched
+		local addPt = hud.addButton and hud.addButton._points and hud.addButton._points[1]
+		local daPt = hud.deepAnalysisButton and hud.deepAnalysisButton._points and hud.deepAnalysisButton._points[1]
+		local srchPt = hud.searchButton and hud.searchButton._points and hud.searchButton._points[1]
+		check(addPt and addPt[4] == 0 and daPt and daPt[4] == 389 and srchPt and srchPt[4] == 535,
+			"Quick Look footer button x positions remain untouched (0, 389, 535)")
+
+		-- Safe no-op click when ns.Watchlist is nil
+		hud.favButton:Click("LeftButton")
+		check(hud.favButton._isFavorite == false, "Clicking hud.favButton safely no-ops when ns.Watchlist is nil")
+
+		-- Local mock Watchlist to verify toggle, gold/muted tint, tooltip text, theme switch & reopen refresh
+		local favStore = {}
+		local toggleCount = 0
+		ns.Watchlist = {
+			IsFavorite = function(target)
+				local k = target and (target.key or (tostring(target.kind or "item") .. ":" .. tostring(target.itemID or target.spellID)))
+				return k ~= nil and favStore[k] == true
+			end,
+			Toggle = function(target)
+				toggleCount = toggleCount + 1
+				local k = target and (target.key or (tostring(target.kind or "item") .. ":" .. tostring(target.itemID or target.spellID)))
+				if k then favStore[k] = not favStore[k] end
+				return k ~= nil and favStore[k] == true
+			end,
+		}
+		app.superListProvider.RefreshQuickLook()
+		check(hud.favButton._isFavorite == false, "Unfavorited item starts unfavorited in hud.favButton")
+		hud.favButton._scripts.OnEnter(hud.favButton)
+		check(GameTooltip:IsShown() and GameTooltip._lines and GameTooltip._lines[1] == "Add to Watchlist",
+			"Unfavorited star tooltip shows 'Add to Watchlist'")
+		hud.favButton._scripts.OnLeave(hud.favButton)
+
+		hud.favButton:Click("LeftButton")
+		check(toggleCount == 1 and hud.favButton._isFavorite == true,
+			"Clicking hud.favButton calls ns.Watchlist.Toggle and marks favorite=true")
+		local vc = hud.favButton._mmIcon and hud.favButton._mmIcon._vertexColor
+		check(vc and approx(vc[1], 1) and approx(vc[2], 0.82) and approx(vc[3], 0.18),
+			"Favorited star icon uses gold vertex color {1, 0.82, 0.18, 1}")
+		hud.favButton._scripts.OnEnter(hud.favButton)
+		check(GameTooltip:IsShown() and GameTooltip._lines and GameTooltip._lines[1] == "Remove from Watchlist",
+			"Favorited star tooltip shows 'Remove from Watchlist'")
+		hud.favButton._scripts.OnLeave(hud.favButton)
+
+		-- Theme switch preserves gold star tint on favorited Quick Look
+		Theme.SetSkin("goblin", true)
+		vc = hud.favButton._mmIcon and hud.favButton._mmIcon._vertexColor
+		check(vc and approx(vc[1], 1) and approx(vc[2], 0.82) and approx(vc[3], 0.18),
+			"Theme switch keeps favorited star icon gold")
+		Theme.SetSkin(savedSkin, true)
+		if savedSkin == "standard" then Theme.SetMode(savedMode) end
+
+		-- Opening a different unfavorited item refreshes star back to muted
+		local cbRow = rowMap[2840]
+		app.openQuickLook("item", cbRow, { toggle = false })
+		check(hud.favButton._isFavorite == false, "Opening unfavorited Copper Bar refreshes favButton to unfavorited")
+		local palNow = Theme.GetActivePalette and Theme.GetActivePalette() or Theme.PALETTE
+		local muted = (palNow and palNow.textMuted) or { 0.60, 0.60, 0.65, 1 }
+		vc = hud.favButton._mmIcon and hud.favButton._mmIcon._vertexColor
+		check(vc and approx(vc[1], muted[1], 0.02) and approx(vc[2], muted[2], 0.02) and approx(vc[3], muted[3], 0.02),
+			"Unfavorited star icon uses pal.textMuted tint")
+
+		-- Re-opening Solid Stone restores gold star state
+		app.openQuickLook("item", ssRow, { toggle = false })
+		check(hud.favButton._isFavorite == true, "Re-opening favorited Solid Stone restores gold star state")
+		hud.favButton:Click("LeftButton")
+		check(toggleCount == 2 and hud.favButton._isFavorite == false, "Second click unfavorites Solid Stone cleanly")
+		app.superListProvider.CloseQuickLook()
+	end)
+	ns.Watchlist = origWatchlist
+	if not okQL then error(errQL, 0) end
+end
+
 print(string.format("OK: test_all_items (%d assertions)", host.assertions()))

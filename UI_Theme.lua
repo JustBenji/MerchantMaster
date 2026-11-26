@@ -3825,6 +3825,8 @@ function Theme.DecorateMainWindow(panel, opts)
 		onLayout = opts.onLayout,
 		defaultW = opts.defaultW,
 		defaultH = opts.defaultH,
+		adaptiveLargeDefault = opts.adaptiveLargeDefault,
+		comfortableZoom = opts.comfortableZoom,
 	})
 	if isFable and resizeGrip.HookScript then
 		resizeGrip:HookScript("OnEnter", function(self)

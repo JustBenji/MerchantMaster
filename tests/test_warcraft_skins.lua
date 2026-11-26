@@ -386,7 +386,8 @@ for _, mode in ipairs({ "dark", "light" }) do
 		check(ui.brandTitleFs:GetParent() == ui.skinHeader and ui.toolbar:GetParent() == ui.skinHeader, key .. " header hosts brand and toolbar")
 		check(ui.searchWrap and ui.searchWrap:IsShown(), key .. " shows sidebar searchWrap")
 		check(#ui.sidebarSections == 6, key .. " has all 6 sidebar sections")
-		check(#ui.navOrder == 16, key .. " has all 16 sidebar nav buttons")
+		check(#ui.navOrder == 17, key .. " has all 17 sidebar nav buttons")
+		check(ui.navBtns.watchlist ~= nil, key .. " has watchlist nav button")
 		check(ui.navBtns.auction_house == nil, key .. " has no auction_house nav button")
 		local sidebarH = 730 - top - bottom - ui.skinHeader:GetHeight()
 		local walletTopOffset = -(sidebarH - 24 - ui.walletCard:GetHeight())
@@ -428,8 +429,8 @@ for _, mode in ipairs({ "dark", "light" }) do
 		end
 		local _, _, _, _, basketY = ui.skinBasketNav:GetPoint(1)
 		local basketH = ui.skinBasketNav:GetHeight()
-		check(basketY == -101 and basketH == 18,
-			key .. " skinBasketNav sits at y=-101 h=18, got y=" .. tostring(basketY) .. " h=" .. tostring(basketH))
+		check(basketY == -116 and basketH == 17,
+			key .. " skinBasketNav sits at y=-116 h=17, got y=" .. tostring(basketY) .. " h=" .. tostring(basketH))
 		for si, band in ipairs(secBands) do
 			local overlaps = (basketY > band.bottom) and ((basketY - basketH) < band.top)
 			check(not overlaps,
@@ -437,7 +438,7 @@ for _, mode in ipairs({ "dark", "light" }) do
 					key, tostring(basketY), tostring(basketY - basketH), si, band.title, tostring(band.top), tostring(band.bottom)))
 		end
 		local _, _, _, _, lastNavY = ui.navOrder[#ui.navOrder]:GetPoint(1)
-		check(lastNavY == -473, key .. " 16th sidebar nav button sits at customNavY[16] = -473, got " .. tostring(lastNavY))
+		check(lastNavY == -466, key .. " 17th sidebar nav button sits at customNavY[17] = -466, got " .. tostring(lastNavY))
 		check(lastNavY - ui.navOrder[#ui.navOrder]:GetHeight() > walletTopOffset,
 			key .. " final sidebar nav button stays clear above walletCard")
 		check(ui.skinBasketNav:IsShown(), key .. " exposes the Shopping Basket navigation row")

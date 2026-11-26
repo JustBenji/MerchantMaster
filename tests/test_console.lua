@@ -77,8 +77,15 @@ do
 	app.setTab("console_database")
 	assertCheck(#UI._state.dbItems == 13,
 		"Standalone Database inspector lists strictly 13 SavedVariables tables (0 SQLite), got " .. tostring(#UI._state.dbItems))
+	local dbViewStandalone = UI._state.databaseView
+	assertCheck(dbViewStandalone and dbViewStandalone.snapStorageCard and dbViewStandalone.svStorageCard,
+		"Console -> Database exposes dedicated snapStorageCard and svStorageCard")
+	assertCheck((dbViewStandalone.snapHeadline:GetText() or ""):find("Not Installed", 1, true) ~= nil,
+		"Standalone Database snapStorageCard shows External Disk DB: Not Installed (0 B)")
+	assertCheck((dbViewStandalone.sumBody:GetText() or ""):find("External SQLite Disk DB: 0 B", 1, true) ~= nil,
+		"Standalone Database svStorageCard notes 0 B external SQLite disk DB")
 
-	-- Standalone Snapshot Settings tab opens cleanly with OS install boxes and hidden connectedPanel
+	-- Standalone Snapshot Settings tab opens cleanly in 2-column layout (Left=Windows, Right=Linux)
 	app.setTab("console_setup")
 	assertCheck(UI.GetActiveSubTab() == "console_setup" and app.activeTab == "console_setup",
 		"Standalone console_setup opens directly without redirecting")
@@ -87,19 +94,39 @@ do
 		"Standalone console_setup shows standalonePanel")
 	assertCheck(suStandalone.connectedPanel and not suStandalone.connectedPanel:IsShown(),
 		"Standalone console_setup hides connectedPanel")
+	assertCheck(suStandalone.winCard and suStandalone.winCard:IsShown()
+		and suStandalone.linuxCard and suStandalone.linuxCard:IsShown(),
+		"Standalone console_setup displays split Left Windows and Right Linux install cards")
 	assertCheck((suStandalone.stTitle:GetText() or ""):find("Not Installed", 1, true) ~= nil,
 		"Standalone status title shows Optional Add-On - Not Installed")
 	assertCheck((suStandalone.stFolders:GetText() or ""):find("No in-game folder setup needed", 1, true) ~= nil,
 		"Standalone status folder line explains zero in-game folder setup")
-	assertCheck((suStandalone.winInstallBox:GetText() or ""):find("setup-gui", 1, true) ~= nil,
+	assertCheck((suStandalone.winInstallBox:GetText() or ""):find("py -m pip install", 1, true) ~= nil,
 		"Standalone Windows install box populated")
+	assertCheck((suStandalone.winAltBox:GetText() or ""):find("python -m pip install", 1, true) ~= nil,
+		"Standalone Windows fallback install box populated")
+	assertCheck((suStandalone.guideBox:GetText() or ""):find("MerchantMaster-Snapshots", 1, true) ~= nil,
+		"Standalone guide box contains repo guide URL")
 	assertCheck((suStandalone.linuxInstallBox:GetText() or ""):find("install_linux.py", 1, true) ~= nil,
 		"Standalone Linux / Steam Deck install box uses install_linux.py")
+	assertCheck((suStandalone.linuxScriptBox:GetText() or ""):find("raw.githubusercontent.com", 1, true) ~= nil
+		and (suStandalone.linuxScriptBox:GetText() or ""):find("install_linux.py", 1, true) ~= nil,
+		"Standalone Linux script box contains direct install_linux.py URL")
 	assertCheck((suStandalone.macInstallBox:GetText() or ""):find("python3 -m pip install", 1, true) ~= nil,
 		"Standalone macOS install box populated")
-	assertCheck((suStandalone.guideBox:GetText() or ""):find("MerchantMaster-Snapshots", 1, true) ~= nil
-		and (suStandalone.guideBox:GetText() or ""):find("install_linux.py", 1, true) ~= nil,
-		"Standalone guide box contains repo guide and direct Linux script URL")
+
+	-- Disabled addon state (present in AddOns folder, unchecked for current character) shows clear Esc -> AddOns guidance
+	hostEnv.setMockAddon("MerchantMaster_Snapshots", { enabled = false, loaded = false, memKB = 0, version = "1.1.0" })
+	assertCheck(CE.GetAddonState("MerchantMaster_Snapshots") == "disabled",
+		"GetAddonState reports 'disabled' when MerchantMaster_Snapshots exists but is unloaded")
+	UI.Refresh("test_disabled")
+	assertCheck((suStandalone.stTitle:GetText() or ""):find("Disabled in WoW AddOns Menu", 1, true) ~= nil
+		and (suStandalone.stBody:GetText() or ""):find("Esc -> AddOns", 1, true) ~= nil,
+		"Disabled companion shows Esc -> AddOns instructions in Snapshot Settings")
+	app.setTab("console_database")
+	assertCheck((dbViewStandalone.snapHeadline:GetText() or ""):find("Disabled in WoW AddOns Menu", 1, true) ~= nil,
+		"Disabled companion shows Disabled state in Database -> AH Snapshot Storage card")
+	hostEnv.setMockAddon("MerchantMaster_Snapshots", nil)
 
 	-- Standalone fallback presets & OS-aware command builder
 	local fallbackPresets = CE.GetServerPresets()
@@ -208,6 +235,15 @@ do
 	assertCheck(type(st.savedTables) == "table" and #st.savedTables == 13,
 		"CollectStorageSnapshot keeps 13 core SavedVariables tables without MapPins, got " .. tostring(st.savedTables and #st.savedTables))
 	assertCheck(type(st.sqliteTables) == "table" and #st.sqliteTables == 3, "CollectStorageSnapshot includes 3 SQLite tables when companion registered")
+	assertCheck(type(st.diskSummary) == "table"
+		and st.diskSummary.addonState == "loaded"
+		and st.diskSummary.sqliteBytes == (4194304 + 32768 + 32768)
+		and st.diskSummary.dataDirBytes == 4400000
+		and st.diskSummary.snapshotDiskTotalBytes == (4400000 + 1048576)
+		and st.diskSummary.combinedTotalBytes == (4400000 + 1048576 + st.totalSavedBytes)
+		and st.diskSummary.snapshotRuns == 19
+		and st.diskSummary.snapshotRows == 19,
+		"CollectStorageSnapshot computes accurate diskSummary totals, snapshot runs & row counts")
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -451,42 +487,61 @@ do
 	SlashCmdList.MERCHANTMASTER("setup")
 	assertCheck(app.activeTab == "console_setup", "/mm setup opens console_setup")
 
-	-- Connected Snapshot Settings: live dbPath/outDir display, connectedPanel visible, OS switcher
+	-- Connected Snapshot Settings: split Left Windows / Right Linux command cards + macOS switch + Database disk summary
 	local suConn = UI._state.setupView
 	assertCheck(suConn and suConn.connectedPanel and suConn.connectedPanel:IsShown(),
 		"Connected console_setup shows connectedPanel")
 	assertCheck(suConn.standalonePanel and not suConn.standalonePanel:IsShown(),
 		"Connected console_setup hides standalonePanel")
+	assertCheck(suConn.winCmdCard and suConn.winCmdCard:IsShown()
+		and suConn.linuxCmdCard and suConn.linuxCmdCard:IsShown(),
+		"Connected console_setup shows split Left Windows and Right Linux command cards")
 	assertCheck((suConn.stTitle:GetText() or ""):find("Active Background Helper", 1, true) ~= nil,
 		"Connected status title shows Active Background Helper")
+	assertCheck((suConn.stBody:GetText() or ""):find("Snapshots: 19", 1, true) ~= nil
+		and (suConn.stBody:GetText() or ""):find("Disk: " .. CE.FormatBytes(5448576), 1, true) ~= nil,
+		"Connected stBody summarizes live snapshot count and total disk size")
 	local folderTxt = suConn.stFolders:GetText() or ""
 	assertCheck(folderTxt:find("snapshots.sqlite3", 1, true) ~= nil
 		and folderTxt:find("AddOns/MerchantMaster_Snapshots", 1, true) ~= nil
 		and folderTxt:find("No in-game redirect needed", 1, true) ~= nil,
 		"Connected stFolders shows live sys.dbPath, sys.outDir, and move note: " .. folderTxt)
 
-	UI._state.setupOpts.osMode = "windows"
 	suConn.updateCommands()
-	assertCheck((suConn.osBtn.fs:GetText() or "") == "OS: Windows"
-		and (suConn.guiBox:GetText() or ""):find("python -m snapshot_builder setup-gui", 1, true) ~= nil
+	assertCheck((suConn.guiBox:GetText() or ""):find("python -m snapshot_builder setup-gui", 1, true) ~= nil
 		and (suConn.keyBox:GetText() or ""):find("setx BLIZZARD_CLIENT_ID", 1, true) ~= nil,
-		"Connected OS=windows generates Windows PowerShell commands")
+		"Connected left card generates Windows PowerShell commands simultaneously")
+	assertCheck((suConn.linuxCmdTitle:GetText() or ""):find("Linux", 1, true) ~= nil
+		and (suConn.linuxGuiBox:GetText() or ""):find("~/.local/bin/mm-snapshots setup-gui", 1, true) ~= nil
+		and (suConn.linuxKeyBox:GetText() or ""):find("--prompt-creds", 1, true) ~= nil,
+		"Connected right card simultaneously generates Linux ~/.local/bin/mm-snapshots commands")
 
-	UI._state.setupOpts.osMode = "linux"
-	suConn.updateCommands()
-	assertCheck((suConn.osBtn.fs:GetText() or "") == "OS: Linux"
-		and (suConn.guiBox:GetText() or ""):find("~/.local/bin/mm-snapshots setup-gui", 1, true) ~= nil
-		and (suConn.keyBox:GetText() or ""):find("--prompt-creds", 1, true) ~= nil,
-		"Connected OS=linux switches to ~/.local/bin/mm-snapshots and --prompt-creds")
+	suConn.posixModeBtn:Click("LeftButton")
+	assertCheck((suConn.linuxCmdTitle:GetText() or ""):find("macOS", 1, true) ~= nil
+		and (suConn.linuxGuiBox:GetText() or ""):find("python3 -m snapshot_builder setup-gui", 1, true) ~= nil
+		and (suConn.linuxKeyBox:GetText() or ""):find("--prompt-creds", 1, true) ~= nil,
+		"Clicking posixModeBtn switches right card to macOS python3 commands")
+	suConn.posixModeBtn:Click("LeftButton")
+	assertCheck((suConn.linuxCmdTitle:GetText() or ""):find("Linux", 1, true) ~= nil
+		and (suConn.linuxGuiBox:GetText() or ""):find("~/.local/bin/mm-snapshots setup-gui", 1, true) ~= nil,
+		"Clicking posixModeBtn again switches right card back to Linux commands")
 
-	UI._state.setupOpts.osMode = "macos"
-	suConn.updateCommands()
-	assertCheck((suConn.osBtn.fs:GetText() or "") == "OS: macOS"
-		and (suConn.guiBox:GetText() or ""):find("python3 -m snapshot_builder setup-gui", 1, true) ~= nil
-		and (suConn.keyBox:GetText() or ""):find("--prompt-creds", 1, true) ~= nil,
-		"Connected OS=macos switches to python3 -m snapshot_builder and --prompt-creds")
-	UI._state.setupOpts.osMode = "windows"
-	suConn.updateCommands()
+	-- Connected Console -> Database dedicated disk storage card
+	app.setTab("console_database")
+	local dvConn = UI._state.databaseView
+	local snapHdrTxt = dvConn and dvConn.snapHeadline and dvConn.snapHeadline:GetText() or ""
+	local snapBodyTxt = dvConn and dvConn.snapBody and dvConn.snapBody:GetText() or ""
+	local svHdrTxt = dvConn and dvConn.svHeadline and dvConn.svHeadline:GetText() or ""
+	assertCheck(snapHdrTxt:find("Total on Disk: " .. CE.FormatBytes(5448576), 1, true) ~= nil
+		and snapHdrTxt:find("19 Snapshots", 1, true) ~= nil,
+		"Database snapHeadline displays total disk size and snapshot count: " .. snapHdrTxt)
+	assertCheck(snapBodyTxt:find("SQLite DB: " .. CE.FormatBytes(4194304), 1, true) ~= nil
+		and snapBodyTxt:find("WAL: " .. CE.FormatBytes(32768), 1, true) ~= nil
+		and snapBodyTxt:find("AddOn Export: " .. CE.FormatBytes(1048576), 1, true) ~= nil
+		and snapBodyTxt:find("snapshots.sqlite3", 1, true) ~= nil,
+		"Database snapBody breaks down SQLite DB, WAL, Export & DB path: " .. snapBodyTxt)
+	assertCheck(svHdrTxt:find("Combined Total (Disk + WoW):", 1, true) ~= nil,
+		"Database svHeadline displays combined Disk + SavedVariables total: " .. svHdrTxt)
 
 	SlashCmdList.MERCHANTMASTER("debug")
 	assertCheck(app.activeTab == "console_perf", "/mm debug opens console_perf")
@@ -698,6 +753,181 @@ do
 	app.snapshotExtension = savedExt
 	ns.snapshotRaw = savedRaw
 	UI.SyncExtensions()
+	app.panel:Hide()
+end
+
+---------------------------------------------------------------------------------------------------
+-- 11. Feature D: Console -> Mail Sub-Tab, Settings Shortcut, Slash Routing & Presets Sync
+---------------------------------------------------------------------------------------------------
+do
+	local savedMailPresets = _G.MerchantMasterDB.mailPresets
+	_G.MerchantMasterDB.mailPresets = nil
+
+	-- Slash routing: /mm mail and /mm mailpresets open console_mail
+	app.setTab("dashboard")
+	SlashCmdList.MERCHANTMASTER("mail")
+	assertCheck(app.activeTab == "console_mail" and UI.GetActiveSubTab() == "console_mail" and UI.IsShown(),
+		"/mm mail opens Console -> Mail")
+	app.setTab("dashboard")
+	SlashCmdList.MERCHANTMASTER("mailpresets")
+	assertCheck(app.activeTab == "console_mail" and UI.GetActiveSubTab() == "console_mail",
+		"/mm mailpresets opens Console -> Mail")
+
+	-- Sub-tab bar layout: console_mail sits right after console_settings and fits cleanly inside 1036px
+	local bar = UI._state.subTabBar
+	assertCheck(bar and bar.buttons and bar.buttons.console_mail and bar.buttons.console_mail:IsShown(),
+		"Console sub-tab bar exposes visible Mail sub-tab button")
+	assertCheck((bar.rightStart or 9999) < 860,
+		"Console sub-tab bar leaves ample headroom inside 1036px (rightStart=" .. tostring(bar.rightStart) .. ")")
+	local settingsIdx, mailIdx
+	for idx, d in ipairs(bar._defs or {}) do
+		if d.key == "console_settings" then settingsIdx = idx end
+		if d.key == "console_mail" then mailIdx = idx end
+	end
+	assertCheck(settingsIdx and mailIdx and mailIdx == settingsIdx + 1,
+		"Console -> Mail sub-tab appears immediately after Settings")
+
+	-- Settings shortcut button jumps to console_mail
+	app.setTab("console_settings")
+	local mailJump = UI._state.settingsControls and UI._state.settingsControls.mailShortcutBtn
+	assertCheck(mailJump ~= nil, "Console -> Settings exposes Mail Recipients & Safety shortcut button")
+	mailJump:Click("LeftButton")
+	assertCheck(app.activeTab == "console_mail" and UI.GetActiveSubTab() == "console_mail",
+		"Clicking Mail Recipients & Safety button in Settings opens Console -> Mail")
+
+	-- Mail view structure, sample preview chips when 0 saved, and EditBox >= 140px
+	local mv = UI._state.mailView
+	assertCheck(mv ~= nil and mv.leftCard ~= nil and mv.rightCard ~= nil, "Console -> Mail builds 60/40 split cards")
+	assertCheck(mv.previewChips[1]:IsShown() and mv.previewChips[2]:IsShown() and not mv.previewChips[3]:IsShown(),
+		"Live Mailbox Preview shows 2 sample preview chips when 0 presets are saved")
+	assertCheck((mv.previewModeFs:GetText() or ""):find("Sample preview", 1, true) ~= nil,
+		"Preview header notes sample preview when 0 presets saved")
+	for _, pk in ipairs({ "alchemy", "blacksmithing", "enchanting", "engineering", "leatherworking", "tailoring", "cooking", "firstaid" }) do
+		local box = mv.inputs[pk]
+		assertCheck(box ~= nil and (box:GetWidth() or 0) >= 126,
+			"Profession input " .. pk .. " has width >= 126px (got " .. tostring(box and box:GetWidth()) .. ")")
+		local pBtn = mv.pickBtns[pk]
+		assertCheck(pBtn ~= nil and (pBtn:GetWidth() or 0) >= 62,
+			"Profession Pick button " .. pk .. " has width >= 62px (got " .. tostring(pBtn and pBtn:GetWidth()) .. ")")
+	end
+	for _, ck in ipairs({ "bank", "auction", "mainCrafter" }) do
+		local pBtn = mv.pickBtns[ck]
+		assertCheck(pBtn ~= nil and (pBtn:GetWidth() or 0) >= 64,
+			"Core Pick button " .. ck .. " has width >= 64px (got " .. tostring(pBtn and pBtn:GetWidth()) .. ")")
+	end
+	assertCheck(#mv.previewChips >= 5, "Live Mailbox Preview exposes at least 5 preview chip slots")
+	for i = 1, #mv.previewChips do
+		assertCheck(mv.previewChips[i]:GetHeight() == 32,
+			"Preview chip " .. i .. " uses 32px height (got " .. tostring(mv.previewChips[i]:GetHeight()) .. ")")
+	end
+
+	-- Editing bank & alchemy inputs updates MerchantMasterDB.mailPresets and switches preview to live presets
+	mv.inputs.bank:SetText("Goldbank")
+	mv.inputs.bank:GetScript("OnEnterPressed")(mv.inputs.bank)
+	mv.inputs.alchemy:SetText("Elara Vance")
+	mv.inputs.alchemy:GetScript("OnEnterPressed")(mv.inputs.alchemy)
+	assertCheck(ns.MailHelper and ns.MailHelper.IsSavedMailRecipient("Elara Vance") == true,
+		"Editing Mail tab inputs saves WoW Forever surname recipient into MerchantMasterDB.mailPresets")
+	assertCheck((mv.previewModeFs:GetText() or ""):find("2 saved preset", 1, true) ~= nil,
+		"Live preview switches from sample to 2 saved presets immediately")
+
+	-- Toggling display checkboxes updates MailHelper display options & preview immediately
+	mv.showIconCheck:SetChecked(false)
+	mv.showIconCheck:GetScript("OnClick")(mv.showIconCheck, "LeftButton")
+	mv.showNameCheck:SetChecked(false)
+	mv.showNameCheck:GetScript("OnClick")(mv.showNameCheck, "LeftButton")
+	mv.showRoleCheck:SetChecked(false)
+	mv.showRoleCheck:GetScript("OnClick")(mv.showRoleCheck, "LeftButton")
+	assertCheck(mv.previewChips[2].initFs:IsShown() and mv.previewChips[2].initFs:GetText() == "EV",
+		"Unchecking all 3 display options renders 2-letter initials in live preview")
+
+	mv.warnUnsavedCheck:SetChecked(false)
+	mv.warnUnsavedCheck:GetScript("OnClick")(mv.warnUnsavedCheck, "LeftButton")
+	assertCheck(ns.MailHelper.GetDisplayOptions().warnUnsaved == false,
+		"Unchecking Send Mail Safety Net updates display.warnUnsaved = false")
+
+	-- Confirm ConsoleEngine savedTables == 13 invariant STILL passes with MerchantMasterDB.mailPresets populated!
+	local stAfterMail = CE.CollectStorageSnapshot()
+	assertCheck(#stAfterMail.savedTables == 13,
+		"savedTables remains strictly 13 after populating MerchantMasterDB.mailPresets, got " .. tostring(#stAfterMail.savedTables))
+
+	-- Theme & skin transitions stay healthy while console_mail is active
+	Theme.SetMode("light")
+	Theme.SetMode("dark")
+	app.applyUiSkin("goblin")
+	assertCheck(UI.IsShown() and UI.GetActiveSubTab() == "console_mail",
+		"Console -> Mail remains visible and healthy across theme/skin changes")
+	app.applyUiSkin("standard")
+
+	_G.MerchantMasterDB.mailPresets = savedMailPresets
+	app.panel:Hide()
+end
+
+---------------------------------------------------------------------------------------------------
+-- 12. TSM Light Mode Toggle Card in Console -> Snapshot Settings
+---------------------------------------------------------------------------------------------------
+do
+	local savedUseTSM = _G.MerchantMasterDB.useTSMPrices
+	local savedPriceSrc = _G.MerchantMasterDB.priceSource
+	local savedExt = app.snapshotExtension
+	local savedTSMAPI = rawget(_G, "TSM_API")
+
+	app.snapshotExtension = nil
+	_G.MerchantMasterDB.useTSMPrices = false
+	_G.MerchantMasterDB.priceSource = "auto"
+	_G.TSM_API = nil
+
+	app.togglePanel("console_setup")
+	local su = UI._state.setupView
+	assertCheck(su ~= nil and su.tsmCard ~= nil and su.tsmSwitch ~= nil and su.tsmStatusFs ~= nil,
+		"Console -> Snapshot Settings exposes tsmCard, tsmSwitch, and tsmStatusFs")
+	assertCheck(su.tsmCard:GetHeight() == 52, "tsmCard height is 52px")
+	assertCheck(su.tsmSwitch:GetChecked() == false, "TSM Light Mode switch defaults OFF")
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("Off", 1, true) ~= nil,
+		"TSM Light Mode status shows Off when disabled")
+
+	-- Toggle ON (standalone, no TSM_API) -> sets useTSMPrices=true, priceSource="tsm", status="Waiting for TradeSkillMaster"
+	su.tsmSwitch:SetChecked(true)
+	su.tsmSwitch:GetScript("OnClick")(su.tsmSwitch, "LeftButton")
+	assertCheck(_G.MerchantMasterDB.useTSMPrices == true,
+		"Turning TSM Light Mode ON sets MerchantMasterDB.useTSMPrices = true")
+	assertCheck(_G.MerchantMasterDB.priceSource == "tsm",
+		"Turning TSM Light Mode ON standalone switches MerchantMasterDB.priceSource to 'tsm'")
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("Waiting for TradeSkillMaster", 1, true) ~= nil,
+		"TSM Light Mode status shows Waiting for TradeSkillMaster when TSM_API absent")
+
+	-- When TSM becomes available while ON -> shows "TSM Active (Hourly)"
+	_G.TSM_API = { GetCustomPriceValue = function() return 1000 end }
+	su.retheme()
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("TSM Active (Hourly)", 1, true) ~= nil,
+		"TSM Light Mode status shows TSM Active (Hourly) when TSM is available")
+
+	-- Toggle OFF -> sets useTSMPrices=false, resets priceSource="auto", status="Off"
+	su.tsmSwitch:SetChecked(false)
+	su.tsmSwitch:GetScript("OnClick")(su.tsmSwitch, "LeftButton")
+	assertCheck(_G.MerchantMasterDB.useTSMPrices == false,
+		"Turning TSM Light Mode OFF sets MerchantMasterDB.useTSMPrices = false")
+	assertCheck(_G.MerchantMasterDB.priceSource == "auto",
+		"Turning TSM Light Mode OFF resets MerchantMasterDB.priceSource back to 'auto'")
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("Off", 1, true) ~= nil,
+		"TSM Light Mode status returns to Off when disabled")
+
+	-- Verify ConsoleEngine settings fields documents useTSMPrices and keeps savedTables == 13
+	local stTsm = CE.CollectStorageSnapshot()
+	assertCheck(#stTsm.savedTables == 13,
+		"savedTables remains strictly 13 with TSM Light Mode setting")
+	local foundSettings = nil
+	for _, entry in ipairs(stTsm.savedTables) do
+		if entry.id == "MerchantMasterDB.settings" then foundSettings = entry; break end
+	end
+	assertCheck(foundSettings ~= nil and (foundSettings.fields or ""):find("useTSMPrices", 1, true) ~= nil,
+		"MerchantMasterDB.settings fields description includes useTSMPrices")
+
+	-- Restore environment
+	_G.MerchantMasterDB.useTSMPrices = savedUseTSM
+	_G.MerchantMasterDB.priceSource = savedPriceSrc
+	app.snapshotExtension = savedExt
+	_G.TSM_API = savedTSMAPI
 	app.panel:Hide()
 end
 

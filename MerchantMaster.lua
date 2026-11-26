@@ -67,6 +67,7 @@ local app = {
 		forged        = { col = "costPerRep",          asc = true  },
 		recipes       = { col = "profit",              asc = false },
 		all_items     = { col = "turnoverPerDay",      asc = false },
+		watchlist     = { col = "profit",              asc = false },
 		vendor_crafter = { col = "avgProfit",          asc = false },
 		disenchant_crafter = { col = "avgProfit",      asc = false },
 		shopping_list = { col = "default",             asc = true  },
@@ -126,6 +127,9 @@ function app.invalidateRecipeStats(reason, itemIDs)
 		if app.allItemsProvider and app.allItemsProvider.Invalidate then
 			app.allItemsProvider.Invalidate(reason, itemIDs)
 		end
+		if app.watchlistProvider and app.watchlistProvider.Invalidate then
+			app.watchlistProvider.Invalidate(reason, itemIDs)
+		end
 	end
 end
 
@@ -139,7 +143,8 @@ function app.bindRecipeStatsInvalidation()
 		if app.vendorCrafterProvider and app.vendorCrafterProvider.Invalidate then app.vendorCrafterProvider.Invalidate(reason, itemIDs) end
 		if app.disenchantCrafterProvider and app.disenchantCrafterProvider.Invalidate then app.disenchantCrafterProvider.Invalidate(reason, itemIDs) end
 		if app.allItemsProvider and app.allItemsProvider.Invalidate then app.allItemsProvider.Invalidate(reason, itemIDs) end
-		local wantsRefresh = (app.activeTab == "recipes" or app.activeTab == "vendor_crafter" or app.activeTab == "disenchant_crafter")
+		if app.watchlistProvider and app.watchlistProvider.Invalidate then app.watchlistProvider.Invalidate(reason, itemIDs) end
+		local wantsRefresh = (app.activeTab == "recipes" or app.activeTab == "vendor_crafter" or app.activeTab == "disenchant_crafter" or app.activeTab == "watchlist")
 			or (app.activeTab == "all_items" and (reason == nil or reason == "ownership" or reason == "prices" or reason == "items" or reason == "snapshot"))
 		if wantsRefresh and app.scheduleRecipeRefresh then app.scheduleRecipeRefresh(reason) end
 	end
@@ -1905,6 +1910,8 @@ local winChrome = ns.Theme.DecorateMainWindow(panel, {
 	baseH = PANEL_H,
 	defaultW = PANEL_W,
 	defaultH = PANEL_H,
+	adaptiveLargeDefault = true,
+	comfortableZoom = true,
 	title = "MerchantMaster",
 	icon = ns.ADDON_ICON,
 })
@@ -2989,6 +2996,20 @@ statusCapsule.surface = ns.Theme.NineApple(statusCapsule, "pill", getPal().glass
 	cornerSize = 16,
 	noSpecular = true,
 })
+statusCapsule:EnableMouse(true)
+statusCapsule:SetScript("OnEnter", function(self)
+	if not _G.GameTooltip then return end
+	_G.GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+	_G.GameTooltip:AddLine(app.ui._statusEconStr or "Active Economy", 1, 1, 1)
+	_G.GameTooltip:AddLine(app.ui._statusSyncStr or "AH Ready", 0.80, 0.85, 0.90)
+	if app.ui._statusUsingTSM then
+		_G.GameTooltip:AddLine("TSM Light Mode supplies hourly refreshed prices without local snapshot files. 7x24 heatmaps and buyout depth stay off.", 0.60, 0.88, 0.68, true)
+	end
+	_G.GameTooltip:Show()
+end)
+statusCapsule:SetScript("OnLeave", function()
+	if _G.GameTooltip then _G.GameTooltip:Hide() end
+end)
 app.ui.statusCapsule = statusCapsule
 
 local statusDot = statusCapsule:CreateTexture(nil, "ARTWORK")
@@ -3188,7 +3209,10 @@ do
 			frac = math.max(0.08, math.min(1, (app.lotScanDone or 0) / lots))
 			ui._scanSyncMinW = ui._scanSyncMinW or syncLabelWidth(string.format("Deep Scan %d/%d", lots, lots))
 		else
-			if ui._statusNoScanYet then
+			if ui._statusUsingTSM then
+				dotCol = pal.accentGreen or { 0.19, 0.82, 0.35, 1 }
+				syncCol = pal.textTertiary or pal.textSecondary
+			elseif ui._statusNoScanYet then
 				local amber = pal.accentOrange or { 1.0, 0.62, 0.04, 1 }
 				dotCol = amber
 				syncCol = amber
@@ -3670,6 +3694,7 @@ do
 			title = "OVERVIEW",
 			items = {
 				{ key = "dashboard", label = "Today's Overview", icon = "grid", tab = "dashboard" },
+				{ key = "watchlist", label = "Watchlist", icon = "star", tab = "watchlist" },
 			},
 		},
 		{
@@ -3721,9 +3746,9 @@ do
 	end
 	app.ui.sidebarSectionLayer = secHeaderLayer
 
-	local navY = -110
+	local navY = -108
 	for gi, grp in ipairs(navGroups) do
-		if gi > 1 then navY = navY - 4 end
+		if gi > 1 then navY = navY - 3 end
 		local secFs = secHeaderLayer:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 		secFs._mmTitle = grp.title
 		secFs:SetPoint("TOPLEFT", secHeaderLayer, "TOPLEFT", 16, navY)
@@ -3742,7 +3767,7 @@ do
 
 		for _, item in ipairs(grp.items) do
 			local btn = CreateFrame("Button", nil, sidebar)
-			btn:SetSize(SB_SIDEBAR_W, 23)
+			btn:SetSize(SB_SIDEBAR_W, 22)
 			btn:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 12, navY)
 			btn.key = item.key
 			btn.targetTab = item.tab
@@ -3789,7 +3814,7 @@ do
 			end)
 			app.ui.navOrder[#app.ui.navOrder + 1] = btn
 			app.ui.navBtns[item.key] = btn
-			navY = navY - 24
+			navY = navY - 23
 		end
 	end
 
@@ -12121,10 +12146,14 @@ do
 	dashboardView:SetPoint("BOTTOMRIGHT", 0, 0)
 	app.ui.dashboardView = dashboardView
 
+	local dashClassicWrap = CreateFrame("Frame", nil, dashboardView)
+	dashClassicWrap:SetAllPoints(dashboardView)
+	app.ui.dashClassicWrap = dashClassicWrap
+
 	local BENTO_GAP = 16
 
 	-- Row 1: 3 Equal 104px Borderless Apple HIG KPI Cards
-	local kpi1 = ns.Theme.CreateKpiCard(dashboardView, {
+	local kpi1 = ns.Theme.CreateKpiCard(dashClassicWrap, {
 		height = 104,
 		icon = "flask",
 		uppercase = false,
@@ -12134,7 +12163,7 @@ do
 		unit = "/ day",
 		sub = "Loading advice...",
 	})
-	kpi1.frame:SetPoint("TOPLEFT", dashboardView, "TOPLEFT", 0, 0)
+	kpi1.frame:SetPoint("TOPLEFT", dashClassicWrap, "TOPLEFT", 0, 0)
 	kpi1.frame:SetWidth(349)
 
 	app.ui.dashExpectedDailyFs = kpi1.valueFs
@@ -12148,7 +12177,7 @@ do
 	h1Roi:Hide()
 	app.ui.dashRoiFs = h1Roi
 
-	local kpi2 = ns.Theme.CreateKpiCard(dashboardView, {
+	local kpi2 = ns.Theme.CreateKpiCard(dashClassicWrap, {
 		height = 104,
 		icon = "basket",
 		uppercase = false,
@@ -12161,7 +12190,7 @@ do
 	kpi2.frame:SetWidth(349)
 	app.ui.dashStrategyFs = kpi2.subFs
 
-	local kpi3 = ns.Theme.CreateKpiCard(dashboardView, {
+	local kpi3 = ns.Theme.CreateKpiCard(dashClassicWrap, {
 		alignValue = "RIGHT",
 		height = 104,
 		icon = "crate",
@@ -12171,16 +12200,16 @@ do
 		sub = "Scanning crates & writs...",
 	})
 	kpi3.frame:SetPoint("TOPLEFT", kpi2.frame, "TOPRIGHT", BENTO_GAP, 0)
-	kpi3.frame:SetPoint("TOPRIGHT", dashboardView, "TOPRIGHT", 0, 0)
+	kpi3.frame:SetPoint("TOPRIGHT", dashClassicWrap, "TOPRIGHT", 0, 0)
 
 	app.ui.dashKpis = { kpi1, kpi2, kpi3 }
 
 	-- First-run dismissible 2-step onboarding card (hidden once first AH scan completes, snapshots load, or dismissed)
 	do
-		local onboardCard = CreateFrame("Frame", nil, dashboardView)
+		local onboardCard = CreateFrame("Frame", nil, dashClassicWrap)
 		onboardCard:SetHeight(82)
-		onboardCard:SetPoint("TOPLEFT", dashboardView, "TOPLEFT", 0, -120)
-		onboardCard:SetPoint("TOPRIGHT", dashboardView, "TOPRIGHT", 0, -120)
+		onboardCard:SetPoint("TOPLEFT", dashClassicWrap, "TOPLEFT", 0, -120)
+		onboardCard:SetPoint("TOPRIGHT", dashClassicWrap, "TOPRIGHT", 0, -120)
 		onboardCard.surface = ns.Theme.NineApple(onboardCard, "glass_r10", getPal().cardBg, false, {
 			noSpecular = true,
 		})
@@ -12359,7 +12388,7 @@ do
 	app.applyDashRowSkin = dashSkin.applyRow
 
 	local function createBentoCard(titleText, seeAllTab, seeAllLabel)
-		local card = CreateFrame("Frame", nil, dashboardView)
+		local card = CreateFrame("Frame", nil, dashClassicWrap)
 		card.surface = ns.Theme.NineApple(card, "glass_r10", getPal().cardBg, false, {
 			noSpecular = true,
 		})
@@ -12494,7 +12523,7 @@ do
 
 	-- Row 2: Side-by-Side Bento Cards (Daily Velocity Crafts vs Monopoly Opportunities)
 	local leftCard = createBentoCard("Daily Velocity Crafts", "profit_spread", "Guaranteed sellers")
-	leftCard:SetPoint("TOPLEFT", dashboardView, "TOPLEFT", 0, -120)
+	leftCard:SetPoint("TOPLEFT", dashClassicWrap, "TOPLEFT", 0, -120)
 	leftCard:SetSize(532, 240)
 	attachBentoSubheader(leftCard, true)
 	app.ui.dashLeftCard = leftCard
@@ -12507,11 +12536,22 @@ do
 	leftCard.hdrFs:SetPoint("RIGHT", dashFiltersBtn, "LEFT", -8, 0)
 
 	local rightCard = createBentoCard("Monopoly Opportunities", "outliers", "3 opportunities")
-	rightCard:SetPoint("TOPRIGHT", dashboardView, "TOPRIGHT", 0, -120)
+	rightCard:SetPoint("TOPRIGHT", dashClassicWrap, "TOPRIGHT", 0, -120)
 	rightCard:SetSize(532, 240)
 	attachBentoSubheader(rightCard, false)
 	app.ui.dashRightCard = rightCard
 	app.ui.dashRightHdrFs = rightCard.hdrFs
+	local dashBriefReturnBtn = ns.Theme.CreatePlateButton(rightCard.hdrBar, "Morning Brief", 96, 22, {
+		variant = "secondary",
+		pill = true,
+		fontSize = 10,
+		weight = "semibold",
+	})
+	dashBriefReturnBtn:SetPoint("RIGHT", rightCard.seeAllBtn, "LEFT", -8, 0)
+	dashBriefReturnBtn:SetScript("OnClick", function()
+		if app.setDashboardMode then app.setDashboardMode("brief") end
+	end)
+	app.ui.dashBriefReturnBtn = dashBriefReturnBtn
 
 	local function createDashNameHover(row, onEnter)
 		local hit = CreateFrame("Button", nil, row)
@@ -12820,8 +12860,8 @@ do
 
 	-- Row 3 Left: Best Crates & Writs (2-Section Mini-Table matching target-overview)
 	local turninCard = createBentoCard("Best Crates & Writs", "crates", "Favor & reputation")
-	turninCard:SetPoint("TOPLEFT", dashboardView, "TOPLEFT", 0, -376)
-	turninCard:SetPoint("BOTTOMLEFT", dashboardView, "BOTTOMLEFT", 0, 0)
+	turninCard:SetPoint("TOPLEFT", dashClassicWrap, "TOPLEFT", 0, -376)
+	turninCard:SetPoint("BOTTOMLEFT", dashClassicWrap, "BOTTOMLEFT", 0, 0)
 	turninCard:SetWidth(532)
 	app.ui.dashTurninCard = turninCard
 
@@ -13005,8 +13045,8 @@ do
 
 	-- Row 3 Right: Active Shopping Basket (4 ruled 5-col rows + Total + Shopping List / Buy on AH)
 	local basketCard = createBentoCard("Active Shopping Basket", nil, nil)
-	basketCard:SetPoint("TOPRIGHT", dashboardView, "TOPRIGHT", 0, -376)
-	basketCard:SetPoint("BOTTOMRIGHT", dashboardView, "BOTTOMRIGHT", 0, 0)
+	basketCard:SetPoint("TOPRIGHT", dashClassicWrap, "TOPRIGHT", 0, -376)
+	basketCard:SetPoint("BOTTOMRIGHT", dashClassicWrap, "BOTTOMRIGHT", 0, 0)
 	basketCard:SetWidth(532)
 	app.ui.dashBasketCard = basketCard
 
@@ -13300,6 +13340,70 @@ do
 		if basketEmptyFs then basketEmptyFs:SetShown(#preview == 0) end
 		if app.ui._syncSkinBasketCount then app.ui._syncSkinBasketCount() end
 		if customSkin and app.refreshDashRowIcons then app.refreshDashRowIcons() end
+	end
+
+	function app.getDashboardMode()
+		local db = MerchantMasterDB
+		if type(db) == "table" and db.dashboardMode == "classic" then
+			return "classic"
+		end
+		return "brief"
+	end
+
+	function app.ensureDashboardBrief()
+		if app.ui.dashBriefView then return app.ui.dashBriefView end
+		if not (ns.DashboardBrief and type(ns.DashboardBrief.Create) == "function") then return nil end
+		local brief = ns.DashboardBrief.Create(dashboardView, {
+			onModeChange = function(mode)
+				if app.setDashboardMode then app.setDashboardMode(mode) end
+			end,
+			onOpenDeepAnalysis = function(spec, ret)
+				if app.openDeepAnalysis then app.openDeepAnalysis(spec, ret) end
+			end,
+			onAddToCart = function(itemID, qty, name)
+				if app.adjustItemShoppingQty then
+					app.adjustItemShoppingQty({ itemID = itemID, name = name }, qty)
+					return true
+				end
+				return false
+			end,
+			getPriceBank = function()
+				return app.getUIPriceBank and app.getUIPriceBank() or nil
+			end,
+			getEconKey = function()
+				local info = ns.CurrentEconomyInfo and ns.CurrentEconomyInfo()
+				return (info and info.effectiveKey) or (ns.DetectActiveEconomy and ns.DetectActiveEconomy()) or "Normal-Horde"
+			end,
+		})
+		app.ui.dashBriefView = brief
+		return brief
+	end
+
+	function app.syncDashboardMode()
+		local brief = app.ensureDashboardBrief()
+		local mode = app.getDashboardMode()
+		local showBrief = (mode == "brief" and brief ~= nil)
+		if brief then
+			brief:SetShown(showBrief)
+			if brief.SetMode then brief:SetMode(mode, true) end
+		end
+		if app.ui.dashClassicWrap then
+			app.ui.dashClassicWrap:SetShown(not showBrief)
+		end
+		return mode
+	end
+
+	function app.setDashboardMode(mode)
+		local nextMode = (mode == "classic") and "classic" or "brief"
+		if type(MerchantMasterDB) == "table" then
+			MerchantMasterDB.dashboardMode = nextMode
+		end
+		app.syncDashboardMode()
+		if panel:IsShown() and app.activeTab == "dashboard" then
+			if app.layoutWindow then app.layoutWindow() end
+			if app.refresh then app.refresh() end
+		end
+		return nextMode
 	end
 
 	ns.Theme.RegisterWidget(basketFooter, function()
@@ -15294,6 +15398,9 @@ function app.adjustItemShoppingQty(rowOrID, delta)
 	if app.allItemsProvider and app.allItemsProvider.RepaintShoppingQty then
 		app.allItemsProvider.RepaintShoppingQty()
 	end
+	if app.watchlistProvider and app.watchlistProvider.RepaintShoppingQty then
+		app.watchlistProvider.RepaintShoppingQty()
+	end
 	return nextQty
 end
 
@@ -15309,6 +15416,26 @@ function app.resetAllItemsFilters()
 	app.resetSearchBox(app.ui and app.ui.searchBox)
 	if app.allItemsProvider and app.allItemsProvider.Refresh then
 		app.allItemsProvider.Refresh(app.buildAllItemsContext())
+	else
+		app.refresh()
+	end
+end
+
+function app.buildWatchlistContext(opts)
+	opts = opts or {}
+	local o = {}
+	for k, v in pairs(opts) do o[k] = v end
+	return app.buildSuperListContext(o)
+end
+
+function app.resetWatchlistFilters()
+	local db = MerchantMasterDB or {}
+	db.watchlistFilter = "all"
+	db.watchlistKnownFilter = "all"
+	db.watchlistDemandFilter = "all"
+	app.resetSearchBox(app.ui and app.ui.searchBox)
+	if app.watchlistProvider and app.watchlistProvider.Refresh then
+		app.watchlistProvider.Refresh(app.buildWatchlistContext())
 	else
 		app.refresh()
 	end
@@ -17642,6 +17769,7 @@ end
 
 local VIEW_TITLES = {
 	dashboard     = "Today's Overview",
+	watchlist     = "Watchlist",
 	profit_spread = "Market & Crafts",
 	outliers      = "Market & Crafts",
 	recipes       = "Market & Crafts",
@@ -17671,6 +17799,7 @@ local VIEW_TITLES = {
 	console_perf     = "Console - Performance & Debug",
 	console_setup    = "Console - Snapshot Settings",
 	console_settings = "Console - Settings",
+	console_mail     = "Console - Mail",
 	console_ui       = "Console - Addon UI",
 	console_data     = "Console - Data & Maintenance",
 	deep_analysis = "Deep Analysis",
@@ -17731,7 +17860,7 @@ local function applyPanelLayout()
 
 	if t ~= "bags" then
 		winChrome.window:SetCompact(false)
-		if t ~= "recipes" and t ~= "all_items" and t ~= "vendor_crafter" and t ~= "disenchant_crafter" and winChrome.window.SetMinimumWidth then winChrome.window:SetMinimumWidth(1320) end
+		if t ~= "recipes" and t ~= "all_items" and t ~= "watchlist" and t ~= "vendor_crafter" and t ~= "disenchant_crafter" and winChrome.window.SetMinimumWidth then winChrome.window:SetMinimumWidth(1320) end
 		winChrome.window:ApplyFull()
 		app.ui.bagHeaderTab:Hide()
 		app.ui.backFullBtn:Hide()
@@ -17805,6 +17934,8 @@ local function applyPanelLayout()
 	local activeNav = "dashboard"
 	if navTab == "dashboard" then
 		activeNav = "dashboard"
+	elseif navTab == "watchlist" then
+		activeNav = "watchlist"
 	elseif navTab == "profit_spread" then
 		activeNav = "profit_spread"
 	elseif navTab == "outliers" then
@@ -17873,6 +18004,12 @@ local function applyPanelLayout()
 	end
 
 	app.ui.dashboardView:SetShown(t == "dashboard")
+	if t == "dashboard" and app.syncDashboardMode then app.syncDashboardMode() end
+	local showWatchlist = (t == "watchlist")
+	if app.ui.watchlistView and app.ui.watchlistView:IsShown() ~= showWatchlist then
+		app.ui.watchlistView:SetShown(showWatchlist)
+	end
+	if app.watchlistProvider then app.watchlistProvider.Layout(mainArea:GetWidth(), mainArea:GetHeight()) end
 	app.ui.profitSpreadView:SetShown(t == "profit_spread")
 	app.ui.outliersView:SetShown(t == "outliers")
 	app.ui.cratesView:SetShown(t == "crates")
@@ -17953,6 +18090,8 @@ local function applyPanelLayout()
 		end
 	elseif t == "dashboard" then
 		app.layoutSidebarOptions({ app.ui.dashResetFiltersBtn, app.ui.dashScopeBtn, app.ui.recipeSourcesBtn, app.ui.crateTooltipCheck })
+	elseif t == "watchlist" then
+		app.layoutSidebarOptions(app.watchlistProvider and app.watchlistProvider.GetSidebarControls() or {})
 	elseif t == "profit_spread" then
 		app.layoutSidebarOptions({ app.ui.spreadResetFiltersBtn, app.ui.spreadCountBtn, app.ui.diversifyCheck, app.ui.recipeSourcesBtn, app.ui.recCraftFilterBtn, app.ui.recDemandFilterBtn, app.ui.subCraftBtn, app.ui.clearSpreadQueueBtn })
 	elseif t == "outliers" then
@@ -18004,6 +18143,7 @@ local VALID_LEAF_TABS = {
 	an_portfolio = true, an_invest = true, an_writs = true,
 	prof_path = true, prof_shop = true, prof_browse = true,
 	dashboard = true,
+	watchlist = true,
 	profit_spread = true,
 	outliers = true,
 	recipes = true,
@@ -18025,6 +18165,7 @@ local VALID_LEAF_TABS = {
 	console_perf = true,
 	console_setup = true,
 	console_settings = true,
+	console_mail = true,
 	console_ui = true,
 	console_data = true,
 	deep_analysis = true,
@@ -18588,7 +18729,7 @@ do
 				app.ui.sidebarSectionLayer:SetFrameLevel((sidebar:GetFrameLevel() or 1) + 2)
 			end
 		end
-		local customSectionY = { -68, -125, -256, -349, -404, -459 }
+		local customSectionY = { -66, -136, -260, -348, -400, -452 }
 		for i, sec in ipairs(app.ui.sidebarSections or {}) do
 			sec:SetShown(not compact)
 			sec:ClearAllPoints()
@@ -18672,13 +18813,13 @@ do
 				fs:SetPoint("TOPLEFT", wallet, "TOPLEFT", on and 58 or 12, i == 1 and -71 or -90)
 			end
 		end
-		local customNavY = { -82, -139, -158, -177, -196, -215, -234, -270, -289, -308, -327, -363, -382, -418, -437, -473 }
+		local customNavY = { -80, -98, -150, -168, -186, -204, -222, -240, -274, -292, -310, -328, -362, -380, -414, -432, -466 }
 		for i, nb in ipairs(app.ui.navOrder or {}) do
 			local active = nb.key == app.ui._activeNavKey
 			nb:ClearAllPoints()
-			if on then nb:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 12, customNavY[i] or (-82 - (i - 1) * 19))
+			if on then nb:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 12, customNavY[i] or (-80 - (i - 1) * 18))
 			else nb:SetPoint(unpack(originalNavPoints[nb])) end
-			nb:SetSize(on and 196 or 192, on and 18 or 23)
+			nb:SetSize(on and 196 or 192, on and 17 or 22)
 			nb.iconTex:SetShown(not on)
 			nb.labelFs:ClearAllPoints()
 			nb.labelFs:SetPoint("LEFT", on and nb or nb.iconTex, on and "LEFT" or "RIGHT", on and 12 or 9, 0)
@@ -18689,8 +18830,8 @@ do
 			nb.activeBg:SetShown(not on and active)
 		end
 		basketNav:ClearAllPoints()
-		basketNav:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 12, -101)
-		basketNav:SetSize(196, 18)
+		basketNav:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 12, -116)
+		basketNav:SetSize(196, 17)
 		basketNav:SetShown(on and not compact and app.activeTab ~= "bags")
 		material(basketNav, "skinBackground", nil, on, pal.cardAltBg)
 		perimeter(basketNav, on, pal.frameInnerBorder)
@@ -18837,6 +18978,9 @@ function app.setTab(tab)
 	if app.allItemsProvider and app.allItemsProvider.CloseHeatPopover and tab ~= "all_items" then
 		app.allItemsProvider.CloseHeatPopover()
 	end
+	if app.watchlistProvider and app.watchlistProvider.CloseHeatPopover and tab ~= "watchlist" then
+		app.watchlistProvider.CloseHeatPopover()
+	end
 	if app._minimized and tab ~= "bags" and app.setMinimized then
 		app.setMinimized(false, true)
 	end
@@ -18855,7 +18999,7 @@ function app.setTab(tab)
 		app._profPreviewCleared = false
 
 	end
-	if tab ~= "recipes" and tab ~= "all_items" and tab ~= "vendor_crafter" and tab ~= "disenchant_crafter" and tab ~= "bags" and winChrome.window and winChrome.window.SetMinimumWidth then
+	if tab ~= "recipes" and tab ~= "all_items" and tab ~= "watchlist" and tab ~= "vendor_crafter" and tab ~= "disenchant_crafter" and tab ~= "bags" and winChrome.window and winChrome.window.SetMinimumWidth then
 		winChrome.window:SetMinimumWidth(1320)
 	end
 	if db and tab ~= "deep_analysis" then db.activeTab = tab end
@@ -18921,7 +19065,7 @@ function app.resetPageFilters(defaults)
 end
 
 function app.resetCurrentViewFilters()
-	local methods = { dashboard = "resetDashboardFilters", profit_spread = "resetSpreadFilters",
+	local methods = { dashboard = "resetDashboardFilters", watchlist = "resetWatchlistFilters", profit_spread = "resetSpreadFilters",
 		outliers = "resetOutliersFilters", all_items = "resetAllItemsFilters", vendor_crafter = "resetVendorCrafterFilters", disenchant_crafter = "resetDisenchantCrafterFilters", crates = "resetCratesFilters", writs = "resetWritsFilters", forged = "resetForgedFilters",
 		rep = "resetRepViewFilters", calc_favor = "resetFavorCalcFilters", calc_rep = "resetRepCalcFilters" }
 	local method = methods[app.activeTab]
@@ -19255,8 +19399,12 @@ local function refreshPanelImpl()
 		end
 		local econStr = (econInfo.selectedKey == "auto") and ("Auto · " .. econLabel) or econLabel
 		local hasSnaps = (ns.HasSnapshots and ns.HasSnapshots()) and true or false
-		local noScanYet = (ts == nil and liveAt == nil and not hasSnaps)
-		local syncStr = noScanYet and "No AH Scan Yet" or string.format("%s %s", srcTag, ageLbl)
+		local liveIsRecent = (liveAt ~= nil and now ~= nil and (now - liveAt) <= 1800) and true or false
+		local tsmAvail = (econInfo and econInfo.isActive and ns.IsTSMAvailable and ns.IsTSMAvailable()) and true or false
+		local usingTSM = tsmAvail and (srcKey == "tsm" or (srcKey == "auto" and not useSnap and not liveIsRecent))
+		local noScanYet = (not usingTSM) and (ts == nil and liveAt == nil and not hasSnaps)
+		local syncStr = usingTSM and "TSM · Hourly" or (noScanYet and "No AH Scan Yet" or string.format("%s %s", srcTag, ageLbl))
+		app.ui._statusUsingTSM = usingTSM
 		app.ui._statusNoScanYet = noScanYet
 		app.ui._statusEconStr, app.ui._statusSyncStr = econStr, syncStr
 		app.ui.statusEconFs:SetText(econStr)
@@ -19395,7 +19543,7 @@ local function refreshPanelImpl()
 	end
 
 	if type(app.activeTab) == "string" and app.activeTab:sub(1, 8) == "console_" then
-		if (app.activeTab == "console_settings" or app.activeTab == "console_ui")
+		if (app.activeTab == "console_settings" or app.activeTab == "console_mail" or app.activeTab == "console_ui")
 			and app.consoleProvider and app.consoleProvider.SyncSettings then
 			app.consoleProvider.SyncSettings()
 		end
@@ -19735,12 +19883,25 @@ local function refreshPanelImpl()
 		if app.syncDashboardBasketCard then
 			app.syncDashboardBasketCard()
 		end
+		if app.syncDashboardMode then app.syncDashboardMode() end
+		if app.ui.dashBriefView and app.ui.dashBriefView:IsShown() and app.ui.dashBriefView.Refresh then
+			app.ui.dashBriefView:Refresh(false)
+		end
+
 		if panel:IsShown() and app.layoutWindow then
 			app.layoutWindow()
 		end
 
 		app.ui.statusText:SetText(scanBanner or string.format("Expected Profit: %s / day (%d Guaranteed + %d %s · %s)",
 			moneyText(ins.expectedProfitPerDay or 0, true), #ins.topCrafts, #ins.topOutliers, rightTag, econInfo.label))
+
+	elseif t == "watchlist" then
+		if app.watchlistProvider and app.watchlistProvider.Refresh then
+			app.watchlistProvider.Refresh(app.buildWatchlistContext({
+				counts = counts, profMap = profMap, repState = repState,
+				econInfo = econInfo, scanBanner = scanBanner, search = search,
+			}))
+		end
 
 	elseif t == "profit_spread" then
 		local spreadCount = tonumber(db.spreadCount) or 8
@@ -20370,6 +20531,7 @@ function app.layoutWindow()
 			kpiList[2].frame:SetWidth(kpiW)
 		end
 	end
+	local dashHost = app.ui.dashClassicWrap or app.ui.dashboardView
 	local dashKpis = app.ui.dashKpis
 	local dashGap = custom and 10 or 16
 	local dashKpiW = custom and math.floor((width - 20) / 3) or kpiW
@@ -20378,7 +20540,7 @@ function app.layoutWindow()
 	dashKpis[2].frame:SetPoint("TOPLEFT", dashKpis[1].frame, "TOPRIGHT", dashGap, 0)
 	dashKpis[3].frame:ClearAllPoints()
 	dashKpis[3].frame:SetPoint("TOPLEFT", dashKpis[2].frame, "TOPRIGHT", dashGap, 0)
-	dashKpis[3].frame:SetPoint("TOPRIGHT", app.ui.dashboardView, "TOPRIGHT", 0, 0)
+	dashKpis[3].frame:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, 0)
 	if app.ui.dashLeftCard then
 		local gap, top = custom and 9 or 16, custom and 78 or 120
 		local onboardShown = (app.ui.dashOnboardingCard and app.ui.dashOnboardingCard:IsShown()) and true or false
@@ -20386,8 +20548,8 @@ function app.layoutWindow()
 		if onboardShown then
 			local obH = 82
 			app.ui.dashOnboardingCard:ClearAllPoints()
-			app.ui.dashOnboardingCard:SetPoint("TOPLEFT", app.ui.dashboardView, "TOPLEFT", 0, -top)
-			app.ui.dashOnboardingCard:SetPoint("TOPRIGHT", app.ui.dashboardView, "TOPRIGHT", 0, -top)
+			app.ui.dashOnboardingCard:SetPoint("TOPLEFT", dashHost, "TOPLEFT", 0, -top)
+			app.ui.dashOnboardingCard:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, -top)
 			app.ui.dashOnboardingCard:SetHeight(obH)
 			cardsTop = top + obH + gap
 		end
@@ -20397,21 +20559,21 @@ function app.layoutWindow()
 		if row2H > 286 then row2H = 286 end
 		if custom then row2H = math.max(160, math.floor((height - cardsTop - gap) / 2)) end
 		app.ui.dashLeftCard:ClearAllPoints()
-		app.ui.dashLeftCard:SetPoint("TOPLEFT", app.ui.dashboardView, "TOPLEFT", 0, -cardsTop)
+		app.ui.dashLeftCard:SetPoint("TOPLEFT", dashHost, "TOPLEFT", 0, -cardsTop)
 		app.ui.dashRightCard:ClearAllPoints()
-		app.ui.dashRightCard:SetPoint("TOPRIGHT", app.ui.dashboardView, "TOPRIGHT", 0, -cardsTop)
+		app.ui.dashRightCard:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, -cardsTop)
 		app.ui.dashLeftCard:SetSize(halfW, row2H)
 		app.ui.dashRightCard:SetSize(halfW, row2H)
 		if app.ui.dashTurninCard then
 			app.ui.dashTurninCard:ClearAllPoints()
-			app.ui.dashTurninCard:SetPoint("TOPLEFT", app.ui.dashboardView, "TOPLEFT", 0, -cardsTop - row2H - gap)
-			app.ui.dashTurninCard:SetPoint("BOTTOMLEFT", app.ui.dashboardView, "BOTTOMLEFT", 0, 0)
+			app.ui.dashTurninCard:SetPoint("TOPLEFT", dashHost, "TOPLEFT", 0, -cardsTop - row2H - gap)
+			app.ui.dashTurninCard:SetPoint("BOTTOMLEFT", dashHost, "BOTTOMLEFT", 0, 0)
 			app.ui.dashTurninCard:SetWidth(halfW)
 		end
 		if app.ui.dashBasketCard then
 			app.ui.dashBasketCard:ClearAllPoints()
-			app.ui.dashBasketCard:SetPoint("TOPRIGHT", app.ui.dashboardView, "TOPRIGHT", 0, -cardsTop - row2H - gap)
-			app.ui.dashBasketCard:SetPoint("BOTTOMRIGHT", app.ui.dashboardView, "BOTTOMRIGHT", 0, 0)
+			app.ui.dashBasketCard:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, -cardsTop - row2H - gap)
+			app.ui.dashBasketCard:SetPoint("BOTTOMRIGHT", dashHost, "BOTTOMRIGHT", 0, 0)
 			app.ui.dashBasketCard:SetWidth(halfW)
 		end
 		local show5th = (row2H >= 280)
@@ -20421,6 +20583,10 @@ function app.layoutWindow()
 		if app.ui.dashOutlierRows and app.ui.dashOutlierRows[5] then
 			app.ui.dashOutlierRows[5]:SetShown(show5th and app.ui.dashOutlierRows[5].data ~= nil)
 		end
+	end
+	if app.ensureDashboardBrief then app.ensureDashboardBrief() end
+	if app.ui.dashBriefView and app.ui.dashBriefView.Layout then
+		app.ui.dashBriefView:Layout(width, height)
 	end
 	for _, tbl in ipairs(app.ui.resizeTables or {}) do
 		if tbl ~= app.ui.recipesTable and tbl ~= app.ui.vendorCrafterTable and tbl ~= app.ui.disenchantCrafterTable and (not tbl.resizeParent.IsVisible or tbl.resizeParent:IsVisible()) then
@@ -20432,6 +20598,7 @@ function app.layoutWindow()
 	if app.vendorCrafterProvider then app.vendorCrafterProvider.Layout(width, height) end
 	if app.disenchantCrafterProvider then app.disenchantCrafterProvider.Layout(width, height) end
 	if app.allItemsProvider then app.allItemsProvider.Layout(width, height) end
+	if app.watchlistProvider then app.watchlistProvider.Layout(width, height) end
 	if app.sniperProvider and app.sniperProvider.Layout then app.sniperProvider.Layout() end
 	if app.consoleProvider and app.consoleProvider.Layout then app.consoleProvider.Layout() end
 	ns.Window.LayoutAnalytics(ns.Analytics, width, height)
@@ -21085,12 +21252,14 @@ do
 	app.PUBLIC_SLASH_COMMANDS = {
 		{ cmd = "/mm",          desc = "open or close MerchantMaster" },
 		{ cmd = "/mm dashboard", desc = "open Today's Overview dashboard" },
+		{ cmd = "/mm watchlist", desc = "open Watchlist favorites (/mm fav)" },
 		{ cmd = "/mm spread",   desc = "open Daily Crafts (Profit Spread)" },
 		{ cmd = "/mm sniper",   desc = "open Gap Sniper (/mm vsniper for Vendor Sniper)" },
 		{ cmd = "/mm prof",     desc = "open 1-300 Profession Leveling guide" },
 		{ cmd = "/mm analytics", desc = "open Profit & Wealth ledger" },
 		{ cmd = "/mm shopping", desc = "toggle detachable Shopping List window" },
 		{ cmd = "/mm options",  desc = "open Settings (/mm blizzoptions for Blizzard Options)" },
+		{ cmd = "/mm mail",     desc = "open Console -> Mail (saved recipients & send safety net)" },
 		{ cmd = "/mm console",  desc = "open Console diagnostics & maintenance" },
 		{ cmd = "/mm snapshots", desc = "open Console -> Snapshot Settings (optional background helper)" },
 		{ cmd = "/mm scan",     desc = "refresh Live AH prices (at an Auctioneer)" },
@@ -21873,6 +22042,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
 			if MerchantMasterDB.anKnownCostOnly == nil then MerchantMasterDB.anKnownCostOnly = true end
 			if MerchantMasterDB.includeMail == nil then MerchantMasterDB.includeMail = true end
 			if MerchantMasterDB.includeBank == nil then MerchantMasterDB.includeBank = true end
+			if MerchantMasterDB.useTSMPrices == nil then MerchantMasterDB.useTSMPrices = false end
 			if MerchantMasterDB.priceSource == nil then
 				MerchantMasterDB.priceSource = "auto"
 			elseif ns.NormalizePriceSourceKey then
@@ -22706,6 +22876,8 @@ SlashCmdList.MERCHANTMASTER = function(msg)
 		app.resyncBags(true)
 	elseif msg == "options" or msg == "config" or msg == "settings" then
 		app.togglePanel("console_settings")
+	elseif msg == "mail" or msg == "mailpresets" then
+		app.togglePanel("console_mail")
 	elseif msg == "blizzoptions" then
 		openOptions()
 	elseif msg == "console" or msg == "admin" or msg == "monitor" then
@@ -22794,6 +22966,8 @@ SlashCmdList.MERCHANTMASTER = function(msg)
 		app.togglePanel("recipes")
 	elseif msg == "items" or msg == "item" or msg == "allitems" or msg == "all_items" then
 		app.togglePanel("all_items")
+	elseif msg == "watchlist" or msg == "fav" or msg == "favorites" then
+		app.togglePanel("watchlist")
 	elseif msg == "vendor" or msg == "vc" or msg == "vendorcrafter" or msg == "vendor_crafter" then
 		app.togglePanel("vendor_crafter")
 	elseif msg == "decraft" or msg == "decrafter" or msg == "disenchant" or msg == "dc" then
@@ -23107,6 +23281,54 @@ _G.MerchantMasterAPI = {
 		if panel:IsShown() then
 			applyPanelLayout()
 			if app.activeTab == "all_items" then app.refresh() end
+		end
+		return true
+	end,
+	RegisterWatchlist = function(provider)
+		if type(provider) ~= "table" then return false end
+		for _, method in ipairs({ "Create", "Refresh", "Layout", "GetSidebarControls" }) do
+			if type(provider[method]) ~= "function" then return false end
+		end
+		if app.watchlistProvider then return app.watchlistProvider == provider end
+		local wlCtx = {}
+		for k, v in pairs(superListContext) do wlCtx[k] = v end
+		wlCtx.findLabel = findLabel
+		wlCtx.isActive = function() return panel:IsShown() and app.activeTab == "watchlist" end
+		wlCtx.getSort = function() return app.sortState.watchlist end
+		wlCtx.resetWatchlistFilters = function() return app.resetWatchlistFilters() end
+		wlCtx.getItemShoppingQty = function(rowOrID) return app.getItemShoppingQty and app.getItemShoppingQty(rowOrID) or 0 end
+		wlCtx.adjustItemShoppingQty = function(rowOrID, delta) return app.adjustItemShoppingQty and app.adjustItemShoppingQty(rowOrID, delta) end
+		wlCtx.toggleFiltersPopover = function(anchor, alignLeft)
+			if app.toggleScreenFilters then return app.toggleScreenFilters(anchor, alignLeft) end
+			if app.openSidebarPopover then return app.openSidebarPopover("filters", anchor, alignLeft) end
+		end
+		wlCtx.openShoppingWindow = function(force) return app.toggleShoppingWindow(force) end
+		wlCtx.openQuickLook = function(kindOrRow, rowOrPinned, opts)
+			local kind = type(kindOrRow) == "string" and kindOrRow or "item"
+			local row = type(kindOrRow) == "string" and rowOrPinned or kindOrRow
+			local qlOpts = type(opts) == "table" and opts or {}
+			return app.openQuickLook(kind, row, qlOpts)
+		end
+		local view = provider.Create(mainArea, wlCtx)
+		app.ui.watchlistView = view
+		app.ui.watchlistTable, app.ui.watchlistSummaryFs = view.table, view.summary
+		local seen = {}
+		for _, w in ipairs(app.allDynamicSidebarControls) do seen[w] = true end
+		local function addDynCtrl(w)
+			if w and not seen[w] then
+				seen[w] = true
+				if w.Hide then w:Hide() end
+				app.allDynamicSidebarControls[#app.allDynamicSidebarControls + 1] = w
+			end
+		end
+		local okCtrls, ctrls = pcall(provider.GetSidebarControls)
+		if okCtrls and type(ctrls) == "table" then
+			for _, w in ipairs(ctrls) do addDynCtrl(w) end
+		end
+		app.watchlistProvider = provider
+		if panel:IsShown() then
+			applyPanelLayout()
+			if app.activeTab == "watchlist" then app.refresh() end
 		end
 		return true
 	end,

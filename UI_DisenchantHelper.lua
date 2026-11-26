@@ -8,6 +8,19 @@ local DisenchantHelper = {}
 ns.DisenchantHelper = DisenchantHelper
 
 local DISENCHANT_SPELL_ID = 13262
+local ENCHANTING_SKILL_LINE = 333
+local ENCHANTING_SPELL_ID = 7411
+local PROF_BTN_SIZE = 30
+local CRAFT_BTN_SIZE = 28
+local CRAFT_FRAME_NAMES = { "CraftFrame", "TradeSkillFrame", "ProfessionsFrame" }
+local WATCHED_ADDONS = {
+	Blizzard_ProfessionsBook = true,
+	Blizzard_CraftUI = true,
+	Blizzard_TradeSkillUI = true,
+	Blizzard_Professions = true,
+	MerchantMaster = true,
+}
+local COMBAT_DEFER_MSG = "MerchantMaster: Cannot open Disenchant Helper for the first time during combat - it will open when combat ends."
 local AS_MULT = 1 + (ns.DE_ARCANE_SALVAGER_BONUS or 0.20)
 local QUALITY_RGB = {
 	[2] = { 0.12, 1.00, 0.00 },
@@ -27,7 +40,16 @@ local state = {
 	arcaneSalvager = false,
 	applyAHCut = true,
 	castingNotice = nil,
+	pendingOpenAfterCombat = false,
+	pendingButtonsRefresh = false,
+	profBookBtn = nil,
+	profBookBtns = {},
+	craftWinBtns = {},
+	activeCraftWinBtn = nil,
+	eventFrame = nil,
 }
+local hookedGlobals = {}
+local hookedFrames = {}
 
 local function pal()
 	local T = ns.Theme
@@ -68,11 +90,24 @@ local function makeSlotKey(bag, slot, itemID)
 	return tostring(bag) .. ":" .. tostring(slot) .. ":" .. tostring(itemID)
 end
 
+local function hasSecret(...)
+	for i = 1, select("#", ...) do
+		local v = select(i, ...)
+		if _G.issecrettable and type(v) == "table" and _G.issecrettable(v) then return true end
+		if _G.issecretvalue and _G.issecretvalue(v) then return true end
+	end
+	return false
+end
+
 local function getBagNumSlots(bag)
 	if _G.C_Container and _G.C_Container.GetContainerNumSlots then
-		return tonumber(_G.C_Container.GetContainerNumSlots(bag)) or 0
+		local n = _G.C_Container.GetContainerNumSlots(bag)
+		if hasSecret(n) then return 0 end
+		return tonumber(n) or 0
 	elseif _G.GetContainerNumSlots then
-		return tonumber(_G.GetContainerNumSlots(bag)) or 0
+		local n = _G.GetContainerNumSlots(bag)
+		if hasSecret(n) then return 0 end
+		return tonumber(n) or 0
 	end
 	return 0
 end
@@ -80,17 +115,21 @@ end
 local function getBagSlotInfo(bag, slot)
 	if _G.C_Container and _G.C_Container.GetContainerItemInfo then
 		local info = _G.C_Container.GetContainerItemInfo(bag, slot)
-		if type(info) == "table" and info.itemID then
+		if hasSecret(info) or type(info) ~= "table" then return nil end
+		if hasSecret(info.itemID, info.hyperlink, info.iconFileID, info.stackCount, info.isBound) then return nil end
+		if info.itemID then
 			local link = info.hyperlink
 			if not link and _G.C_Container.GetContainerItemLink then
 				link = _G.C_Container.GetContainerItemLink(bag, slot)
+				if hasSecret(link) then link = nil end
 			end
 			return tonumber(info.itemID), link, info.iconFileID, tonumber(info.stackCount) or 1, info.isBound == true
 		end
 		return nil
 	elseif _G.GetContainerItemInfo then
 		local icon, count, _, quality, _, _, link = _G.GetContainerItemInfo(bag, slot)
-		if link then
+		if hasSecret(icon, count, quality, link) then return nil end
+		if type(link) == "string" then
 			local id = tonumber(link:match("item:(%d+)"))
 			return id, link, icon, tonumber(count) or 1, false, quality
 		end
@@ -99,7 +138,10 @@ local function getBagSlotInfo(bag, slot)
 end
 
 local function isInCombat()
-	return (_G.InCombatLockdown and _G.InCombatLockdown()) and true or false
+	if not _G.InCombatLockdown then return false end
+	local v = _G.InCombatLockdown()
+	if hasSecret(v) then return true end
+	return v and true or false
 end
 
 local function syncSettingsFromDB()
@@ -313,7 +355,7 @@ end
 local function getDisenchantSpellName()
 	local name = (_G.C_Spell and _G.C_Spell.GetSpellName and _G.C_Spell.GetSpellName(DISENCHANT_SPELL_ID))
 		or (_G.GetSpellInfo and _G.GetSpellInfo(DISENCHANT_SPELL_ID))
-	if type(name) == "string" and name ~= "" then
+	if not hasSecret(name) and type(name) == "string" and name ~= "" then
 		return name
 	end
 	return "Disenchant"
@@ -341,6 +383,7 @@ end
 
 local function ensureBuilt()
 	if state.frame then return state.frame end
+	if isInCombat() then return nil end
 	local T = ns.Theme
 	if not (T and T.CreateFloatingWindow) then return nil end
 
@@ -670,14 +713,20 @@ local function ensureBuilt()
 	ev:RegisterEvent("CVAR_UPDATE")
 	ev:SetScript("OnEvent", function(_, event, arg1, _, spellID)
 		if event == "CVAR_UPDATE" then
-			if arg1 == "ActionButtonUseKeyDown" then
+			if not hasSecret(arg1) and arg1 == "ActionButtonUseKeyDown" then
 				syncButtonClickEdge(f.deBtn)
 			end
 			return
 		end
+		if event == "PLAYER_REGEN_ENABLED" then
+			if state.pendingButtonsRefresh and not isInCombat() then
+				state.pendingButtonsRefresh = false
+				DisenchantHelper.RefreshProfessionButtons()
+			end
+		end
 		if not f:IsShown() then return end
 		if event == "UNIT_SPELLCAST_SUCCEEDED" then
-			if arg1 == "player" and spellID == DISENCHANT_SPELL_ID then
+			if not hasSecret(arg1, spellID) and arg1 == "player" and spellID == DISENCHANT_SPELL_ID then
 				state.castingNotice = "Disenchanted - waiting for bag update..."
 				DisenchantHelper.ScanBags()
 			end
@@ -847,8 +896,11 @@ updateUI = function()
 	local macro = buildMacroForItem(cur)
 	applyButtonMacro(f.deBtn, macro)
 	syncButtonClickEdge(f.deBtn)
-	local canClick = (cur ~= nil) and (not isInCombat())
-	if f.deBtn.SetEnabled then f.deBtn:SetEnabled(canClick) end
+	local inCombat = isInCombat()
+	local canClick = (cur ~= nil) and (not inCombat)
+	if not inCombat then
+		if f.deBtn.SetEnabled then f.deBtn:SetEnabled(canClick) end
+	end
 	if canClick then
 		f.deBtn.label:SetText(string.format("DISENCHANT (%d left)", selCount))
 		f.deBtn.label:SetTextColor(1, 1, 1, 1)
@@ -858,7 +910,7 @@ updateUI = function()
 			if surf.SetStroke then surf:SetStroke(0.82, 0.62, 1.0, 0.92) end
 		end
 	else
-		f.deBtn.label:SetText(isInCombat() and "IN COMBAT" or "DISENCHANT")
+		f.deBtn.label:SetText(inCombat and "IN COMBAT" or "DISENCHANT")
 		f.deBtn.label:SetTextColor(mutedCol[1], mutedCol[2], mutedCol[3], 1)
 		local surf = f.deBtn.surface
 		if surf and surf.SetFill then
@@ -874,19 +926,34 @@ function DisenchantHelper.ScrollBy(delta)
 	return scrollListBy(delta)
 end
 
+local function deferFirstOpenInCombat()
+	if not state.frame and isInCombat() then
+		state.pendingOpenAfterCombat = true
+		if _G.print then
+			_G.print(COMBAT_DEFER_MSG)
+		end
+		return true
+	end
+	return false
+end
+
 function DisenchantHelper.Show()
+	if deferFirstOpenInCombat() then return false end
 	local f = ensureBuilt()
 	if not f then return false end
+	state.pendingOpenAfterCombat = false
 	f:Show()
 	DisenchantHelper.ScanBags()
 	return true
 end
 
 function DisenchantHelper.Hide()
+	state.pendingOpenAfterCombat = false
 	if state.frame then state.frame:Hide() end
 end
 
 function DisenchantHelper.Toggle()
+	if deferFirstOpenInCombat() then return false end
 	local f = ensureBuilt()
 	if not f then return false end
 	if f:IsShown() then
@@ -894,6 +961,588 @@ function DisenchantHelper.Toggle()
 		return false
 	end
 	return DisenchantHelper.Show()
+end
+
+---------------------------------------------------------------------------------------------------
+-- Launcher Buttons in Blizzard Professions Spellbook & Enchanting Craft Windows
+---------------------------------------------------------------------------------------------------
+local function isFrameVisible(fr)
+	if not fr then return false end
+	if type(fr.IsVisible) == "function" then
+		local vis = fr:IsVisible()
+		if not hasSecret(vis) then
+			return vis and true or false
+		end
+	end
+	if type(fr.IsShown) == "function" then
+		local sh = fr:IsShown()
+		if not hasSecret(sh) then
+			return sh and true or false
+		end
+	end
+	return false
+end
+
+local function isProfBookVisible(profFrame)
+	if not isFrameVisible(profFrame) then return false end
+	if profFrame == _G.SpellBookProfessionFrame and _G.SpellBookFrame then
+		if not isFrameVisible(_G.SpellBookFrame) then return false end
+	end
+	return true
+end
+
+local function getEnchantingSpellName()
+	local name = (_G.C_Spell and _G.C_Spell.GetSpellName and _G.C_Spell.GetSpellName(ENCHANTING_SPELL_ID))
+		or (_G.GetSpellInfo and _G.GetSpellInfo(ENCHANTING_SPELL_ID))
+	if not hasSecret(name) and type(name) == "string" and name ~= "" then
+		return name
+	end
+	return "Enchanting"
+end
+
+local function isEnchantingName(name)
+	if hasSecret(name) or type(name) ~= "string" or name == "" then return false end
+	local low = name:lower()
+	if low == "enchanting" then return true end
+	local locName = getEnchantingSpellName()
+	if type(locName) == "string" and locName ~= "" and low == locName:lower() then
+		return true
+	end
+	return false
+end
+
+local function paintLauncherButton(btn)
+	if not btn then return end
+	local T = ns.Theme
+	local p = pal()
+	local isLight = (p.mode == "light")
+	local hovered = (btn._hovered == true)
+	local customSkin = (T and T.IsCustomSkin and T.IsCustomSkin()) and true or false
+	local deTex = (customSkin and T and T.GetSkinAsset and T.GetSkin)
+		and T.GetSkinAsset(T.GetSkin(), "de_btn") or nil
+
+	if customSkin and deTex and btn.skinArt then
+		if btn.surface and btn.surface.SetShown then
+			btn.surface:SetShown(false)
+		elseif btn.surface and btn.surface.UpdateTheme then
+			btn.surface:UpdateTheme({ 0, 0, 0, 0 }, false)
+		end
+		if btn.iconTex then btn.iconTex:Hide() end
+		btn.skinArt:SetTexture(deTex)
+		local boost = hovered and 1.0 or 0.95
+		btn.skinArt:SetVertexColor(boost, boost, boost, 1)
+		btn.skinArt:Show()
+		if btn.skinHover then
+			btn.skinHover:SetTexture(deTex)
+			btn.skinHover:Show()
+		end
+	else
+		if btn.skinArt then btn.skinArt:Hide() end
+		if btn.skinHover then btn.skinHover:Hide() end
+		if btn.surface and btn.surface.SetShown then btn.surface:SetShown(true) end
+		local dCol = isLight and { 0.34, 0.20, 0.64, 1.0 } or { 0.36, 0.22, 0.66, 1.0 }
+		if hovered then
+			dCol = {
+				math.min(1, dCol[1] + (isLight and 0.08 or 0.12)),
+				math.min(1, dCol[2] + (isLight and 0.08 or 0.10)),
+				math.min(1, dCol[3] + 0.08),
+				1.0,
+			}
+		end
+		btn._fillColor = dCol
+		if btn.surface and btn.surface.UpdateTheme then
+			btn.surface:UpdateTheme(dCol, false)
+		end
+		if btn.iconTex then
+			btn.iconTex:Show()
+			if btn.iconTex.SetVertexColor then
+				btn.iconTex:SetVertexColor(1, 1, 1, 1)
+			end
+		end
+	end
+end
+
+local function createLauncherButton(parent, size)
+	local T = ns.Theme
+	local sz = tonumber(size) or 28
+	local btn = CreateFrame("Button", nil, parent)
+	btn:SetSize(sz, sz)
+	btn:SetText("")
+	if btn.EnableMouse then btn:EnableMouse(true) end
+	if btn.RegisterForClicks then btn:RegisterForClicks("LeftButtonUp") end
+
+	if T and T.NineApple then
+		btn.surface = T.NineApple(btn, "pill", { 0.36, 0.22, 0.66, 1.0 }, false, {
+			cornerSize = math.floor(sz / 2),
+		})
+	end
+	if T and T.AppleIcon then
+		btn.iconTex = T.AppleIcon(btn, "star", math.max(12, math.floor(sz * 0.56)), { 1, 1, 1, 1 })
+		btn.iconTex:SetPoint("CENTER", btn, "CENTER", 0, 0)
+	end
+	btn.skinArt = btn:CreateTexture(nil, "ARTWORK", nil, 1)
+	btn.skinArt:SetAllPoints(btn)
+	btn.skinArt:Hide()
+	btn.skinHover = btn:CreateTexture(nil, "HIGHLIGHT")
+	btn.skinHover:SetAllPoints(btn)
+	if btn.skinHover.SetBlendMode then btn.skinHover:SetBlendMode("ADD") end
+	btn.skinHover:SetVertexColor(1, 0.96, 0.85, 0.20)
+	btn.skinHover:Hide()
+
+	btn:SetScript("OnClick", function()
+		DisenchantHelper.Toggle()
+	end)
+	btn:SetScript("OnEnter", function(self)
+		self._hovered = true
+		paintLauncherButton(self)
+		if _G.GameTooltip then
+			_G.GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			_G.GameTooltip:AddLine("Disenchant Helper", 1, 1, 1)
+			_G.GameTooltip:AddLine("Scan bag gear and queue greens/blues for continuous 1-click Disenchanting.", 0.85, 0.85, 0.88, true)
+			_G.GameTooltip:AddLine("Click to open or close Disenchant Helper.", 0.78, 0.62, 1)
+			_G.GameTooltip:Show()
+		end
+	end)
+	btn:SetScript("OnLeave", function(self)
+		self._hovered = false
+		paintLauncherButton(self)
+		if _G.GameTooltip_Hide then
+			_G.GameTooltip_Hide()
+		elseif _G.GameTooltip and _G.GameTooltip.Hide then
+			_G.GameTooltip:Hide()
+		end
+	end)
+
+	paintLauncherButton(btn)
+	if T and T.RegisterWidget then
+		T.RegisterWidget(btn, function()
+			paintLauncherButton(btn)
+		end)
+	end
+	btn:Hide()
+	return btn
+end
+
+local function isDisenchantSpellButton(btn, spellOffset, numAbilities, slotHint)
+	if not btn then return false end
+	local deName = getDisenchantSpellName()
+	local deLow = deName:lower()
+
+	if btn.spellID ~= nil and not hasSecret(btn.spellID) then
+		if btn.spellID == DISENCHANT_SPELL_ID then return true end
+	end
+
+	local slot = nil
+	if type(btn.slotID) == "number" and not hasSecret(btn.slotID) and btn.slotID > 0 then
+		slot = btn.slotID
+	elseif type(btn.spellIndex) == "number" and not hasSecret(btn.spellIndex) and btn.spellIndex > 0 then
+		slot = btn.spellIndex
+	elseif type(btn.GetID) == "function" then
+		local rawID = btn:GetID()
+		if not hasSecret(rawID) and type(rawID) == "number" and rawID > 0 then
+			local off = (type(btn.spellOffset) == "number" and not hasSecret(btn.spellOffset) and btn.spellOffset)
+				or (type(spellOffset) == "number" and spellOffset) or 0
+			if off > 0 and rawID <= math.max(2, tonumber(numAbilities) or 2) then
+				slot = off + rawID
+			else
+				slot = rawID
+			end
+		end
+	end
+	if not slot and type(spellOffset) == "number" and type(slotHint) == "number" then
+		if (tonumber(numAbilities) or 0) >= slotHint then
+			slot = spellOffset + slotHint
+		end
+	end
+
+	if slot and _G.C_SpellBook and type(_G.C_SpellBook.GetSpellBookItemInfo) == "function" then
+		local bank = (_G.Enum and _G.Enum.SpellBookSpellBank and _G.Enum.SpellBookSpellBank.Player) or 0
+		local ok, info = pcall(_G.C_SpellBook.GetSpellBookItemInfo, slot, bank)
+		if ok and type(info) == "table" and not hasSecret(info) then
+			if (not hasSecret(info.spellID) and info.spellID == DISENCHANT_SPELL_ID)
+				or (not hasSecret(info.actionID) and info.actionID == DISENCHANT_SPELL_ID) then
+				return true
+			end
+			if not hasSecret(info.name) and type(info.name) == "string" and info.name ~= "" then
+				local sl = info.name:lower()
+				if sl == "disenchant" or sl == deLow then return true end
+			end
+		end
+	end
+
+	if slot and type(_G.GetSpellBookItemInfo) == "function" then
+		local bookTypes = { _G.BOOKTYPE_PROFESSION or "professions", _G.BOOKTYPE_SPELL or "spell" }
+		for _, bt in ipairs(bookTypes) do
+			local ok, skillType, spellID = pcall(_G.GetSpellBookItemInfo, slot, bt)
+			if ok and not hasSecret(skillType, spellID) and spellID == DISENCHANT_SPELL_ID then
+				return true
+			end
+			if type(_G.GetSpellBookItemName) == "function" then
+				local nok, sname = pcall(_G.GetSpellBookItemName, slot, bt)
+				if nok and not hasSecret(sname) and type(sname) == "string" and sname ~= "" then
+					local sl = sname:lower()
+					if sl == "disenchant" or sl == deLow then return true end
+				end
+			end
+		end
+	end
+
+	local labelFs = btn.spellString
+		or (type(btn.GetName) == "function" and btn:GetName() and _G[btn:GetName() .. "SpellName"])
+	if labelFs and type(labelFs.GetText) == "function" then
+		local txt = labelFs:GetText()
+		if not hasSecret(txt) and type(txt) == "string" and txt ~= "" then
+			local tl = txt:lower()
+			if tl == "disenchant" or tl == deLow then return true end
+		end
+	end
+
+	return false
+end
+
+local function findEnchantingDisenchantButton(profBookFrame)
+	if not isProfBookVisible(profBookFrame) then return nil, nil end
+	if type(_G.GetProfessions) ~= "function" or type(_G.GetProfessionInfo) ~= "function" then
+		return nil, nil
+	end
+	local okP, p1, p2 = pcall(_G.GetProfessions)
+	if not okP or hasSecret(p1, p2) then return nil, nil end
+
+	local primaryIndices = { p1, p2 }
+	for slotIdx = 1, 2 do
+		local profIdx = primaryIndices[slotIdx]
+		if type(profIdx) == "number" and profIdx > 0 then
+			local okI, name, _, _, _, numAbilities, spellOffset, skillLine = pcall(_G.GetProfessionInfo, profIdx)
+			if okI and not hasSecret(name, numAbilities, spellOffset, skillLine) then
+				if skillLine == ENCHANTING_SKILL_LINE or isEnchantingName(name) then
+					local panelName = "PrimaryProfession" .. slotIdx
+					local profPanel = profBookFrame[panelName] or _G[panelName]
+					if profPanel and isFrameVisible(profPanel) then
+						local rawCandidates = {
+							{ btn = profPanel.SpellButtonTop, hint = 1 },
+							{ btn = profPanel.SpellButtonBottom, hint = 2 },
+							{ btn = profPanel.button1, hint = 1 },
+							{ btn = profPanel.button2, hint = 2 },
+							{ btn = profPanel.SpellButton1, hint = 1 },
+							{ btn = profPanel.SpellButton2, hint = 2 },
+							{ btn = _G[panelName .. "SpellButtonTop"], hint = 1 },
+							{ btn = _G[panelName .. "SpellButtonBottom"], hint = 2 },
+						}
+						local seen = {}
+						for _, entry in ipairs(rawCandidates) do
+							local b = entry.btn
+							if b and not seen[b] then
+								seen[b] = true
+								if isFrameVisible(b) and isDisenchantSpellButton(b, spellOffset, numAbilities, entry.hint) then
+									return b, profPanel
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	return nil, nil
+end
+
+local function getFrameBoundsX(fr)
+	if not fr then return nil, nil end
+	local l = type(fr.GetLeft) == "function" and fr:GetLeft() or nil
+	local r = type(fr.GetRight) == "function" and fr:GetRight() or nil
+	local w = type(fr.GetWidth) == "function" and fr:GetWidth() or nil
+	if hasSecret(l, r, w) then return nil, nil end
+	if type(l) == "number" then
+		if type(r) ~= "number" then
+			r = l + ((type(w) == "number" and w > 0) and w or 0)
+		end
+		return l, r
+	end
+	return nil, nil
+end
+
+local function anchorProfBookButton(btn, profBookFrame, profPanel, spellBtn)
+	local gap = 8
+	local edgePad = 8
+	local labelFs = spellBtn.spellString
+		or (type(spellBtn.GetName) == "function" and spellBtn:GetName() and _G[spellBtn:GetName() .. "SpellName"])
+
+	local btnL, btnR = getFrameBoundsX(spellBtn)
+	local contL, contR = getFrameBoundsX(profBookFrame)
+	local panelL, panelR = getFrameBoundsX(profPanel)
+	if not contL then contL, contR = panelL, panelR end
+	if contL and panelL then contL = math.max(contL, panelL) end
+	if contR and panelR then contR = math.min(contR, panelR) end
+
+	local labelL, labelR = nil, nil
+	if labelFs and isFrameVisible(labelFs) then
+		labelL, labelR = getFrameBoundsX(labelFs)
+		local strW = (type(labelFs.GetStringWidth) == "function" and labelFs:GetStringWidth()) or 0
+		if hasSecret(strW) or type(strW) ~= "number" then strW = 0 end
+		if labelL then
+			labelR = math.max(labelR or labelL, labelL + strW)
+		end
+	end
+
+	btn:ClearAllPoints()
+	if btnL and btnR and contL and contR and contR > contL then
+		local contentRight = (labelR and labelR > btnR) and labelR or btnR
+		if contentRight + gap + PROF_BTN_SIZE <= contR - edgePad then
+			local offX = math.ceil(contentRight - btnR) + gap
+			btn:SetPoint("LEFT", spellBtn, "RIGHT", offX, 0)
+		elseif (btnL - gap - PROF_BTN_SIZE >= contL + edgePad) and (not labelL or labelL >= btnL) then
+			btn:SetPoint("RIGHT", spellBtn, "LEFT", -gap, 0)
+		else
+			btn:SetPoint("TOP", spellBtn, "BOTTOM", 0, -6)
+		end
+	else
+		local labelW = 0
+		if labelFs and isFrameVisible(labelFs) then
+			local lw = (type(labelFs.GetWidth) == "function" and labelFs:GetWidth()) or 0
+			local sw = (type(labelFs.GetStringWidth) == "function" and labelFs:GetStringWidth()) or 0
+			if not hasSecret(lw, sw) then
+				labelW = math.max(tonumber(lw) or 0, tonumber(sw) or 0)
+			end
+		end
+		if labelW > 0 then
+			btn:SetPoint("LEFT", spellBtn, "RIGHT", math.min(120, math.ceil(labelW) + 12), 0)
+		else
+			btn:SetPoint("LEFT", spellBtn, "RIGHT", gap, 0)
+		end
+	end
+	if btn.SetFrameLevel and profBookFrame.GetFrameLevel then
+		btn:SetFrameLevel((profBookFrame:GetFrameLevel() or 1) + 5)
+	end
+end
+
+local function isCraftWindowEnchanting(frameName)
+	if frameName == "CraftFrame" then
+		if type(_G.GetCraftDisplaySkillLine) == "function" then
+			local ok, name = pcall(_G.GetCraftDisplaySkillLine)
+			if ok and not hasSecret(name) then
+				if isEnchantingName(name) then return true end
+				if type(name) == "string" and name ~= "" then return false end
+			end
+		end
+	elseif frameName == "TradeSkillFrame" then
+		if type(_G.GetTradeSkillLine) == "function" then
+			local ok, name = pcall(_G.GetTradeSkillLine)
+			if ok and not hasSecret(name) then
+				if isEnchantingName(name) then return true end
+				if type(name) == "string" and name ~= "" then return false end
+			end
+		end
+	end
+
+	if _G.C_TradeSkillUI and type(_G.C_TradeSkillUI.GetBaseProfessionInfo) == "function" then
+		local ok, info = pcall(_G.C_TradeSkillUI.GetBaseProfessionInfo)
+		if ok and type(info) == "table" and not hasSecret(info) then
+			if not hasSecret(info.professionID) and info.professionID == ENCHANTING_SKILL_LINE then
+				return true
+			end
+			if isEnchantingName(info.professionName) then
+				return true
+			end
+			if (info.professionID ~= nil and not hasSecret(info.professionID))
+				or (not hasSecret(info.professionName) and type(info.professionName) == "string" and info.professionName ~= "") then
+				return false
+			end
+		end
+	end
+
+	if frameName == "ProfessionsFrame" then
+		if type(_G.GetTradeSkillLine) == "function" then
+			local ok, name = pcall(_G.GetTradeSkillLine)
+			if ok and isEnchantingName(name) then return true end
+		end
+		if type(_G.GetCraftDisplaySkillLine) == "function" then
+			local ok, name = pcall(_G.GetCraftDisplaySkillLine)
+			if ok and isEnchantingName(name) then return true end
+		end
+	end
+
+	return false
+end
+
+local function hideAllProfBookButtons()
+	for _, b in pairs(state.profBookBtns) do
+		if b and b.Hide then b:Hide() end
+	end
+	if state.profBookBtn and state.profBookBtn.Hide then
+		state.profBookBtn:Hide()
+	end
+end
+
+local function refreshProfBookButton()
+	local activeBook = nil
+	local spellBtn = nil
+	local profPanel = nil
+	for _, fr in ipairs({ _G.SpellBookProfessionFrame, _G.ProfessionsBookFrame }) do
+		if fr and isProfBookVisible(fr) then
+			local foundBtn, foundPanel = findEnchantingDisenchantButton(fr)
+			if foundBtn then
+				activeBook = fr
+				spellBtn = foundBtn
+				profPanel = foundPanel
+				break
+			end
+		end
+	end
+
+	if not (activeBook and spellBtn) then
+		hideAllProfBookButtons()
+		return false
+	end
+
+	for owner, b in pairs(state.profBookBtns) do
+		if owner ~= activeBook and b and b.Hide then
+			b:Hide()
+		end
+	end
+
+	local btn = state.profBookBtns[activeBook]
+	if not btn or (btn.GetParent and btn:GetParent() ~= activeBook) then
+		btn = createLauncherButton(activeBook, PROF_BTN_SIZE)
+		state.profBookBtns[activeBook] = btn
+	end
+	state.profBookBtn = btn
+	anchorProfBookButton(btn, activeBook, profPanel, spellBtn)
+	paintLauncherButton(btn)
+	btn:Show()
+	return true
+end
+
+local function refreshCraftWindowButtons()
+	local shownBtn = nil
+	for _, frameName in ipairs(CRAFT_FRAME_NAMES) do
+		local frame = _G[frameName]
+		local btn = state.craftWinBtns[frameName]
+		if frame and isFrameVisible(frame) and isCraftWindowEnchanting(frameName) then
+			if not btn or (btn.GetParent and btn:GetParent() ~= frame) then
+				if btn and btn.Hide then btn:Hide() end
+				btn = createLauncherButton(frame, CRAFT_BTN_SIZE)
+				state.craftWinBtns[frameName] = btn
+			end
+			local anchor = frame.MaximizeMinimize or frame.CloseButton or _G[frameName .. "CloseButton"]
+			btn:ClearAllPoints()
+			if anchor then
+				btn:SetPoint("RIGHT", anchor, "LEFT", -6, 0)
+			else
+				btn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -34, -4)
+			end
+			if btn.SetFrameLevel and frame.GetFrameLevel then
+				btn:SetFrameLevel((frame:GetFrameLevel() or 1) + 5)
+			end
+			paintLauncherButton(btn)
+			btn:Show()
+			shownBtn = btn
+		else
+			if btn and btn.Hide then
+				btn:Hide()
+			end
+		end
+	end
+	if shownBtn then
+		state.activeCraftWinBtn = shownBtn
+	elseif state.activeCraftWinBtn and state.activeCraftWinBtn.Hide then
+		state.activeCraftWinBtn:Hide()
+	end
+	return shownBtn ~= nil
+end
+
+local function hookGlobalOnce(fnName, callback)
+	local cur = _G[fnName]
+	if type(cur) ~= "function" then return end
+	if hookedGlobals[fnName] == cur then return end
+	if type(_G.hooksecurefunc) == "function" then
+		_G.hooksecurefunc(fnName, callback)
+		hookedGlobals[fnName] = _G[fnName]
+	end
+end
+
+local function hookFrameOnce(frame, onShowFn, onHideFn)
+	if not frame or hookedFrames[frame] or type(frame.HookScript) ~= "function" then return end
+	hookedFrames[frame] = true
+	if onShowFn then frame:HookScript("OnShow", onShowFn) end
+	if onHideFn then frame:HookScript("OnHide", onHideFn) end
+end
+
+local function installBlizzardHooks()
+	local function onBlizzUpdate()
+		DisenchantHelper.RefreshProfessionButtons()
+	end
+
+	hookGlobalOnce("SpellBook_UpdateProfessions", onBlizzUpdate)
+	hookGlobalOnce("SpellBookFrame_Update", onBlizzUpdate)
+	hookGlobalOnce("CraftFrame_Update", onBlizzUpdate)
+	hookGlobalOnce("TradeSkillFrame_Update", onBlizzUpdate)
+
+	hookFrameOnce(_G.SpellBookProfessionFrame, onBlizzUpdate, onBlizzUpdate)
+	hookFrameOnce(_G.ProfessionsBookFrame, onBlizzUpdate, onBlizzUpdate)
+	hookFrameOnce(_G.SpellBookFrame, onBlizzUpdate, onBlizzUpdate)
+	hookFrameOnce(_G.CraftFrame, onBlizzUpdate, onBlizzUpdate)
+	hookFrameOnce(_G.TradeSkillFrame, onBlizzUpdate, onBlizzUpdate)
+	hookFrameOnce(_G.ProfessionsFrame, onBlizzUpdate, onBlizzUpdate)
+end
+
+function DisenchantHelper.RefreshProfessionButtons()
+	installBlizzardHooks()
+	if isInCombat() then
+		state.pendingButtonsRefresh = true
+		return false
+	end
+	state.pendingButtonsRefresh = false
+	local profShown = refreshProfBookButton()
+	local craftShown = refreshCraftWindowButtons()
+	return profShown or craftShown
+end
+
+local function handleIntegrationEvent(_, event, arg1)
+	if event == "ADDON_LOADED" then
+		if not hasSecret(arg1) and WATCHED_ADDONS[arg1] then
+			DisenchantHelper.RefreshProfessionButtons()
+		end
+		return
+	end
+	if event == "PLAYER_REGEN_ENABLED" then
+		if state.pendingOpenAfterCombat and not isInCombat() then
+			state.pendingOpenAfterCombat = false
+			DisenchantHelper.Show()
+		elseif state.frame and state.frame:IsShown() and not isInCombat() then
+			state.castingNotice = nil
+			syncButtonClickEdge(state.frame.deBtn)
+			DisenchantHelper.ScanBags()
+		end
+		if state.pendingButtonsRefresh and not isInCombat() then
+			state.pendingButtonsRefresh = false
+			DisenchantHelper.RefreshProfessionButtons()
+		end
+		return
+	end
+	DisenchantHelper.RefreshProfessionButtons()
+end
+
+do
+	local ev = CreateFrame("Frame")
+	for _, evName in ipairs({
+		"PLAYER_LOGIN",
+		"ADDON_LOADED",
+		"SPELLS_CHANGED",
+		"SKILL_LINES_CHANGED",
+		"LEARNED_SPELL_IN_TAB",
+		"PLAYER_REGEN_ENABLED",
+		"CRAFT_SHOW",
+		"CRAFT_UPDATE",
+		"CRAFT_CLOSE",
+		"TRADE_SKILL_SHOW",
+		"TRADE_SKILL_UPDATE",
+		"TRADE_SKILL_CLOSE",
+		"TRADE_SKILL_DATA_SOURCE_CHANGED",
+	}) do
+		pcall(ev.RegisterEvent, ev, evName)
+	end
+	ev:SetScript("OnEvent", handleIntegrationEvent)
+	state.eventFrame = ev
 end
 
 function DisenchantHelper.GetActiveTarget()
@@ -905,6 +1554,8 @@ end
 function DisenchantHelper.GetState()
 	local selCount, totalCopper, unpricedCount = countSelected()
 	local active = state.activeIndex and state.items[state.activeIndex] or nil
+	local profBookBtn = state.profBookBtn
+	local craftWinBtn = state.activeCraftWinBtn
 	return {
 		shown = (state.frame and state.frame:IsShown()) and true or false,
 		frame = state.frame,
@@ -918,5 +1569,12 @@ function DisenchantHelper.GetState()
 		maxScrollOffset = math.max(0, #state.items - 7),
 		activeItem = active,
 		macrotext = state.frame and state.frame.deBtn and state.frame.deBtn:GetAttribute("macrotext") or "",
+		profBookBtn = profBookBtn,
+		craftWinBtn = craftWinBtn,
+		profBookShown = (profBookBtn ~= nil and profBookBtn:IsShown()) and true or false,
+		craftWinShown = (craftWinBtn ~= nil and craftWinBtn:IsShown()) and true or false,
+		pendingOpenAfterCombat = state.pendingOpenAfterCombat == true,
+		pendingButtonsRefresh = state.pendingButtonsRefresh == true,
+		eventFrame = state.eventFrame,
 	}
 end

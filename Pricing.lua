@@ -74,6 +74,7 @@ ns.PRICE_SOURCES = {
 	{ key = "auto",        label = "Auto (Best)",    short = "Auto" },
 	{ key = "snapshot",    label = "Local Snapshot", short = "Snapshot" },
 	{ key = "live_ah",     label = "Live AH",        short = "Saved AH" },
+	{ key = "tsm",         label = "TSM (Light)",    short = "TSM" },
 }
 
 local LEGACY_PRICE_SOURCES = {
@@ -85,6 +86,29 @@ local LEGACY_PRICE_SOURCES = {
 
 function ns.GetDB()
 	return _G.MerchantMasterDB
+end
+
+function ns.IsTSMOptInEnabled()
+	local db = ns.GetDB()
+	return (type(db) == "table" and (db.useTSMPrices == true or db.priceSource == "tsm")) and true or false
+end
+
+function ns.IsTSMAddonLoaded()
+	if _G.C_AddOns and type(_G.C_AddOns.IsAddOnLoaded) == "function" then
+		local ok, loaded = pcall(_G.C_AddOns.IsAddOnLoaded, "TradeSkillMaster")
+		if ok then return loaded == true end
+	end
+	if type(_G.IsAddOnLoaded) == "function" then
+		local ok, loaded = pcall(_G.IsAddOnLoaded, "TradeSkillMaster")
+		if ok then return loaded == true end
+	end
+	return false
+end
+
+function ns.IsTSMAvailable()
+	if not ns.IsTSMOptInEnabled() then return false end
+	local api = rawget(_G, "TSM_API")
+	return type(api) == "table" and type(api.GetCustomPriceValue) == "function"
 end
 
 function ns.NormalizePriceSourceKey(key)
@@ -108,6 +132,9 @@ function ns.GetEffectivePriceSource()
 	if key == "snapshot" and not (ns.HasSnapshots and ns.HasSnapshots()) then
 		return "auto"
 	end
+	if key == "tsm" and not ns.IsTSMAvailable() then
+		return "auto"
+	end
 	return key
 end
 ns.Pricing.GetEffectivePriceSource = ns.GetEffectivePriceSource
@@ -116,12 +143,13 @@ function ns.GetAvailablePriceSources()
 	local includeSnap = (ns.HasSnapshots and ns.HasSnapshots())
 		or (ns.HasSnapshotExtension and ns.HasSnapshotExtension())
 		or (ns.app and ns.app.snapshotExtension ~= nil)
-	if includeSnap then
+	local includeTSM = ns.IsTSMOptInEnabled()
+	if includeSnap and includeTSM then
 		return ns.PRICE_SOURCES
 	end
 	local out = {}
 	for _, s in ipairs(ns.PRICE_SOURCES) do
-		if s.key ~= "snapshot" then
+		if (s.key ~= "snapshot" or includeSnap) and (s.key ~= "tsm" or includeTSM) then
 			out[#out + 1] = s
 		end
 	end
@@ -2154,6 +2182,68 @@ local function extractTimestamps(liveRec, snapRec)
 	return liveAt, liveIsRecent, snapAt
 end
 
+local tsmBundleCache = { epoch = 0, items = {} }
+
+function ns.QueryTSMMarketBundle(itemID)
+	if not ns.IsTSMOptInEnabled() then return nil end
+	local id = tonumber(itemID)
+	if not id or id ~= id or id <= 0 or id == math.huge then return nil end
+	id = math.floor(id)
+	local epoch = ns.priceCacheEpoch or 0
+	if tsmBundleCache.epoch ~= epoch then
+		tsmBundleCache.epoch = epoch
+		tsmBundleCache.items = {}
+	end
+	local hit = tsmBundleCache.items[id]
+	if hit ~= nil then
+		return hit ~= false and hit or nil
+	end
+	if not ns.IsTSMAvailable() then return nil end
+	local api = rawget(_G, "TSM_API")
+	if type(api) ~= "table" or type(api.GetCustomPriceValue) ~= "function" then
+		tsmBundleCache.items[id] = false
+		return nil
+	end
+	local itemStr = "i:" .. tostring(id)
+	local function readVal(expr, roundInt)
+		local ok, v = pcall(api.GetCustomPriceValue, expr, itemStr)
+		if ok and readable(v) and type(v) == "number" and v == v and v > 0 and v < math.huge then
+			return roundInt and math.floor(v + 0.5) or v
+		end
+		return nil
+	end
+	local minBuyout = readVal("DBMinBuyout", true)
+	local marketValue = readVal("DBMarket", true)
+	local historical = readVal("DBHistorical", true)
+	local numAuctions = readVal("DBNumAuctions", true)
+	local regionSoldPerDay = readVal("DBRegionSoldPerDay", false)
+	if not minBuyout and not marketValue and not historical and not numAuctions and not regionSoldPerDay then
+		tsmBundleCache.items[id] = false
+		return nil
+	end
+	local bundle = {
+		minBuyout = minBuyout,
+		marketValue = marketValue,
+		historical = historical,
+		numAuctions = numAuctions,
+		regionSoldPerDay = regionSoldPerDay,
+	}
+	tsmBundleCache.items[id] = bundle
+	return bundle
+end
+
+function ns.QueryTSMPrice(itemID)
+	local bundle = ns.QueryTSMMarketBundle(itemID)
+	if not bundle then return nil, nil, nil end
+	if bundle.minBuyout and bundle.minBuyout > 0 then
+		return bundle.minBuyout, "TSM (Light)", bundle.numAuctions
+	end
+	if bundle.marketValue and bundle.marketValue > 0 then
+		return bundle.marketValue, "TSM Market", bundle.numAuctions
+	end
+	return nil, nil, nil
+end
+
 local function resolveMarketFallbackChain(itemID, econ, liveVal, liveRec, snapVal, snapRec)
 	local econKey = econ and econ.effectiveKey
 	if snapVal == nil and snapRec == nil and econKey then
@@ -2162,6 +2252,15 @@ local function resolveMarketFallbackChain(itemID, econ, liveVal, liveRec, snapVa
 	local liveAt, liveIsRecent, snapAt = extractTimestamps(liveRec, snapRec)
 	if snapVal and (not liveVal or snapAt > liveAt) then
 		return snapVal, "Snapshot", snapRec and snapRec.qty
+	end
+	if liveVal and liveIsRecent then
+		return liveVal, "Live AH", liveRec and liveRec.qty
+	end
+	if econ and econ.isActive and ns.IsTSMAvailable() then
+		local tsmVal, tsmSrc, tsmQty = ns.QueryTSMPrice(itemID)
+		if tsmVal then
+			return tsmVal, tsmSrc, tsmQty
+		end
 	end
 	if liveVal then
 		return liveVal, (liveIsRecent and "Live AH" or "Saved AH Scan"), liveRec and liveRec.qty
@@ -2175,7 +2274,11 @@ local function computeItemMarketPrice(itemID)
 	local econ = ns.CurrentEconomyInfo()
 
 	-- 1. Cross-economy mode (e.g. viewing Normal-Alliance or PvP-Horde while logged onto Normal-Horde)
+	-- Cross-economy NEVER returns TSM prices because TSM only knows the active realm/faction.
 	if not econ.isActive then
+		if mode == "tsm" then
+			return nil, nil, nil
+		end
 		local liveVal, liveRec = ns.QueryLiveAH(itemID, econ.effectiveKey)
 		if mode == "live_ah" then
 			return liveVal, liveVal and ("Live AH (" .. econ.label .. ")") or (liveRec and liveRec.absent and "Not listed (Live AH)" or nil), liveRec and liveRec.qty
@@ -2204,7 +2307,9 @@ local function computeItemMarketPrice(itemID)
 	end
 
 	-- 2. Active character economy
-	if mode == "snapshot" then
+	if mode == "tsm" then
+		return ns.QueryTSMPrice(itemID)
+	elseif mode == "snapshot" then
 		local sv, srec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
 		return sv, sv and "Snapshot" or nil, srec and srec.qty
 	elseif mode == "live_ah" then
@@ -2212,7 +2317,7 @@ local function computeItemMarketPrice(itemID)
 		return v, v and "Live AH" or (rec and rec.absent and "Not listed (Live AH)" or nil), rec and rec.qty
 	end
 
-	-- Auto (Best): Most recent wins between Manual Live AH and Blizzard Local Snapshot
+	-- Auto (Best): Most recent wins between Manual Live AH, Blizzard Local Snapshot, and opt-in TSM Light Mode
 	local liveVal, liveRec = ns.QueryLiveAH(itemID, econ.effectiveKey)
 	local snapVal, snapRec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
 	local liveAt, liveIsRecent, snapAt = extractTimestamps(liveRec, snapRec)
@@ -2267,6 +2372,10 @@ function ns.GetFallbackMarketPrice(itemID)
 	end
 	local liveVal, liveRec = ns.QueryLiveAH(itemID, econ.effectiveKey)
 	local snapVal, snapRec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
+	if ns.GetEffectivePriceSource() == "tsm" then
+		local tsmVal, tsmSrc = ns.QueryTSMPrice(itemID)
+		if tsmVal then return tsmVal, tsmSrc end
+	end
 	local p, src = resolveMarketFallbackChain(itemID, econ, liveVal, liveRec, snapVal, snapRec)
 	if p then return p, src end
 	if liveRec and type(liveRec.lastPrice) == "number" and liveRec.lastPrice > 0 then
@@ -3011,10 +3120,12 @@ function ns.GetMultiSourceDemand(itemID, econKey)
 	local byItem = multiDemandCache.byEcon[econKey]
 	local cached = byItem and byItem[itemID]
 	local now = (ring and #ring > 0 or lotAt > 0) and time and time() or nil
+	local tsmActive = ns.IsTSMAvailable()
 	if cached and cached.scanAt == scanAt and cached.scanPrice == scanPrice and cached.scanQty == scanQty
 		and cached.lotAt == lotAt and cached.lotPrice == lotPrice and cached.lotQty == lotQty
 		and cached.analyticsModel == analyticsModel and cached.ledgerVer == ledgerVer
 		and cached.ledgerDB == ledgerDB and cached.modelGen == modelGen and cached.ledgerDay == ledgerDay
+		and cached.tsmActive == tsmActive
 		and (not cached.scanExpiry or (now and now < cached.scanExpiry)) then
 		return cached.result ~= false and cached.result or nil
 	end
@@ -3061,6 +3172,20 @@ function ns.GetMultiSourceDemand(itemID, econKey)
 		marketSrc = "Blizz"
 	end
 
+	if marketEst == nil and tsmActive then
+		local curEcon = economy or ns.CurrentEconomyInfo()
+		local activeEconKey = ns.DetectActiveEconomy and ns.DetectActiveEconomy()
+		local isActiveEcon = (curEcon and curEcon.isActive and curEcon.effectiveKey == econKey)
+			or (activeEconKey ~= nil and econKey == activeEconKey)
+		if isActiveEcon then
+			local bundle = ns.QueryTSMMarketBundle(itemID)
+			if bundle and type(bundle.regionSoldPerDay) == "number" and bundle.regionSoldPerDay > 0 then
+				marketEst = bundle.regionSoldPerDay
+				marketSrc = "TSM"
+			end
+		end
+	end
+
 	-- 2. ALWAYS floor at confirmed personal 7d AH sales/day!
 	local effectiveDailySold, demandSource
 	if personalDaily > 0 then
@@ -3069,6 +3194,8 @@ function ns.GetMultiSourceDemand(itemID, econKey)
 			demandSource = "Blizz+You"
 		elseif marketSrc == "Local" and (localDaily or 0) > 0 then
 			demandSource = "Local+You"
+		elseif marketSrc == "TSM" and (marketEst or 0) > 0 then
+			demandSource = "TSM+You"
 		else
 			demandSource = "Personal"
 		end
@@ -3090,7 +3217,7 @@ function ns.GetMultiSourceDemand(itemID, econKey)
 		or (observedZero and marketSrc == "Blizz" and velocityObsHours >= 48)
 		or localConf == "Med" then
 		confidence = "Med"
-	elseif snapVel ~= nil or (observedZero and marketSrc == "Blizz") or localConf == "Low" then
+	elseif snapVel ~= nil or (observedZero and marketSrc == "Blizz") or localConf == "Low" or marketSrc == "TSM" then
 		confidence = "Low"
 	else
 		confidence = "None"
@@ -3126,6 +3253,7 @@ function ns.GetMultiSourceDemand(itemID, econKey)
 		lotAt = lotAt, lotPrice = lotPrice, lotQty = lotQty,
 		analyticsModel = analyticsModel, ledgerVer = ledgerVer,
 		ledgerDB = ledgerDB, modelGen = modelGen, ledgerDay = ledgerDay,
+		tsmActive = tsmActive,
 		scanExpiry = localScanExpiry(ring, now or (time and time() or 0)),
 	}
 	return result

@@ -3,6 +3,8 @@ local _, ns = ...
 local Window = {}
 ns.Window = Window
 local MIN_W, MIN_H, MAX_W, MAX_H = 1320, 730, 3840, 2160
+local LARGE_SCREEN_W, LARGE_SCREEN_H = 2200, 1200
+local LARGE_MAX_W, LARGE_MAX_H = 2240, 1300
 
 local function number(value, fallback)
     if issecretvalue and issecretvalue(value) then return fallback end
@@ -16,6 +18,36 @@ end
 local function screen()
     return number(UIParent and UIParent.GetWidth and UIParent:GetWidth(), 1920),
         number(UIParent and UIParent.GetHeight and UIParent:GetHeight(), 1080)
+end
+
+function Window.IsLargeDisplay(sw, sh)
+    if sw == nil or sh == nil then
+        local curW, curH = screen()
+        sw = sw or curW
+        sh = sh or curH
+    end
+    sw = number(sw, 1920)
+    sh = number(sh, 1080)
+    return sw >= LARGE_SCREEN_W and sh >= LARGE_SCREEN_H
+end
+
+function Window.GetPreferredDefaultSize(baseW, baseH, sw, sh)
+    local w = math.floor(clamp(baseW, MIN_W, MAX_W, MIN_W) + 0.5)
+    local h = math.floor(clamp(baseH, MIN_H, MAX_H, MIN_H) + 0.5)
+    if sw == nil or sh == nil then
+        local curW, curH = screen()
+        sw = sw or curW
+        sh = sh or curH
+    end
+    sw = number(sw, 1920)
+    sh = number(sh, 1080)
+    if sw >= LARGE_SCREEN_W and sh >= LARGE_SCREEN_H then
+        local capW = math.min(math.floor(sw - 40), LARGE_MAX_W)
+        local capH = math.min(math.floor(sh - 40), LARGE_MAX_H)
+        w = math.floor(clamp(math.max(w, capW), MIN_W, MAX_W, w) + 0.5)
+        h = math.floor(clamp(math.max(h, capH), MIN_H, MAX_H, h) + 0.5)
+    end
+    return w, h
 end
 
 function Window.Attach(panel, grip, heightGrip, opts)
@@ -52,11 +84,18 @@ function Window.Attach(panel, grip, heightGrip, opts)
         self.compact = compact
         if compact then self.pending = false; self.waiting = false; self.pulse:SetScript('OnUpdate', nil) end
     end
+    function c:GetPreferredDefaultSize()
+        return Window.GetPreferredDefaultSize(math.max(minWidth, defaultW), defaultH)
+    end
     function c:ApplyFull()
         local saved = db()
-        local defW = math.max(minWidth, defaultW)
+        local defW, defH = math.max(minWidth, defaultW), defaultH
+        if opts.adaptiveLargeDefault == true and saved.width == nil and saved.height == nil then
+            defW, defH = self:GetPreferredDefaultSize()
+            defW = math.max(minWidth, defW)
+        end
         local w = math.floor(clamp(saved.width, minWidth, math.max(MAX_W, minWidth), defW) + 0.5)
-        local h = math.floor(clamp(saved.height, MIN_H, MAX_H, defaultH) + 0.5)
+        local h = math.floor(clamp(saved.height, MIN_H, MAX_H, defH) + 0.5)
         saved.width, saved.height = w, h
         local sw, sh = screen()
         local preferred = clamp(saved.scale, 0.65, 1.35, 1)
@@ -82,7 +121,7 @@ function Window.Attach(panel, grip, heightGrip, opts)
     function c:IsZoomed()
         return self._zoomed == true
     end
-    function c:ToggleZoom()
+    function c:ToggleZoom(comfortable)
         if self.compact then return false end
         local sw, sh = screen()
         local scale = number(panel:GetScale(), 1)
@@ -115,13 +154,21 @@ function Window.Attach(panel, grip, heightGrip, opts)
             left = number(panel:GetLeft(), nil),
             top = number(panel:GetTop(), nil),
         }
-        local zw = math.floor(clamp((sw - 24) / scale, minWidth, math.max(MAX_W, minWidth), minWidth) + 0.5)
-        local zh = math.floor(clamp((sh - 24) / scale, MIN_H, MAX_H, MIN_H) + 0.5)
+        local useLargeCap = (comfortable == true or opts.comfortableZoom == true)
+            and sw >= LARGE_SCREEN_W and sh >= LARGE_SCREEN_H
+        local rawW = useLargeCap and math.min((sw - 40) / scale, LARGE_MAX_W) or ((sw - 24) / scale)
+        local rawH = useLargeCap and math.min((sh - 40) / scale, LARGE_MAX_H) or ((sh - 24) / scale)
+        local zw = math.floor(clamp(rawW, minWidth, math.max(MAX_W, minWidth), minWidth) + 0.5)
+        local zh = math.floor(clamp(rawH, MIN_H, MAX_H, MIN_H) + 0.5)
         self._zoomed = true
         db().width, db().height = zw, zh
         self.applying = true
         panel:ClearAllPoints()
-        panel:SetPoint('TOPLEFT', UIParent, 'BOTTOMLEFT', 12 / scale, (sh - 12) / scale)
+        if useLargeCap then
+            panel:SetPoint('CENTER')
+        else
+            panel:SetPoint('TOPLEFT', UIParent, 'BOTTOMLEFT', 12 / scale, (sh - 12) / scale)
+        end
         panel:SetSize(zw, zh)
         self.applying = false
         self.pending = true

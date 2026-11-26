@@ -156,6 +156,14 @@ SKIN_SCENES = [
     "flow-collect-goblin",
     "flow-craft-goblin",
     "flow-craft-extended-goblin",
+    "deep-analysis-goblin",
+    "all-items-goblin",
+    "watchlist-goblin",
+    "disenchant-helper-goblin",
+    "mail-helper-goblin",
+    "sell-helper-goblin",
+    "sniper-goblin",
+    "console-snapshots-goblin",
 ]
 
 # Optional external WoW icon PNGs (matched by lower-case basename; configured via MM_WOW_ICON_DIR / --wow-icon-dir).
@@ -211,6 +219,21 @@ FILEID_ALIASES: Dict[str, str] = {
     "134830": "wow_mana_potion",
     "134812": "wow_shroud_potion",
     "134400": "wow_gold_bag",
+    "133784": "wow_gold_bag",
+    "133785": "wow_gold_bag",
+    "136240": "wow_alchemy",
+    "136241": "wow_signet_akir",
+    "136243": "wow_skysight",
+    "136244": "wow_leyline",
+    "136247": "wow_leatherworking",
+    "136249": "wow_tailoring",
+    "133971": "wow_fire_totem",
+    "135966": "wow_bolt_linen",
+    "132853": "wow_leyline",
+    "132641": "wow_tailoring",
+    "135274": "wow_moonfire",
+    "134256": "wow_hide",
+    "134441": "wow_skysight",
 }
 
 # (keyword in lower-case basename, file stem) fallbacks, first hit wins.
@@ -221,12 +244,16 @@ ICON_KEYWORDS: List[Tuple[str, str]] = [
     ("vial", "wow_crystal_vial"), ("drink", "wow_crystal_vial"),
     ("elixir", "wow_arcane_elixir"), ("flask", "wow_flask_blight"), ("potion", "wow_mana_potion"),
     ("oil", "wow_frost_oil"),
+    ("lens", "wow_skysight"), ("goggle", "wow_skysight"),
     ("fabric", "wow_linen_cloth"), ("cloth", "wow_linen_cloth"), ("silk", "wow_linen_cloth"),
     ("wool", "wow_linen_cloth"), ("mageweave", "wow_linen_cloth"), ("runecloth", "wow_linen_cloth"),
+    ("robe", "wow_tailoring"), ("armor", "wow_tailoring"),
     ("leather", "wow_hide"), ("hide", "wow_hide"),
+    ("blade", "wow_moonfire"), ("sword", "wow_moonfire"), ("axe", "wow_moonfire"),
+    ("mace", "wow_moonfire"), ("staff", "wow_moonfire"), ("weapon", "wow_moonfire"),
     ("flame", "wow_fire_totem"), ("fire", "wow_fire_totem"),
     ("water", "wow_water_flask"), ("snapper", "wow_water_flask"),
-    ("essence", "wow_leyline"), ("dust", "wow_leyline"), ("shard", "wow_leyline"),
+    ("essence", "wow_leyline"), ("dust", "wow_leyline"), ("shard", "wow_leyline"), ("enchant", "wow_leyline"),
     ("ore", "wow_gold_bag"), ("bar", "wow_gold_bag"), ("stone", "wow_gold_bag"),
     ("coin", "wow_gold_bag"), ("gold", "wow_gold_bag"),
 ]
@@ -1316,6 +1343,7 @@ def main() -> int:
     parser.add_argument("--skins", action="store_true",
                         help="Run the dumper with --skins and render the Warcraft-skin scenes (SKIN_SCENES)")
     args = parser.parse_args()
+    explicit_scenes = args.scenes is not None and len(args.scenes) > 0
     if args.scenes is None:
         args.scenes = list(SKIN_SCENES if args.skins else SCENES)
 
@@ -1332,6 +1360,8 @@ def main() -> int:
             dump_cmd = [args.lua_exe, str(DUMPER_LUA), str(dump_dir)]
             if args.skins:
                 dump_cmd.append("--skins")
+                if explicit_scenes:
+                    dump_cmd.append("--only=" + ",".join(args.scenes))
             res = subprocess.run(
                 dump_cmd,
                 cwd=str(ADDON_DIR),

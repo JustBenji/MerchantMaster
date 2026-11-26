@@ -446,8 +446,50 @@ end
 ---------------------------------------------------------------------------------------------------
 do
 	local DH = ns.DisenchantHelper
-	check(type(DH) == "table" and type(DH.Toggle) == "function" and type(DH.ScanBags) == "function",
-		"ns.DisenchantHelper API exported")
+	check(type(DH) == "table" and type(DH.Toggle) == "function" and type(DH.ScanBags) == "function"
+		and type(DH.RefreshProfessionButtons) == "function",
+		"ns.DisenchantHelper API exported (including RefreshProfessionButtons)")
+
+	-- First-open during combat defers frame build cleanly until PLAYER_REGEN_ENABLED
+	do
+		local stInit = DH.GetState()
+		check(stInit.frame == nil and stInit.shown == false,
+			"Disenchant Helper frame is lazily unbuilt before first open")
+		local origCombat = _G.InCombatLockdown
+		local origPrint = _G.print
+		local printedMsgs = {}
+		_G.InCombatLockdown = function() return true end
+		_G.print = function(...)
+			local parts = {}
+			for i = 1, select("#", ...) do parts[i] = tostring(select(i, ...)) end
+			printedMsgs[#printedMsgs + 1] = table.concat(parts, " ")
+		end
+
+		local openedInCombat = DH.Toggle()
+		local stCombat = DH.GetState()
+		check(openedInCombat == false and stCombat.frame == nil and stCombat.shown == false
+			and stCombat.pendingOpenAfterCombat == true,
+			"First-time Toggle() during combat defers build with pendingOpenAfterCombat=true")
+		check(#printedMsgs >= 1 and printedMsgs[1]:find("Cannot open Disenchant Helper for the first time during combat", 1, true) ~= nil,
+			"Combat first-open prints polite chat deferral notice: " .. tostring(printedMsgs[1]))
+
+		local showInCombat = DH.Show()
+		check(showInCombat == false and DH.GetState().frame == nil and DH.GetState().pendingOpenAfterCombat == true,
+			"First-time Show() during combat also defers cleanly")
+
+		_G.InCombatLockdown = function() return false end
+		local evF = DH.GetState().eventFrame
+		check(evF ~= nil and type(evF:GetScript("OnEvent")) == "function",
+			"DisenchantHelper exposes persistent integration eventFrame")
+		evF:GetScript("OnEvent")(evF, "PLAYER_REGEN_ENABLED")
+		local stAfterCombat = DH.GetState()
+		check(stAfterCombat.pendingOpenAfterCombat == false and stAfterCombat.frame ~= nil and stAfterCombat.shown == true,
+			"PLAYER_REGEN_ENABLED flushes pendingOpenAfterCombat and opens Disenchant Helper cleanly")
+
+		DH.Hide()
+		_G.print = origPrint
+		_G.InCombatLockdown = origCombat
+	end
 
 	local topDeBtn = app.ui and app.ui.topDisenchantBtn
 	check(topDeBtn ~= nil and topDeBtn:IsShown(), "Top-right topDisenchantBtn exposed and visible")
@@ -1293,6 +1335,441 @@ do
 	_G.C_Container = origContainer2
 	MerchantMasterDB.deObservations = nil
 	ns.ClearDECache()
+end
+
+---------------------------------------------------------------------------------------------------
+-- 8. Feature C: Spellbook Professions & Craft Window Launcher Buttons, Combat & Secret Safety
+---------------------------------------------------------------------------------------------------
+do
+	local DH = ns.DisenchantHelper
+	local makeWidget = hostEnv.makeWidget
+
+	-- Save all globals we temporarily mock locally (never editing tests/host_fixture.lua)
+	local origInCombat = _G.InCombatLockdown
+	local origIsSecretValue = _G.issecretvalue
+	local origContainer = _G.C_Container
+	local origNumBags = _G.NUM_BAG_SLOTS
+	local origCSpell = _G.C_Spell
+	local origGetProfessions = _G.GetProfessions
+	local origGetProfessionInfo = _G.GetProfessionInfo
+	local origGetSpellBookItemInfo = _G.GetSpellBookItemInfo
+	local origSpellBookFrame = _G.SpellBookFrame
+	local origSpellBookProfFrame = _G.SpellBookProfessionFrame
+	local origPrimary1 = _G.PrimaryProfession1
+	local origPrimary2 = _G.PrimaryProfession2
+	local origSBUpdateProfs = _G.SpellBook_UpdateProfessions
+	local origSBFrameUpdate = _G.SpellBookFrame_Update
+	local origCraftFrame = _G.CraftFrame
+	local origTradeSkillFrame = _G.TradeSkillFrame
+	local origProfessionsFrame = _G.ProfessionsFrame
+	local origCraftUpdate = _G.CraftFrame_Update
+	local origTSUpdate = _G.TradeSkillFrame_Update
+	local origGetCraftSkill = _G.GetCraftDisplaySkillLine
+	local origGetTSSkill = _G.GetTradeSkillLine
+	local origCTradeSkillUI = _G.C_TradeSkillUI
+	local origSkin = Theme.GetSkin()
+	local origMode = Theme.GetMode()
+
+	local inCombatFlag = false
+	_G.InCombatLockdown = function() return inCombatFlag end
+
+	-- 8A. Combat guard on secure deBtn:SetEnabled + hasSecret guard on bag/spell APIs
+	do
+		local bagItems = {
+			[1] = { itemID = OUT_ARMOR_GREEN, stackCount = 1, iconFileID = 132641, hyperlink = "|cff1eff00|Hitem:" .. OUT_ARMOR_GREEN .. "|h[Synthetic Linen Robe]|h|r" },
+			[2] = { itemID = "SECRET_SENTINEL", stackCount = 1, iconFileID = 132641, hyperlink = "SECRET_SENTINEL" },
+		}
+		_G.NUM_BAG_SLOTS = 0
+		_G.C_Container = {
+			GetContainerNumSlots = function(b) return b == 0 and 2 or 0 end,
+			GetContainerItemInfo = function(b, s) return b == 0 and bagItems[s] or nil end,
+			GetContainerItemLink = function(b, s) return (b == 0 and bagItems[s]) and bagItems[s].hyperlink or nil end,
+		}
+		_G.issecretvalue = function(v) return v == "SECRET_SENTINEL" end
+		_G.C_Spell = { GetSpellName = function(id) return id == 13262 and "SECRET_SENTINEL" or nil end }
+
+		DH.Show()
+		DH.SelectAll()
+		local stPre = DH.GetState()
+		check(stPre.itemCount == 1 and stPre.selectedCount == 1,
+			"hasSecret guard skips secret bag slot without error and keeps 1 real item (got " .. tostring(stPre.itemCount) .. ")")
+		check(stPre.macrotext == "/cast Disenchant;\n/use 0 1",
+			"hasSecret guard falls back to 'Disenchant' when GetSpellName returns secret value: " .. tostring(stPre.macrotext))
+
+		local deActionBtn = stPre.frame.deBtn
+		local setEnabledCalls = 0
+		local origSetEnabled = deActionBtn.SetEnabled
+		deActionBtn.SetEnabled = function(self, enabled)
+			setEnabledCalls = setEnabledCalls + 1
+			if origSetEnabled then return origSetEnabled(self, enabled) end
+		end
+
+		inCombatFlag = true
+		DH.ScanBags()
+		check(setEnabledCalls == 0 and deActionBtn.label:GetText() == "IN COMBAT",
+			"updateUI skips secure deBtn:SetEnabled during combat lockdown (calls=" .. tostring(setEnabledCalls) .. ")")
+
+		inCombatFlag = false
+		stPre.eventFrame:GetScript("OnEvent")(stPre.eventFrame, "PLAYER_REGEN_ENABLED")
+		check(setEnabledCalls >= 1 and deActionBtn:IsEnabled() == true
+			and (deActionBtn.label:GetText() or ""):find("DISENCHANT (1 left)", 1, true) ~= nil,
+			"PLAYER_REGEN_ENABLED re-syncs secure deBtn:SetEnabled(true) cleanly after combat")
+
+		deActionBtn.SetEnabled = origSetEnabled
+		DH.Hide()
+		_G.issecretvalue = origIsSecretValue
+		_G.C_Spell = origCSpell
+		_G.C_Container = origContainer
+		_G.NUM_BAG_SLOTS = origNumBags
+	end
+
+	-- Helper to assign deterministic horizontal geometry on local mock widgets
+	local function setBoxX(w, left, width)
+		w:SetWidth(width)
+		w.GetLeft = function() return left end
+		w.GetRight = function() return left + width end
+	end
+
+	local function snapshotKeys(tbl)
+		local out = {}
+		for k in pairs(tbl) do out[k] = true end
+		return out
+	end
+
+	local function checkNoNewKeys(tbl, before, label)
+		for k in pairs(tbl) do
+			check(before[k] == true, label .. " must not be mutated with new field '" .. tostring(k) .. "'")
+		end
+	end
+
+	-- 8B. Placement 1: SpellBookProfessionFrame (Enchanting vs non-Enchanting, General tab hide, zero overlap)
+	local sbFrame = makeWidget("Frame", "SpellBookFrame", UIParent)
+	sbFrame:SetSize(550, 525)
+	sbFrame:Show()
+
+	local sbProf = makeWidget("Frame", "SpellBookProfessionFrame", sbFrame)
+	setBoxX(sbProf, 200, 500)
+	sbProf:SetHeight(420)
+	sbProf:Show()
+
+	local p1Frame = makeWidget("Frame", "PrimaryProfession1", sbProf)
+	setBoxX(p1Frame, 210, 480)
+	p1Frame:SetHeight(100)
+	p1Frame:Show()
+
+	local topSpellBtn = makeWidget("Button", "PrimaryProfession1SpellButtonTop", p1Frame)
+	setBoxX(topSpellBtn, 440, 37)
+	topSpellBtn:SetHeight(37)
+	topSpellBtn.GetID = function() return 1 end
+	topSpellBtn.spellString = topSpellBtn:CreateFontString(nil, "OVERLAY")
+	topSpellBtn.spellString:SetText("Enchanting")
+	setBoxX(topSpellBtn.spellString, 483, 86)
+	p1Frame.SpellButtonTop = topSpellBtn
+
+	local botSpellBtn = makeWidget("Button", "PrimaryProfession1SpellButtonBottom", p1Frame)
+	setBoxX(botSpellBtn, 440, 37)
+	botSpellBtn:SetHeight(37)
+	botSpellBtn.GetID = function() return 2 end
+	botSpellBtn.spellString = botSpellBtn:CreateFontString(nil, "OVERLAY")
+	botSpellBtn.spellString:SetText("Disenchant")
+	setBoxX(botSpellBtn.spellString, 483, 86)
+	p1Frame.SpellButtonBottom = botSpellBtn
+
+	local p2Frame = makeWidget("Frame", "PrimaryProfession2", sbProf)
+	setBoxX(p2Frame, 210, 480)
+	p2Frame:SetHeight(100)
+	p2Frame:Show()
+
+	_G.SpellBookFrame = sbFrame
+	_G.SpellBookProfessionFrame = sbProf
+	_G.PrimaryProfession1 = p1Frame
+	_G.PrimaryProfession2 = p2Frame
+	_G.SpellBook_UpdateProfessions = function() end
+	_G.SpellBookFrame_Update = function() end
+
+	local sbProfKeysBefore = snapshotKeys(sbProf)
+	local p1KeysBefore = snapshotKeys(p1Frame)
+	local p2KeysBefore = snapshotKeys(p2Frame)
+
+	-- Without Enchanting (host_fixture default is Leatherworking + Tailoring): button stays hidden
+	DH.RefreshProfessionButtons()
+	local stNoEnch = DH.GetState()
+	check(stNoEnch.profBookShown == false,
+		"Spellbook launcher stays hidden when player does not know Enchanting")
+
+	-- With Enchanting (skillLine 333) + Disenchant (13262) in PrimaryProfession1
+	_G.GetProfessions = function() return 1, 2, nil, nil, nil, nil end
+	_G.GetProfessionInfo = function(idx)
+		if idx == 1 then return "Enchanting", 136244, 300, 300, 2, 10, 333 end
+		if idx == 2 then return "Tailoring", 136249, 300, 300, 1, 12, 197 end
+	end
+	_G.GetSpellBookItemInfo = function(slot, bookType)
+		if slot == 11 then return "SPELL", 7411 end
+		if slot == 12 then return "SPELL", 13262 end
+	end
+
+	-- Trigger via hooked SpellBook_UpdateProfessions
+	_G.SpellBook_UpdateProfessions()
+	local stEnch = DH.GetState()
+	check(stEnch.profBookShown == true and stEnch.profBookBtn ~= nil,
+		"Spellbook launcher appears when Enchanting + Disenchant are learned")
+	check(stEnch.profBookBtn:GetWidth() == 30 and stEnch.profBookBtn:GetHeight() == 30,
+		"Spellbook launcher button is 30x30")
+	check(stEnch.profBookBtn:GetParent() == sbProf and stEnch.profBookBtn:GetAttribute("type") == nil,
+		"Spellbook launcher is a non-secure Button parented to SpellBookProfessionFrame")
+
+	-- Verify ZERO overlap with spellString (483..569) and ZERO overhang past SpellBookProfessionFrame (200..700)
+	local ptAnchor, ptRel, ptRelAnchor, ptX = stEnch.profBookBtn:GetPoint(1)
+	check(ptRel == botSpellBtn and ptAnchor == "LEFT" and ptRelAnchor == "RIGHT",
+		"Wide Spellbook places launcher right of Disenchant button (got " .. tostring(ptAnchor) .. " -> " .. tostring(ptRelAnchor) .. ")")
+	local renderedLeft = botSpellBtn:GetRight() + (ptX or 0)
+	local renderedRight = renderedLeft + stEnch.profBookBtn:GetWidth()
+	local labelRight = botSpellBtn.spellString:GetRight()
+	check(renderedLeft >= labelRight + 4 and renderedRight <= sbProf:GetRight() - 4,
+		string.format("Spellbook launcher clears spellString (left=%d >= %d) and stays inside frame (right=%d <= %d)",
+			renderedLeft, labelRight + 4, renderedRight, sbProf:GetRight() - 4))
+
+	-- Tight right border flips launcher cleanly to the LEFT of botSpellBtn with zero overhang
+	setBoxX(sbProf, 200, 390) -- right=590 -> 569+8+30=607 > 582
+	setBoxX(p1Frame, 210, 370) -- right=580
+	DH.RefreshProfessionButtons()
+	local tAnchor, tRel, tRelAnchor, tX = stEnch.profBookBtn:GetPoint(1)
+	check(tAnchor == "RIGHT" and tRel == botSpellBtn and tRelAnchor == "LEFT" and (tX or 0) <= -6,
+		"Tight Spellbook border flips launcher to LEFT of Disenchant button to avoid overhang")
+	local tightRight = botSpellBtn:GetLeft() + (tX or 0)
+	local tightLeft = tightRight - stEnch.profBookBtn:GetWidth()
+	check(tightLeft >= p1Frame:GetLeft() + 4 and tightRight <= botSpellBtn:GetLeft() - 4,
+		"Left-flipped Spellbook launcher fits cleanly inside bounds without overlapping Disenchant icon")
+	setBoxX(sbProf, 200, 500)
+	setBoxX(p1Frame, 210, 480)
+	DH.RefreshProfessionButtons()
+
+	-- Blizzard frames must have zero injected fields
+	checkNoNewKeys(sbProf, sbProfKeysBefore, "SpellBookProfessionFrame")
+	checkNoNewKeys(p1Frame, p1KeysBefore, "PrimaryProfession1")
+	checkNoNewKeys(p2Frame, p2KeysBefore, "PrimaryProfession2")
+
+	-- Switching Spellbook to General tab hides SpellBookProfessionFrame -> profBookBtn hides even while botSpellBtn._shown stays true
+	sbProf:Hide()
+	_G.SpellBookFrame_Update()
+	check(botSpellBtn:IsShown() == true and DH.GetState().profBookShown == false,
+		"Switching to General spellbook tab hides profBookBtn cleanly")
+	sbProf:Show()
+	check(DH.GetState().profBookShown == true,
+		"Returning to Professions spellbook tab shows profBookBtn again")
+
+	-- Hiding spell button itself also hides profBookBtn
+	botSpellBtn:Hide()
+	DH.RefreshProfessionButtons()
+	check(DH.GetState().profBookShown == false,
+		"Hidden Disenchant spell button hides profBookBtn")
+	botSpellBtn:Show()
+	DH.RefreshProfessionButtons()
+	check(DH.GetState().profBookShown == true,
+		"Visible Disenchant spell button restores profBookBtn")
+
+	-- Exact Tooltip text & click toggle on Spellbook launcher
+	GameTooltip:ClearLines()
+	stEnch.profBookBtn:GetScript("OnEnter")(stEnch.profBookBtn)
+	check(GameTooltip._lines[1] == "Disenchant Helper"
+		and GameTooltip._lines[2] == "Scan bag gear and queue greens/blues for continuous 1-click Disenchanting."
+		and GameTooltip._lines[3] == "Click to open or close Disenchant Helper.",
+		"Launcher tooltip matches exact title/body/footer copy")
+	stEnch.profBookBtn:GetScript("OnLeave")(stEnch.profBookBtn)
+
+	DH.Hide()
+	stEnch.profBookBtn:Click("LeftButton")
+	check(DH.GetState().shown == true, "Clicking Spellbook launcher opens Disenchant Helper")
+	stEnch.profBookBtn:Click("LeftButton")
+	check(DH.GetState().shown == false, "Clicking Spellbook launcher again closes Disenchant Helper")
+
+	-- 8C. Placement 2: CraftFrame, TradeSkillFrame & ProfessionsFrame (Enchanting vs Alchemy/Beast Training)
+	local craftF = makeWidget("Frame", "CraftFrame", UIParent)
+	craftF.CloseButton = makeWidget("Button", "CraftFrameCloseButton", craftF)
+	craftF:Hide()
+	local tsF = makeWidget("Frame", "TradeSkillFrame", UIParent)
+	tsF.CloseButton = makeWidget("Button", "TradeSkillFrameCloseButton", tsF)
+	tsF:Hide()
+	local profF = makeWidget("Frame", "ProfessionsFrame", UIParent)
+	profF.MaximizeMinimize = makeWidget("Button", "ProfessionsFrameMaxMin", profF)
+	profF:Hide()
+
+	_G.CraftFrame = craftF
+	_G.TradeSkillFrame = tsF
+	_G.ProfessionsFrame = profF
+	_G.CraftFrame_Update = function() end
+	_G.TradeSkillFrame_Update = function() end
+
+	local craftKeysBefore = snapshotKeys(craftF)
+	local tsKeysBefore = snapshotKeys(tsF)
+
+	local mockCraftLine = "Enchanting"
+	local mockTSLine = "Alchemy"
+	local mockBaseProf = nil
+	_G.GetCraftDisplaySkillLine = function() return mockCraftLine, 300, 300 end
+	_G.GetTradeSkillLine = function() return mockTSLine, 300, 300 end
+	_G.C_TradeSkillUI = {
+		GetBaseProfessionInfo = function() return mockBaseProf end,
+		GetAllRecipeIDs = origCTradeSkillUI and origCTradeSkillUI.GetAllRecipeIDs or function() return {} end,
+		GetRecipeInfo = origCTradeSkillUI and origCTradeSkillUI.GetRecipeInfo or function() return nil end,
+	}
+
+	craftF:Show()
+	DH.RefreshProfessionButtons()
+	local stCraft = DH.GetState()
+	local craftBtn = stCraft.craftWinBtn
+	check(stCraft.craftWinShown == true and craftBtn ~= nil and craftBtn:GetParent() == craftF
+		and craftBtn:GetWidth() == 28 and craftBtn:GetHeight() == 28,
+		"CraftFrame Enchanting shows 28x28 launcher button parented to CraftFrame")
+	local cAnc, cRel, cRelAnc, cX, cY = craftBtn:GetPoint(1)
+	check(cAnc == "RIGHT" and cRel == craftF.CloseButton and cRelAnc == "LEFT" and cX == -6 and cY == 0,
+		"CraftFrame launcher anchors RIGHT -> CloseButton LEFT (-6, 0)")
+	checkNoNewKeys(craftF, craftKeysBefore, "CraftFrame")
+
+	-- Beast Training (nil skill line) hides CraftFrame launcher via CraftFrame_Update hook
+	mockCraftLine = nil
+	_G.CraftFrame_Update()
+	check(DH.GetState().craftWinShown == false,
+		"CraftFrame hides launcher when skill line is not Enchanting (e.g. Beast Training)")
+	mockCraftLine = "Enchanting"
+	_G.CraftFrame_Update()
+	check(DH.GetState().craftWinShown == true,
+		"CraftFrame restores launcher when Enchanting is active again")
+	craftF:Hide()
+	check(DH.GetState().craftWinShown == false,
+		"CraftFrame OnHide hides launcher cleanly")
+
+	-- TradeSkillFrame: Alchemy stays hidden, Enchanting shows separate per-frame button (zero SetParent)
+	tsF:Show()
+	DH.RefreshProfessionButtons()
+	check(DH.GetState().craftWinShown == false,
+		"TradeSkillFrame Alchemy keeps launcher hidden")
+	mockTSLine = "Enchanting"
+	_G.TradeSkillFrame_Update()
+	local stTS = DH.GetState()
+	check(stTS.craftWinShown == true and stTS.craftWinBtn ~= nil and stTS.craftWinBtn ~= craftBtn
+		and stTS.craftWinBtn:GetParent() == tsF,
+		"TradeSkillFrame Enchanting uses its own per-frame launcher button without SetParent")
+	mockTSLine = "Alchemy"
+	_G.TradeSkillFrame_Update()
+	check(DH.GetState().craftWinShown == false,
+		"Switching TradeSkillFrame from Enchanting to Alchemy hides launcher immediately")
+	checkNoNewKeys(tsF, tsKeysBefore, "TradeSkillFrame")
+	tsF:Hide()
+
+	-- ProfessionsFrame: C_TradeSkillUI.GetBaseProfessionInfo().professionID == 333 vs 171
+	mockBaseProf = { professionID = 333, professionName = "Enchanting" }
+	profF:Show()
+	DH.RefreshProfessionButtons()
+	local stPF = DH.GetState()
+	check(stPF.craftWinShown == true and stPF.craftWinBtn ~= nil and stPF.craftWinBtn:GetParent() == profF,
+		"ProfessionsFrame shows launcher when professionID == 333")
+	local pfAnc, pfRel, pfRelAnc, pfX = stPF.craftWinBtn:GetPoint(1)
+	check(pfAnc == "RIGHT" and pfRel == profF.MaximizeMinimize and pfRelAnc == "LEFT" and pfX == -6,
+		"ProfessionsFrame launcher anchors left of MaximizeMinimize (-6, 0)")
+	mockBaseProf = { professionID = 171, professionName = "Alchemy" }
+	DH.RefreshProfessionButtons()
+	check(DH.GetState().craftWinShown == false,
+		"ProfessionsFrame hides launcher when professionID changes to Alchemy (171)")
+	profF:Hide()
+	mockBaseProf = nil
+
+	-- Click toggles DisenchantHelper from CraftFrame launcher
+	mockCraftLine = "Enchanting"
+	craftF:Show()
+	DH.RefreshProfessionButtons()
+	DH.Hide()
+	craftBtn:Click("LeftButton")
+	check(DH.GetState().shown == true, "Clicking CraftFrame launcher opens Disenchant Helper")
+	craftBtn:Click("LeftButton")
+	check(DH.GetState().shown == false, "Clicking CraftFrame launcher again closes Disenchant Helper")
+
+	-- 8D. Skin & Mode Repaint (Goblin, Standard Dark, Standard Light with always-white star)
+	Theme.SetSkin("goblin", true)
+	local expectedGoblinTex = Theme.GetSkinAsset("goblin", "de_btn")
+	check(stEnch.profBookBtn.skinArt:IsShown() == true
+		and stEnch.profBookBtn.skinArt:GetTexture() == expectedGoblinTex
+		and stEnch.profBookBtn.iconTex:IsShown() == false,
+		"Goblin skin renders de_btn skinArt and hides standard star icon on Spellbook launcher")
+	check(craftBtn.skinArt:IsShown() == true
+		and craftBtn.skinArt:GetTexture() == expectedGoblinTex
+		and craftBtn.iconTex:IsShown() == false,
+		"Goblin skin renders de_btn skinArt on CraftFrame launcher")
+
+	Theme.SetSkin("standard", true)
+	Theme.SetMode("dark")
+	check(stEnch.profBookBtn.skinArt:IsShown() == false and stEnch.profBookBtn.iconTex:IsShown() == true,
+		"Standard Dark renders purple pill + star icon on Spellbook launcher")
+	local darkStar = stEnch.profBookBtn.iconTex._vertexColor
+	check(darkStar and darkStar[1] == 1 and darkStar[2] == 1 and darkStar[3] == 1,
+		"Standard Dark star icon stays pure white {1,1,1,1}")
+	approx(stEnch.profBookBtn._fillColor[1], 0.36, 0.001, "Standard Dark purple fill R=0.36")
+	approx(stEnch.profBookBtn._fillColor[2], 0.22, 0.001, "Standard Dark purple fill G=0.22")
+	approx(stEnch.profBookBtn._fillColor[3], 0.66, 0.001, "Standard Dark purple fill B=0.66")
+
+	Theme.SetMode("light")
+	check(stEnch.profBookBtn.skinArt:IsShown() == false and stEnch.profBookBtn.iconTex:IsShown() == true,
+		"Standard Light renders purple pill + star icon on Spellbook launcher")
+	local lightStar = stEnch.profBookBtn.iconTex._vertexColor
+	check(lightStar and lightStar[1] == 1 and lightStar[2] == 1 and lightStar[3] == 1,
+		"Standard Light star icon stays pure white {1,1,1,1} (never black pal.textOnAccent)")
+	local craftLightStar = craftBtn.iconTex._vertexColor
+	check(craftLightStar and craftLightStar[1] == 1 and craftLightStar[2] == 1 and craftLightStar[3] == 1,
+		"Standard Light CraftFrame star icon also stays pure white {1,1,1,1}")
+	approx(stEnch.profBookBtn._fillColor[1], 0.34, 0.001, "Standard Light purple fill R=0.34")
+	approx(stEnch.profBookBtn._fillColor[2], 0.20, 0.001, "Standard Light purple fill G=0.20")
+	approx(stEnch.profBookBtn._fillColor[3], 0.64, 0.001, "Standard Light purple fill B=0.64")
+
+	-- 8E. Combat-lockdown deferral for profession/craft button positioning -> PLAYER_REGEN_ENABLED
+	sbProf:Hide()
+	craftF:Hide()
+	DH.RefreshProfessionButtons()
+	check(DH.GetState().profBookShown == false and DH.GetState().craftWinShown == false,
+		"Both launchers start hidden before combat deferral test")
+
+	inCombatFlag = true
+	sbProf:Show()
+	craftF:Show()
+	local combatRes = DH.RefreshProfessionButtons()
+	local stDef = DH.GetState()
+	check(combatRes == false and stDef.pendingButtonsRefresh == true
+		and stDef.profBookShown == false and stDef.craftWinShown == false,
+		"RefreshProfessionButtons defers cleanly during combat lockdown (pendingButtonsRefresh=true)")
+
+	inCombatFlag = false
+	stDef.eventFrame:GetScript("OnEvent")(stDef.eventFrame, "PLAYER_REGEN_ENABLED")
+	local stFlushed = DH.GetState()
+	check(stFlushed.pendingButtonsRefresh == false and stFlushed.profBookShown == true and stFlushed.craftWinShown == true,
+		"PLAYER_REGEN_ENABLED flushes pendingButtonsRefresh and shows both launchers")
+
+	-- Restore ALL local mocks & theme cleanly
+	sbProf:Hide()
+	craftF:Hide()
+	tsF:Hide()
+	profF:Hide()
+	_G.SpellBookFrame = origSpellBookFrame
+	_G.SpellBookProfessionFrame = origSpellBookProfFrame
+	_G.PrimaryProfession1 = origPrimary1
+	_G.PrimaryProfession2 = origPrimary2
+	_G.SpellBook_UpdateProfessions = origSBUpdateProfs
+	_G.SpellBookFrame_Update = origSBFrameUpdate
+	_G.CraftFrame = origCraftFrame
+	_G.TradeSkillFrame = origTradeSkillFrame
+	_G.ProfessionsFrame = origProfessionsFrame
+	_G.CraftFrame_Update = origCraftUpdate
+	_G.TradeSkillFrame_Update = origTSUpdate
+	_G.GetCraftDisplaySkillLine = origGetCraftSkill
+	_G.GetTradeSkillLine = origGetTSSkill
+	_G.GetProfessions = origGetProfessions
+	_G.GetProfessionInfo = origGetProfessionInfo
+	_G.GetSpellBookItemInfo = origGetSpellBookItemInfo
+	_G.C_TradeSkillUI = origCTradeSkillUI
+	_G.InCombatLockdown = origInCombat
+	_G.issecretvalue = origIsSecretValue
+	Theme.SetSkin(origSkin, true)
+	Theme.SetMode(origMode)
+	DH.RefreshProfessionButtons()
+	DH.Hide()
 end
 
 -- Cleanup / restore stubs

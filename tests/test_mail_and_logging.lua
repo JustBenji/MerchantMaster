@@ -83,7 +83,9 @@ local function makeFrame(frameType, name, parent)
         CreateFontString = function(self)
             local fs = {
                 _text = "",
+                _shown = true,
                 SetPoint = function() end,
+                ClearAllPoints = function() end,
                 SetHeight = function() end,
                 SetJustifyH = function() end,
                 SetJustifyV = function() end,
@@ -92,6 +94,9 @@ local function makeFrame(frameType, name, parent)
                 GetText = function(s) return s._text end,
                 SetTextColor = function() end,
                 SetFont = function() return true end,
+                Show = function(s) s._shown = true end,
+                Hide = function(s) s._shown = false end,
+                IsShown = function(s) return s._shown end,
             }
             return fs
         end,
@@ -895,6 +900,385 @@ do
     eq(stuckTries, 2, "Shifted blocked mail is NOT retried after shifting down from index 2 to 1")
     eq(MH.GetState().skippedBlocked, 1, "skippedBlocked stays 1 (not inflated to 2 after shift)")
     eq(MH.GetState().lootedCount, 1, "lootedCount reflects only the 1 healthy mail looted")
+end
+
+-- =========================================================================
+-- 7. Feature D: Mail Presets Data Model, Surname Normalization & Deduplication
+-- =========================================================================
+do
+    local savedGetRealm = _G.GetRealmName
+    local savedGetPlayer = host.GetPlayerFullName
+    local savedDBChars = _G.MerchantMasterDB.chars
+    local savedMailPresets = _G.MerchantMasterDB.mailPresets
+
+    _G.GetRealmName = function() return "Wild Growth" end
+    host.GetPlayerFullName = function() return "Hero Lightbringer", "Hero" end
+    _G.MerchantMasterDB.mailPresets = nil
+    _G.MerchantMasterDB.chars = {
+        ["Normal-Horde-Wild Growth-Hero Lightbringer"] = { name = "Hero Lightbringer", realm = "Wild Growth", economy = "Normal-Horde" },
+        ["Normal-Horde-Wild Growth-Elara Vance"] = { name = "Elara Vance", realm = "Wild Growth", economy = "Normal-Horde" },
+        ["Normal-Horde-Wild Growth-Goldbank"] = { name = "Goldbank", realm = "Wild Growth", economy = "Normal-Horde" },
+        ["PvP-Alliance-Wild Growth-OtherEcon"] = { name = "OtherEcon", realm = "Wild Growth", economy = "PvP-Alliance" },
+    }
+
+    local cfg = MH.GetMailPresetsConfig()
+    check(type(cfg) == "table" and type(cfg.display) == "table" and type(cfg.byEcon) == "table",
+        "GetMailPresetsConfig initializes MerchantMasterDB.mailPresets")
+    eq(cfg.display.showIcon, true, "display.showIcon defaults to true")
+    eq(cfg.display.showName, true, "display.showName defaults to true")
+    eq(cfg.display.showRole, true, "display.showRole defaults to true")
+    eq(cfg.display.warnUnsaved, true, "display.warnUnsaved defaults to true")
+
+    -- WoW Forever surname-safe normalization & realm stripping
+    eq(MH.SetPresetCharacter("bank", "  Goldbank-WildGrowth  "), "Goldbank", "Strips compact -CurrentRealm and trims outer spaces")
+    eq(MH.SetPresetCharacter("auction", "goldbank-Wild Growth"), "goldbank", "Strips spaced -CurrentRealm case-insensitively")
+    eq(MH.SetPresetCharacter("alchemy", "  Goldbank "), "Goldbank", "Same char stored under alchemy")
+    eq(MH.SetPresetCharacter("cooking", "Goldbank"), "Goldbank", "Same char stored under cooking")
+    eq(MH.SetPresetCharacter("mainCrafter", "  Elara Vance-wildgrowth  "), "Elara Vance", "Preserves internal WoW Forever surname space while stripping realm")
+    eq(MH.SetPresetCharacter("enchanting", "Elara Vance"), "Elara Vance", "Deduplicates surname character across roles")
+    eq(MH.SetPresetCharacter("tailoring", "Hero Lightbringer-WildGrowth"), "Hero Lightbringer", "Stores current player as tailoring alt")
+    eq(MH.SetPresetCharacter("engineering", "CrossAlt-OtherRealm"), "CrossAlt-OtherRealm", "Preserves foreign -OtherRealm suffix")
+
+    -- Economy isolation
+    MH.SetPresetCharacter("bank", "AllyBank", "PvP-Alliance")
+    local hordeEntries = MH.BuildPresetRecipientEntries("Normal-Horde")
+    local allyEntries = MH.BuildPresetRecipientEntries("PvP-Alliance")
+    eq(#allyEntries, 1, "PvP-Alliance economy isolated with 1 entry")
+    eq(allyEntries[1].name, "AllyBank", "PvP-Alliance entry preserves its own bank")
+
+    -- Deduplication, priority icon, 2-role cap + (+N more), and isSelf
+    eq(#hordeEntries, 4, "Normal-Horde deduplicates 8 role assignments into 4 unique characters")
+    eq(hordeEntries[1].name, "Goldbank", "First entry is bank priority")
+    eq(hordeEntries[1].icon, 133784, "Bank role wins priority icon 133784")
+    eq(hordeEntries[1].roleLabel, "Bank / Auction (+2 more)", "Role label caps at 2 roles + (+N more)")
+    eq(hordeEntries[1].allRolesText, "Bank, Auction, Alchemy, Cooking", "Full roles preserved for tooltip")
+    eq(hordeEntries[1].isSelf, false, "Bank alt is not marked isSelf")
+
+    eq(hordeEntries[2].name, "Elara Vance", "Second entry preserves surname")
+    eq(hordeEntries[2].icon, 136241, "Main Crafter role icon 136241")
+    eq(hordeEntries[2].roleLabel, "Main Crafter / Enchanting", "2 roles combined cleanly")
+    eq(hordeEntries[2].initials, "EV", "2-letter initials use first+last surname initials")
+
+    eq(hordeEntries[3].name, "CrossAlt-OtherRealm", "Engineering entry keeps foreign realm")
+    eq(hordeEntries[3].icon, 136243, "Engineering role icon 136243")
+
+    eq(hordeEntries[4].name, "Hero Lightbringer", "Tailoring entry matches self")
+    eq(hordeEntries[4].isSelf, true, "Current player entry marked isSelf = true")
+
+    -- IsSavedMailRecipient checks
+    local okSaved1, rec1 = MH.IsSavedMailRecipient("elara vance-WildGrowth")
+    check(okSaved1 == true and rec1 and rec1.name == "Elara Vance", "IsSavedMailRecipient matches surname + compact realm case-insensitively")
+    local okSaved2 = MH.IsSavedMailRecipient("CrossAlt-OtherRealm")
+    eq(okSaved2, true, "IsSavedMailRecipient matches foreign realm exact char")
+    local okUnsaved = MH.IsSavedMailRecipient("Random Stranger")
+    eq(okUnsaved, false, "IsSavedMailRecipient returns false for unsaved recipient")
+
+    -- Known economy characters
+    local known = MH.GetKnownEconomyCharacters("Normal-Horde")
+    check(#known >= 4 and known[1].isSelf == true and known[1].name == "Hero Lightbringer",
+        "GetKnownEconomyCharacters puts self first and filters by economy")
+    local sawOtherEcon = false
+    for _, k in ipairs(known) do
+        if k.name == "OtherEcon" then sawOtherEcon = true end
+    end
+    eq(sawOtherEcon, false, "GetKnownEconomyCharacters excludes other economies")
+
+    _G.GetRealmName = savedGetRealm
+    host.GetPlayerFullName = savedGetPlayer
+    _G.MerchantMasterDB.chars = savedDBChars
+    _G.MerchantMasterDB.mailPresets = savedMailPresets
+end
+
+-- =========================================================================
+-- 8 & 9. Feature D: Mailbox Quick-Pick Panels + Unsaved-Recipient Safety Net
+-- =========================================================================
+do
+    -- Save all globals we mock locally
+    local savedMailFrame = _G.MailFrame
+    local savedSendMailFrame = _G.SendMailFrame
+    local savedInboxFrame = _G.InboxFrame
+    local savedOpenMailFrame = _G.OpenMailFrame
+    local savedNameBox = _G.SendMailNameEditBox
+    local savedSubjBox = _G.SendMailSubjectEditBox
+    local savedSendBtn = _G.SendMailMailButton
+    local savedTab1 = _G.MailFrameTab1
+    local savedTab2 = _G.MailFrameTab2
+    local savedCanSend = _G.SendMailFrame_CanSend
+    local savedGetSendItem = _G.GetSendMailItem
+    local savedGetSendLink = _G.GetSendMailItemLink
+    local savedSendMail = _G.SendMail
+    local savedPopups = _G.StaticPopupDialogs
+    local savedPopupShow = _G.StaticPopup_Show
+    local savedPopupHide = _G.StaticPopup_Hide
+    local savedGetRealm = _G.GetRealmName
+    local savedGetPlayer = host.GetPlayerFullName
+    local savedMailPresets = _G.MerchantMasterDB.mailPresets
+    local savedPresetsPanel = MH.presetsPanel
+    local savedInboxStrip = MH.inboxQuickStrip
+
+    _G.GetRealmName = function() return "Forever" end
+    host.GetPlayerFullName = function() return "Hero", "Hero" end
+    _G.MerchantMasterDB.mailPresets = nil
+    MH.presetsPanel = nil
+    MH.inboxQuickStrip = nil
+
+    -- Build local Blizzard MailFrame mocks
+    local mailFrame = makeFrame("Frame", "MailFrame", nil)
+    local sendFrame = makeFrame("Frame", "SendMailFrame", mailFrame)
+    local inboxFrame = makeFrame("Frame", "InboxFrame", mailFrame)
+    local openMailFrame = makeFrame("Frame", "OpenMailFrame", mailFrame)
+    sendFrame:Hide()
+    inboxFrame:Show()
+    openMailFrame:Hide()
+
+    local nameBox = makeFrame("EditBox", "SendMailNameEditBox", sendFrame)
+    local origSetText = nameBox.SetText
+    nameBox.SetText = function(self, t)
+        origSetText(self, t)
+        if self._scripts.OnTextChanged then
+            self._scripts.OnTextChanged(self, false)
+        end
+    end
+
+    local subjFocusCount = 0
+    local subjBox = makeFrame("EditBox", "SendMailSubjectEditBox", sendFrame)
+    subjBox.SetFocus = function() subjFocusCount = subjFocusCount + 1 end
+
+    local sendMailCalls = {}
+    local sendMailFn = function(recipient, subject, body)
+        sendMailCalls[#sendMailCalls + 1] = { recipient = recipient, subject = subject, body = body }
+    end
+    _G.SendMail = sendMailFn
+
+    local sendBtn = makeFrame("Button", "SendMailMailButton", sendFrame)
+    sendBtn:SetScript("OnClick", function()
+        _G.SendMail(nameBox:GetText(), subjBox:GetText(), "")
+    end)
+
+    local tab2Clicks = 0
+    local tab1 = makeFrame("Button", "MailFrameTab1", mailFrame)
+    local tab2 = makeFrame("Button", "MailFrameTab2", mailFrame)
+    tab2:SetScript("OnClick", function()
+        tab2Clicks = tab2Clicks + 1
+        inboxFrame:Hide()
+        sendFrame:Show()
+    end)
+
+    local canSendCalls = 0
+    _G.SendMailFrame_CanSend = function() canSendCalls = canSendCalls + 1 end
+
+    local sendAttachments = {}
+    _G.GetSendMailItem = function(slot)
+        local it = sendAttachments[slot]
+        if it then return it.name, it.id, 134400, it.count end
+    end
+    _G.GetSendMailItemLink = function(slot)
+        local it = sendAttachments[slot]
+        if it then return "|Hitem:" .. tostring(it.id) .. "|h[" .. it.name .. "]|h" end
+    end
+
+    local shownPopups = {}
+    local hiddenPopups = {}
+    _G.StaticPopupDialogs = {}
+    _G.StaticPopup_Show = function(which, textArg1)
+        shownPopups[#shownPopups + 1] = { which = which, arg1 = textArg1 }
+        return { which = which }
+    end
+    _G.StaticPopup_Hide = function(which)
+        hiddenPopups[#hiddenPopups + 1] = which
+    end
+
+    _G.MailFrame = mailFrame
+    _G.SendMailFrame = sendFrame
+    _G.InboxFrame = inboxFrame
+    _G.OpenMailFrame = openMailFrame
+    _G.SendMailNameEditBox = nameBox
+    _G.SendMailSubjectEditBox = subjBox
+    _G.SendMailMailButton = sendBtn
+    _G.MailFrameTab1 = tab1
+    _G.MailFrameTab2 = tab2
+
+    -- Configure presets (2 non-self + 1 self)
+    MH.SetPresetCharacter("bank", "Goldbank")
+    MH.SetPresetCharacter("auction", "Elara Vance")
+    MH.SetPresetCharacter("alchemy", "Hero")
+
+    -- Open Mailbox (Inbox visible, SendMail hidden)
+    MH.OnEvent(nil, "MAIL_SHOW")
+    eq(_G.SendMail, sendMailFn, "MailHelper NEVER wraps _G.SendMail (keeps Analytics Capture hook clean)")
+    check(MH.presetsPanel ~= nil and MH.presetsPanel._name == "MerchantMasterMailPresetsPanel",
+        "Send Mail presets panel created with name MerchantMasterMailPresetsPanel")
+    check(MH.inboxQuickStrip ~= nil, "Inbox quick-pick icon strip created")
+    eq(MH.presetsPanel:IsShown(), false, "Presets panel stays hidden when SendMailFrame is hidden")
+    eq(MH.inboxQuickStrip:IsShown(), true, "Inbox quick strip shown when InboxFrame is shown with non-self presets")
+    -- Inbox quick strip omits isSelf (only 2 buttons visible, not 3)
+    eq(MH.inboxQuickStrip.buttons[1]:IsShown(), true, "Inbox strip button 1 shown (Goldbank)")
+    eq(MH.inboxQuickStrip.buttons[2]:IsShown(), true, "Inbox strip button 2 shown (Elara Vance)")
+    eq(MH.inboxQuickStrip.buttons[3]:IsShown(), false, "Inbox strip omits isSelf character (Hero)")
+
+    -- Opening an inbox mail hides quick strip and keeps presets panel hidden
+    openMailFrame:Show()
+    MH.RefreshPresetsUI()
+    eq(MH.inboxQuickStrip:IsShown(), false, "OpenMailFrame shown hides inbox quick strip")
+    eq(MH.presetsPanel:IsShown(), false, "OpenMailFrame shown keeps presets panel hidden")
+    openMailFrame:Hide()
+    MH.RefreshPresetsUI()
+    eq(MH.inboxQuickStrip:IsShown(), true, "Closing OpenMailFrame restores inbox quick strip")
+
+    -- Clicking inbox icon switches to SendMail tab, fills recipient, calls CanSend, focuses subject!
+    MH.inboxQuickStrip.buttons[2]:Click()
+    eq(tab2Clicks, 1, "Clicking inbox quick-pick switches to Send Mail tab via MailFrameTab2:Click()")
+    eq(nameBox:GetText(), "Elara Vance", "Clicking inbox quick-pick fills SendMailNameEditBox")
+    check(canSendCalls >= 1, "Clicking inbox quick-pick triggers SendMailFrame_CanSend()")
+    eq(subjFocusCount, 1, "Clicking inbox quick-pick focuses SendMailSubjectEditBox")
+    eq(MH.presetsPanel:IsShown(), true, "Presets panel shows when SendMailFrame is active")
+    check((MH.presetsPanel.statusFs:GetText() or ""):find("Saved: Auction", 1, true) ~= nil,
+        "Status pill shows Saved: Auction for Elara Vance")
+
+    -- Display option toggles & 2-letter initials fallback when all 3 unchecked
+    MH.SetDisplayOption("showIcon", false)
+    MH.SetDisplayOption("showName", false)
+    MH.SetDisplayOption("showRole", false)
+    eq(MH.presetsPanel.buttons[2].initFs:IsShown(), true, "All 3 display toggles off falls back to 2-letter initials")
+    eq(MH.presetsPanel.buttons[2].initFs:GetText(), "EV", "Initials fallback renders EV for Elara Vance")
+    MH.SetDisplayOption("showIcon", true)
+    MH.SetDisplayOption("showName", true)
+    MH.SetDisplayOption("showRole", true)
+    eq(MH.presetsPanel.buttons[2].initFs:IsShown(), false, "Re-enabling display toggles hides initials fallback")
+
+    -- Clicking preset panel button fills recipient
+    MH.presetsPanel.buttons[1]:Click()
+    eq(nameBox:GetText(), "Goldbank", "Clicking Send Mail preset panel button fills Goldbank")
+
+    -- Pagination when > 8 unique characters saved
+    MH.SetPresetCharacter("mainCrafter", "AltThree")
+    MH.SetPresetCharacter("blacksmithing", "AltFour")
+    MH.SetPresetCharacter("enchanting", "AltFive")
+    MH.SetPresetCharacter("engineering", "AltSix")
+    MH.SetPresetCharacter("leatherworking", "AltSeven")
+    MH.SetPresetCharacter("tailoring", "AltEight")
+    MH.SetPresetCharacter("cooking", "AltNine")
+    eq(MH.presetsPanel.nextBtn:IsShown(), true, "Pagination next button shown when > 8 presets")
+    eq(MH.presetsPanel.pageFs:GetText(), "1 / 2", "Pagination displays page 1 / 2")
+    MH.presetsPanel.nextBtn:Click()
+    eq(MH.presetsPanel.pageFs:GetText(), "2 / 2", "Clicking next advances to page 2 / 2")
+    MH.presetsPanel.prevBtn:Click()
+    eq(MH.presetsPanel.pageFs:GetText(), "1 / 2", "Clicking prev returns to page 1 / 2")
+
+    -- Safety Net Test 1: Gold-only / text-only mail to unsaved recipient sends WITHOUT popup
+    sendAttachments = {}
+    nameBox:SetText("Stranger One")
+    check((MH.presetsPanel.statusFs:GetText() or ""):find("Unsaved recipient", 1, true) ~= nil,
+        "Status pill shows Unsaved recipient for Stranger One")
+    shownPopups = {}
+    sendMailCalls = {}
+    sendBtn:Click()
+    eq(#shownPopups, 0, "Gold-only/text-only mail to unsaved recipient does NOT show popup")
+    eq(#sendMailCalls, 1, "Gold-only/text-only mail sends immediately")
+
+    -- Safety Net Test 2: Items mailed to SAVED recipient sends WITHOUT popup
+    sendAttachments = { [1] = { name = "Black Lotus", id = 13468, count = 2 } }
+    eq(MH.HasSendMailItems(), true, "HasSendMailItems returns true when attachment slot 1 has an item")
+    nameBox:SetText("Elara Vance-Forever")
+    shownPopups = {}
+    sendMailCalls = {}
+    sendBtn:Click()
+    eq(#shownPopups, 0, "Mailing items to saved surname+realm recipient does NOT show popup")
+    eq(#sendMailCalls, 1, "Saved recipient item mail sends immediately")
+
+    -- Safety Net Test 3: Items mailed to UNSAVED recipient intercepts & shows confirmation popup
+    nameBox:SetText("Random Buyer")
+    shownPopups = {}
+    hiddenPopups = {}
+    sendMailCalls = {}
+    sendBtn:Click()
+    eq(#sendMailCalls, 0, "Unsaved item mail is suppressed before SendMail runs (zero phantom Capture records)")
+    eq(#shownPopups, 1, "Unsaved item mail shows confirmation StaticPopup")
+    eq(shownPopups[1].which, "MERCHANTMASTER_CONFIRM_UNSAVED_MAIL", "Popup key is MERCHANTMASTER_CONFIRM_UNSAVED_MAIL")
+    eq(shownPopups[1].arg1, "Random Buyer", "Popup formats recipient name")
+    local dlg = _G.StaticPopupDialogs["MERCHANTMASTER_CONFIRM_UNSAVED_MAIL"]
+    check(type(dlg) == "table" and dlg.button1 == "I am aware" and dlg.button2 == "No",
+        "Popup buttons are 'I am aware' and 'No'")
+    check(dlg.text == "Are you sure you want to send items towards this character?\n\nRecipient: %s\n(Not in your saved Mail Recipients list)",
+        "Popup dialog text matches specification exactly")
+    eq(MH.GetState().pendingConfirm, "Random Buyer", "pendingConfirm tracks unsaved recipient")
+
+    -- Clicking "No" (OnCancel) aborts cleanly
+    dlg.OnCancel()
+    eq(MH.GetState().pendingConfirm, nil, "OnCancel clears pendingConfirm")
+    eq(#sendMailCalls, 0, "Cancelling popup sends 0 mails")
+
+    -- Editing recipient name auto-hides popup and clears pendingConfirm
+    sendBtn:Click()
+    eq(MH.GetState().pendingConfirm, "Random Buyer", "pendingConfirm set before text edit")
+    hiddenPopups = {}
+    nameBox:SetText("Other Stranger")
+    eq(MH.GetState().pendingConfirm, nil, "Editing SendMailNameEditBox clears pendingConfirm")
+    eq(hiddenPopups[#hiddenPopups], "MERCHANTMASTER_CONFIRM_UNSAVED_MAIL", "Editing recipient auto-hides popup")
+
+    -- MAIL_SEND_INFO_UPDATE and MAIL_FAILED auto-hide popup
+    sendBtn:Click()
+    eq(MH.GetState().pendingConfirm, "Other Stranger", "pendingConfirm set for Other Stranger")
+    MH.OnEvent(nil, "MAIL_SEND_INFO_UPDATE")
+    eq(MH.GetState().pendingConfirm, nil, "MAIL_SEND_INFO_UPDATE clears pendingConfirm")
+
+    -- Clicking "I am aware" (OnAccept) sends ONCE with one-shot bypass and clears bypass immediately
+    sendBtn:Click()
+    eq(MH.GetState().pendingConfirm, "Other Stranger", "pendingConfirm armed for OnAccept")
+    sendMailCalls = {}
+    dlg.OnAccept()
+    eq(#sendMailCalls, 1, "OnAccept invokes original SendMail button handler once")
+    eq(sendMailCalls[1].recipient, "Other Stranger", "OnAccept sends to confirmed unsaved recipient")
+    eq(MH.GetState().bypassConfirmRecipient, nil, "One-shot bypassConfirmRecipient cleared immediately after send")
+    eq(MH.GetState().pendingConfirm, nil, "pendingConfirm cleared after OnAccept")
+
+    -- Subsequent click to same unsaved recipient still prompts again (bypass was strictly one-shot)
+    shownPopups = {}
+    sendBtn:Click()
+    eq(#shownPopups, 1, "Second send to same unsaved recipient prompts again (one-shot bypass)")
+
+    -- If items removed before OnAccept, OnAccept refuses to send
+    sendAttachments = {}
+    sendMailCalls = {}
+    dlg.OnAccept()
+    eq(#sendMailCalls, 0, "OnAccept refuses if attachments were removed before confirm")
+
+    -- Disabling warnUnsaved allows unsaved item mail to send without popup
+    sendAttachments = { [1] = { name = "Black Lotus", id = 13468, count = 1 } }
+    MH.SetDisplayOption("warnUnsaved", false)
+    shownPopups = {}
+    sendMailCalls = {}
+    sendBtn:Click()
+    eq(#shownPopups, 0, "warnUnsaved = false disables unsaved recipient popup")
+    eq(#sendMailCalls, 1, "warnUnsaved = false sends item mail immediately")
+
+    -- MAIL_CLOSED clears confirmation and hides panels
+    MH.OnEvent(nil, "MAIL_CLOSED")
+    eq(MH.presetsPanel:IsShown(), false, "MAIL_CLOSED hides presets panel")
+    eq(MH.inboxQuickStrip:IsShown(), false, "MAIL_CLOSED hides inbox quick strip")
+
+    -- Restore all mocked globals cleanly
+    _G.MailFrame = savedMailFrame
+    _G.SendMailFrame = savedSendMailFrame
+    _G.InboxFrame = savedInboxFrame
+    _G.OpenMailFrame = savedOpenMailFrame
+    _G.SendMailNameEditBox = savedNameBox
+    _G.SendMailSubjectEditBox = savedSubjBox
+    _G.SendMailMailButton = savedSendBtn
+    _G.MailFrameTab1 = savedTab1
+    _G.MailFrameTab2 = savedTab2
+    _G.SendMailFrame_CanSend = savedCanSend
+    _G.GetSendMailItem = savedGetSendItem
+    _G.GetSendMailItemLink = savedGetSendLink
+    _G.SendMail = savedSendMail
+    _G.StaticPopupDialogs = savedPopups
+    _G.StaticPopup_Show = savedPopupShow
+    _G.StaticPopup_Hide = savedPopupHide
+    _G.GetRealmName = savedGetRealm
+    host.GetPlayerFullName = savedGetPlayer
+    _G.MerchantMasterDB.mailPresets = savedMailPresets
+    MH.presetsPanel = savedPresetsPanel
+    MH.inboxQuickStrip = savedInboxStrip
 end
 
 print(string.format("PASS test_mail_and_logging (%d assertions)", assertions))

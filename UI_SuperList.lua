@@ -3872,6 +3872,46 @@ do
         headers[7]:SetText(hud.window=='24h' and 'HRS' or 'DAYS')
     end
 
+    local function quickLookWatchTarget()
+        local row=hud and hud.row
+        if not row then return nil end
+        local kind=hud.kind or (hud.data and hud.data.kind) or 'recipe'
+        local recipe=row.recipe
+        local spellID=row.spellID or (recipe and (recipe.spellID or recipe.recipeID or recipe.id))
+        local itemID=row.outputItemID or row.writID or row.crateID or row.itemID or (recipe and recipe.outputItemID)
+        return {
+            kind=kind,
+            row=row,
+            key=row.key,
+            itemID=itemID,
+            spellID=spellID,
+            name=(hud.data and hud.data.title) or row.name,
+        }
+    end
+
+    local function syncFavButton()
+        if not (hud and hud.favButton) then return false end
+        local W=ns.Watchlist
+        local target=quickLookWatchTarget()
+        local fav=false
+        if W and target then
+            if type(W.IsFavorite)=='function' then fav=W.IsFavorite(target)==true
+            elseif type(W.IsWatched)=='function' then fav=W.IsWatched(target)==true end
+        end
+        hud.favButton._isFavorite=fav
+        local pal=hud.palette or getThemePalette()
+        local ic=hud.favButton._mmIcon
+        if ic and ic.SetVertexColor then
+            if fav then
+                ic:SetVertexColor(1,0.82,0.18,1)
+            else
+                local mc=(pal and pal.textMuted) or {0.60,0.60,0.65,1}
+                ic:SetVertexColor(mc[1],mc[2],mc[3],mc[4] or 1)
+            end
+        end
+        return fav
+    end
+
     local function paintData()
         local data,row=hud.data,hud.row
         hud.window=hud.context.window
@@ -3882,6 +3922,7 @@ do
         hud.metrics=buildMetricRows(data,row)
         hud.heading:SetText(hud.kind:upper()..' QUICK LOOK | '..(hud.window=='24h' and '24 HOURS' or '7 DAYS'))
         paintWindowButtons()
+        syncFavButton()
         paintHeaders(hud.overviewHeaders)
         if hud.moverHeaders and hud.moverHeaders[1] then
             hud.moverHeaders[1]:SetText(hud.kind=='item' and 'ITEM / USED IN' or 'REAGENT')
@@ -3966,6 +4007,7 @@ do
             if shown(hud) then hud.Reposition() end
         else
             paintWindowButtons()
+            syncFavButton()
         end
     end
 
@@ -4140,10 +4182,10 @@ do
         hud.surface=T.NineApple(hud,'glass_r22',hudShellFill,'glassBorder',{cornerSize=22,sub=-1,noSpecular=true})
         hud.Reposition=reposition
         hud.outputIcon=icon(hud,INSET,20,34)
-        hud.heading=label(hud,58,12,450,13,10,'textMuted',nil,nil,'semibold')
-        hud.title=label(hud,58,25,450,22,18,'text',nil,nil,'semibold')
+        hud.heading=label(hud,58,12,418,13,10,'textMuted',nil,nil,'semibold')
+        hud.title=label(hud,58,25,418,22,18,'text',nil,nil,'semibold')
         hud.subtitle=label(hud,58,47,580,13,11,'textSecondary')
-        local titleHover=place(CreateFrame('Frame',nil,hud),hud,INSET,14,494,44)
+        local titleHover=place(CreateFrame('Frame',nil,hud),hud,INSET,14,461,44)
         titleHover:EnableMouse(true)
         titleHover:SetFrameLevel(hud:GetFrameLevel()+2)
         titleHover:SetScript('OnEnter',function(self)
@@ -4167,6 +4209,32 @@ do
         end)
         titleHover:SetScript('OnLeave',function(self) leaveTooltip(self) end)
         hud.titleHover=titleHover
+        hud.favButton=place(T.CreatePlateButton(hud,'',25,25,{icon=(T and T.ASSETS and T.ASSETS.icon_star) or 'star',iconSize=13,
+            variant='secondary',pill=true,border=true}),hud,484,20,25,25)
+        if hud.favButton.SetFrameLevel then hud.favButton:SetFrameLevel(hud:GetFrameLevel()+4) end
+        hud.favButton:SetScript('OnClick',function(self)
+            local W=ns.Watchlist
+            local target=quickLookWatchTarget()
+            if W and type(W.Toggle)=='function' and target then
+                W.Toggle(target)
+            end
+            local fav=syncFavButton()
+            if GameTooltip and GameTooltip.IsOwned and GameTooltip:IsOwned(self) then
+                GameTooltip:SetOwner(self,'ANCHOR_TOP')
+                GameTooltip:AddLine(fav and 'Remove from Watchlist' or 'Add to Watchlist',1,0.85,0.25)
+                if T and T.LiftTooltip then T.LiftTooltip(GameTooltip) end
+                GameTooltip:Show()
+            end
+        end)
+        hud.favButton:SetScript('OnEnter',function(self)
+            if not GameTooltip then return end
+            local fav=syncFavButton()
+            GameTooltip:SetOwner(self,'ANCHOR_TOP')
+            GameTooltip:AddLine(fav and 'Remove from Watchlist' or 'Add to Watchlist',1,0.85,0.25)
+            if T and T.LiftTooltip then T.LiftTooltip(GameTooltip) end
+            GameTooltip:Show()
+        end)
+        hud.favButton:SetScript('OnLeave',function(self) leaveTooltip(self) end)
         local windowControl=inset(hud,516,20,90,25,'pill','glassFill')
         local pillOpts={variant='secondary',pill=true,fontSize=10,weight='semibold'}
         hud.win24Btn=place(T.CreatePlateButton(windowControl,'24h',44,23,pillOpts),windowControl,1,1,44,23)
@@ -4347,6 +4415,7 @@ do
         end)
         hud:SetScript('OnHide',function(self)
             if self.titleHover then leaveTooltip(self.titleHover) end
+            if self.favButton then leaveTooltip(self.favButton) end
             for _,w in ipairs(self.metricWidgets or {}) do leaveTooltip(w) end
             self:UnregisterEvent('GLOBAL_MOUSE_DOWN')
             self:UnregisterEvent('PLAYER_REGEN_ENABLED')
@@ -4360,6 +4429,10 @@ do
             self.owner,self.row,self.data,self.pinned,self.context,self.openedTab=nil,nil,nil,nil,nil,nil
             self.window,self.wowheadCA=nil,nil
         end)
+        hud.SyncFavButton=syncFavButton
+        if ns.Watchlist and type(ns.Watchlist.RegisterListener)=='function' then
+            ns.Watchlist.RegisterListener(function() if hud and shown(hud) then syncFavButton() end end)
+        end
         T.RegisterWidget(hud,applyQuickLookTheme)
     end
 
@@ -9425,26 +9498,56 @@ do
     function H.styleHeaders()
         local t = S.tbl
         if not t then return end
+        local T = ns.Theme
         local pal = getThemePalette()
         local sort = S.host and S.host.getSort and S.host.getSort() or {}
-        local mc = (pal and pal.textMuted) or C.FALLBACK.muted
-        local sc = (pal and pal.text) or C.FALLBACK.text
-        for i, col in ipairs(t.columns or {}) do
-            local btn = t.headerBtns[i]
-            if btn then
-                btn:ClearAllPoints()
-                btn:SetPoint('TOPLEFT', t.colX[i], -2)
-                btn:SetWidth(col.width)
-                local active = (sort.col == col.key)
-                if btn.fs then
-                    local label = col.label or ''
-                    if active then label = label .. (sort.asc and ' ^' or ' v') end
-                    btn.fs:SetText(label)
-                    btn.fs:SetJustifyH(col.align == 'CENTER' and 'LEFT' or (col.align or 'LEFT'))
-                    btn.fs:SetTextColor(active and sc[1] or mc[1], active and sc[2] or mc[2], active and sc[3] or mc[3], 1)
+        local tStyle = (T and T.IsCustomSkin and T.IsCustomSkin() and T.GetTableStyle and T.GetTableStyle()) or 'standard'
+        local styled = (tStyle == 't5_ruled' or tStyle == 't5_well' or tStyle == 't3_strips')
+        local chevPath = (T and T.ASSETS and T.ASSETS.icon_chevron_down) or (uiCache.appleRoot .. 'icon_chevron_down')
+        local activeHex = colorHex(pal and (pal.textBlue or pal.accentBlue), '0091ff')
+        local mutedCol = styled and (pal and (pal.gold or pal.text)) or (pal and pal.textMuted) or C.FALLBACK.muted
+        local activeCol = (pal and (pal.textBlue or pal.accentBlue)) or C.FALLBACK.blue
+        if type(t.headerBar) == 'table' and type(t.headerBar.GetRegions) == 'function' then
+            for _, reg in ipairs({ t.headerBar:GetRegions() }) do
+                if type(reg) == 'table' and reg.GetObjectType and reg:GetObjectType() == 'Texture' and reg.SetColorTexture then
+                    if styled then
+                        reg:SetColorTexture(0, 0, 0, 0)
+                    elseif pal and pal.separator then
+                        reg:SetColorTexture(pal.separator[1], pal.separator[2], pal.separator[3], (pal.separator[4] or 0.45) * 0.65)
+                    end
                 end
             end
         end
+        for i, col in ipairs(t.columns or {}) do
+            local btn = t.headerBtns and t.headerBtns[i]
+            if type(btn) == 'table' then
+                if btn.SetHeight then btn:SetHeight(26) end
+                if type(btn.sep) == 'table' and type(btn.sep.Hide) == 'function' then
+                    btn.sep:Hide()
+                end
+                if type(btn.bg) == 'table' and btn.bg.SetColorTexture then
+                    btn.bg:SetColorTexture(0, 0, 0, 0)
+                end
+                if btn.fs then
+                    applyFont(btn.fs, styled and 10 or 11, styled and 'semibold' or 'regular')
+                    if btn.fs.SetJustifyH then btn.fs:SetJustifyH(col.align or 'LEFT') end
+                    if btn.fs.SetJustifyV then btn.fs:SetJustifyV('MIDDLE') end
+                    local lbl = col.label or ''
+                    local dispLbl = styled and string.upper(lbl) or lbl
+                    if sort.col == col.key then
+                        local arrow = sort.asc
+                            and (' |T' .. chevPath .. ':9:9:0:0:16:16:0:16:16:0|t')
+                            or (' |T' .. chevPath .. ':9:9:0:0:16:16:0:16:0:16|t')
+                        btn.fs:SetText('|cff' .. activeHex .. dispLbl .. '|r' .. arrow)
+                        if btn.fs.SetTextColor then btn.fs:SetTextColor(activeCol[1], activeCol[2], activeCol[3], 1) end
+                    else
+                        btn.fs:SetText(dispLbl)
+                        if btn.fs.SetTextColor then btn.fs:SetTextColor(mutedCol[1], mutedCol[2], mutedCol[3], 1) end
+                    end
+                end
+            end
+        end
+        if t.paintTableChrome then t.paintTableChrome() end
     end
 
     function H.formatCellValues(data, pal)
@@ -9643,6 +9746,28 @@ do
         end
     end
 
+    function H.paintRowSep(r)
+        if not r then return end
+        local pal = getThemePalette()
+        if r.sep then
+            if not r._sepAnchored and type(r.sep.ClearAllPoints) == 'function' and type(r.sep.SetPoint) == 'function' then
+                r._sepAnchored = true
+                r.sep:ClearAllPoints()
+                r.sep:SetPoint('BOTTOMLEFT', r, 'BOTTOMLEFT', 16, 0)
+                r.sep:SetPoint('BOTTOMRIGHT', r, 'BOTTOMRIGHT', -16, 0)
+                if r.sep.SetHeight then r.sep:SetHeight(1) end
+            end
+            if type(r.sep.SetColorTexture) == 'function' then
+                local sep = pal and pal.separator
+                if sep then
+                    r.sep:SetColorTexture(sep[1], sep[2], sep[3], (sep[4] or 0.45) * 0.45)
+                else
+                    r.sep:SetColorTexture(0.5, 0.5, 0.54, 0.18)
+                end
+            end
+        end
+    end
+
     function H.paintRowSelection(r)
         if not r then return end
         local sel = r.data and S.selectedKey ~= nil and r.data.key == S.selectedKey
@@ -9656,6 +9781,7 @@ do
                 r.selectTex:Hide()
             end
         end
+        H.paintRowSep(r)
     end
 
     function H.showRowTooltip(owner, data)
@@ -9705,10 +9831,11 @@ do
         local parent = (t and t.scrollBox) or S.view
         local T = ns.Theme
         local Chart = ns.Analytics and ns.Analytics.Chart
+        local rowH = (t and t.rowHeight) or (S.host and S.host.rowHeight) or 22
         local cells, byKey = {}, {}
         for i, col in ipairs(C.ITEM_COLUMNS) do
             local cell = CreateFrame('Button', nil, parent)
-            cell:SetHeight(24)
+            cell:SetHeight(rowH)
             cell:EnableMouse(true)
             cell:RegisterForClicks('LeftButtonUp', 'RightButtonUp')
             if col.icon then
@@ -9721,6 +9848,7 @@ do
             fs:SetPoint('LEFT', col.icon and 22 or 0, 0)
             fs:SetPoint('RIGHT', 0, 0)
             fs:SetJustifyH(col.align or 'LEFT')
+            if fs.SetJustifyV then fs:SetJustifyV('MIDDLE') end
             fs:SetWordWrap(false)
             applyFont(fs, 11, col.key == 'name' and 'semibold' or 'regular')
             cell.fs = fs
@@ -9800,13 +9928,27 @@ do
 
     function H.bindRow(r, data)
         if not r then return end
-        if S.host and S.host.applyRowHighlight then S.host.applyRowHighlight(r) end
         if not r.cellGroup then
+            if S.host and S.host.applyRowHighlight then S.host.applyRowHighlight(r) end
+            if r.sep and type(r.sep.ClearAllPoints) == 'function' and type(r.sep.SetPoint) == 'function' then
+                r._sepAnchored = true
+                r.sep:ClearAllPoints()
+                r.sep:SetPoint('BOTTOMLEFT', r, 'BOTTOMLEFT', 16, 0)
+                r.sep:SetPoint('BOTTOMRIGHT', r, 'BOTTOMRIGHT', -16, 0)
+                if r.sep.SetHeight then r.sep:SetHeight(1) end
+            end
+            if ns.Theme and ns.Theme.RegisterWidget then
+                ns.Theme.RegisterWidget(r, function() H.paintRowSep(r) end)
+            end
+            H.paintRowSep(r)
             if #S.prepared == 0 then
                 S.prepared[#S.prepared + 1] = H.prepareCells()
             end
             r.cellGroup = table.remove(S.prepared)
             r.cells = r.cellGroup.cells
+        end
+        if r.stripe and r.stripe.SetColorTexture then
+            r.stripe:SetColorTexture(0, 0, 0, 0)
         end
         if not r.selectTex then
             r.selectTex = r:CreateTexture(nil, 'BACKGROUND', nil, 2)
@@ -9819,21 +9961,27 @@ do
         r.data = data
         local t = S.tbl
         local pal = getThemePalette()
+        local rowH = (t and t.rowHeight) or (S.host and S.host.rowHeight) or 22
         local active = {}
+        local activeCells = r._activeCells
+        if not activeCells then activeCells = {}; r._activeCells = activeCells end
+        for k in pairs(activeCells) do activeCells[k] = nil end
         local vals = data and H.formatCellValues(data, pal) or nil
         if t then
             for i, col in ipairs(t.columns or {}) do
                 local cell = r.cellGroup.cellsByKey[col.key]
                 if cell then
                     active[cell] = true
+                    activeCells[i] = cell
                     cell:SetParent(r)
                     cell._ownerRow = r
                     cell:ClearAllPoints()
                     cell:SetPoint('LEFT', r, 'LEFT', t.colX[i] or 4, 0)
-                    cell:SetSize(col.width, 24)
+                    cell:SetSize(col.width, rowH)
                     cell:Show()
                     if data and vals then
                         if cell.fs then
+                            if cell.fs.SetJustifyV then cell.fs:SetJustifyV('MIDDLE') end
                             if col.key == 'name' then
                                 local c = (pal and pal.text) or C.FALLBACK.text
                                 cell.fs:SetTextColor(c[1], c[2], c[3], 1)
@@ -9865,6 +10013,7 @@ do
                 end
             end
         end
+        r.cells = activeCells
         for _, cell in ipairs(r.cellGroup.cells) do
             if not active[cell] then
                 cell._ownerRow = nil
@@ -9957,6 +10106,16 @@ do
         local w = S.view and S.view.GetWidth and S.view:GetWidth() or 0
         if w > 0 then
             aiProvider.Layout(w, S.view:GetHeight(), true)
+        else
+            for i, col in ipairs(t.columns) do
+                local btn = t.headerBtns[i]
+                if btn and t.headerBar then
+                    btn:ClearAllPoints()
+                    btn:SetPoint('LEFT', t.headerBar, 'LEFT', t.colX[i], 1)
+                    btn:SetWidth(col.width)
+                end
+            end
+            H.styleHeaders()
         end
         if t.scrollBox and t.scrollBox.ForEachFrame then
             t.scrollBox:ForEachFrame(function(r)
@@ -10588,6 +10747,13 @@ do
         local v = S.view
         if not v then return end
         if v._mmCard and v._mmCard.UpdateTheme then v._mmCard:UpdateTheme() end
+        if v.barSep and v.barSep.SetColorTexture then
+            if pal and pal.separator then
+                v.barSep:SetColorTexture(pal.separator[1], pal.separator[2], pal.separator[3], (pal.separator[4] or 0.45) * 0.65)
+            else
+                v.barSep:SetColorTexture(0.5, 0.5, 0.54, 0.25)
+            end
+        end
         if v.summary and pal and pal.textSecondary then
             v.summary:SetTextColor(pal.textSecondary[1], pal.textSecondary[2], pal.textSecondary[3], 1)
         end
@@ -10598,9 +10764,34 @@ do
             if v.skillControl.lbl then v.skillControl.lbl:SetTextColor(pal.textMuted[1], pal.textMuted[2], pal.textMuted[3], 1) end
             if v.skillControl.dash then v.skillControl.dash:SetTextColor(pal.textMuted[1], pal.textMuted[2], pal.textMuted[3], 1) end
         end
+        H.clearInsetChrome()
         H.styleHeaders()
         H.themeColumnSettingsPopover()
         aiProvider.RepaintVisible()
+        if S.tbl and S.tbl.scrollBox and S.tbl.scrollBox.ForEachFrame then
+            S.tbl.scrollBox:ForEachFrame(H.paintRowSep)
+        end
+    end
+
+    function H.updateShiftHeader()
+        local v = S.view
+        if not v then return end
+        if v.shiftBadge and v.shiftBadge.SetShown then
+            v.shiftBadge:SetShown(S.shiftActive == true)
+        end
+        if v.summary and v.summary.ClearAllPoints and v.summary.SetPoint then
+            v.summary:ClearAllPoints()
+            if v.summaryLeftAnchor then
+                v.summary:SetPoint('LEFT', v.summaryLeftAnchor, 'RIGHT', 8, 0)
+            end
+            if S.shiftActive and v.shiftBadge then
+                v.summary:SetPoint('RIGHT', v.shiftBadge, 'LEFT', -8, 0)
+            elseif v.filtersButton then
+                v.summary:SetPoint('RIGHT', v.filtersButton, 'LEFT', -8, 0)
+            elseif v.resetButton then
+                v.summary:SetPoint('RIGHT', v.resetButton, 'LEFT', -8, 0)
+            end
+        end
     end
 
     function H.buildHeader(v, T)
@@ -10609,17 +10800,24 @@ do
         bar:SetPoint('TOPRIGHT', 0, 0)
         bar:SetHeight(40)
         v.headerBar = bar
+        local barSep = bar:CreateTexture(nil, 'BORDER')
+        barSep:SetPoint('BOTTOMLEFT', 0, 0)
+        barSep:SetPoint('BOTTOMRIGHT', 0, 0)
+        barSep:SetHeight(1)
+        v.barSep = barSep
 
         v.profBtns = {}
         v.profOrder = {}
         local prevPill
         for idx, spec in ipairs(C.PROF_PILLS) do
-            local pw = math.max(24, #spec.label * 6 + 10)
-            local btn = T and T.CreatePlateButton and T.CreatePlateButton(bar, spec.label, pw, 24, { variant = 'secondary', pill = true, fontSize = 10, weight = 'semibold' })
+            local pw = math.max(28, #spec.label * 6 + 12)
+            local btn = T and T.CreatePlateButton and T.CreatePlateButton(bar, spec.label, pw, 22, { variant = 'secondary', pill = true, fontSize = 10, weight = 'semibold' })
                 or CreateFrame('Button', nil, bar)
-            btn:SetSize(pw, 24)
+            btn:SetSize(pw, 22)
+            local pfs = (btn.GetFontString and btn:GetFontString()) or btn.fs
+            if pfs and pfs.SetJustifyV then pfs:SetJustifyV('MIDDLE') end
             if idx == 1 then
-                btn:SetPoint('LEFT', bar, 'LEFT', 6, 0)
+                btn:SetPoint('LEFT', bar, 'LEFT', 8, 0)
             else
                 btn:SetPoint('LEFT', prevPill, 'RIGHT', 3, 0)
             end
@@ -10644,14 +10842,30 @@ do
             prevPill = btn
         end
 
-        v.colSettingsBtn = T and T.CreatePlateButton and T.CreatePlateButton(bar, 'Cols', 54, 24, { variant = 'secondary', pill = true, fontSize = 11 })
-            or CreateFrame('Button', nil, bar)
-        v.colSettingsBtn:SetPoint('RIGHT', bar, 'RIGHT', -4, 0)
-        v.colSettingsBtn:SetScript('OnClick', function() aiProvider.ToggleColumnSettings() end)
+        local function attachHeaderTooltip(btn, title, body, anchor)
+            btn:SetScript('OnEnter', function(self)
+                if not GameTooltip then return end
+                GameTooltip:SetOwner(self, anchor or 'ANCHOR_BOTTOMLEFT')
+                GameTooltip:AddLine(title, 1, 0.85, 0.25)
+                GameTooltip:AddLine(body, 1, 1, 1, true)
+                H.liftAndShowTooltip()
+            end)
+            btn:SetScript('OnLeave', function() if GameTooltip then GameTooltip:Hide() end end)
+        end
 
-        v.shopButton = T and T.CreatePlateButton and T.CreatePlateButton(bar, 'Shop', 62, 24, { variant = 'secondary', pill = true, fontSize = 11 })
+        v.colSettingsBtn = T and T.CreatePlateButton and T.CreatePlateButton(bar, 'Cols', 54, 26, { variant = 'secondary', pill = true, fontSize = 11 })
             or CreateFrame('Button', nil, bar)
+        v.colSettingsBtn:SetSize(54, 26)
+        v.colSettingsBtn:SetPoint('RIGHT', bar, 'RIGHT', -8, 0)
+        if v.colSettingsBtn.fs and v.colSettingsBtn.fs.SetJustifyV then v.colSettingsBtn.fs:SetJustifyV('MIDDLE') end
+        v.colSettingsBtn:SetScript('OnClick', function() aiProvider.ToggleColumnSettings() end)
+        attachHeaderTooltip(v.colSettingsBtn, 'Customize Columns', 'Show, hide, and reorder All Items table columns.', 'ANCHOR_BOTTOMLEFT')
+
+        v.shopButton = T and T.CreatePlateButton and T.CreatePlateButton(bar, 'Shop', 62, 26, { variant = 'secondary', pill = true, fontSize = 11 })
+            or CreateFrame('Button', nil, bar)
+        v.shopButton:SetSize(62, 26)
         v.shopButton:SetPoint('RIGHT', v.colSettingsBtn, 'LEFT', -6, 0)
+        if v.shopButton.fs and v.shopButton.fs.SetJustifyV then v.shopButton.fs:SetJustifyV('MIDDLE') end
         v.shopButton:SetScript('OnClick', function()
             if S.host and S.host.toggleShoppingWindow then
                 S.host.toggleShoppingWindow(true)
@@ -10659,15 +10873,21 @@ do
                 S.host.openShoppingWindow(true)
             end
         end)
+        attachHeaderTooltip(v.shopButton, 'Shopping List', 'Open or close the Shopping List window.', 'ANCHOR_BOTTOMLEFT')
 
-        v.resetButton = T and T.CreatePlateButton and T.CreatePlateButton(bar, 'Reset', 58, 24, { variant = 'secondary', pill = true, fontSize = 11 })
+        v.resetButton = T and T.CreatePlateButton and T.CreatePlateButton(bar, 'Reset', 58, 26, { variant = 'secondary', pill = true, fontSize = 11 })
             or CreateFrame('Button', nil, bar)
+        v.resetButton:SetSize(58, 26)
         v.resetButton:SetPoint('RIGHT', v.shopButton, 'LEFT', -6, 0)
+        if v.resetButton.fs and v.resetButton.fs.SetJustifyV then v.resetButton.fs:SetJustifyV('MIDDLE') end
         v.resetButton:SetScript('OnClick', H.resetFilters)
+        attachHeaderTooltip(v.resetButton, 'Reset Filters', 'Clear active profession, type, role, skill, and search filters.', 'ANCHOR_BOTTOMLEFT')
 
-        v.filtersButton = T and T.CreatePlateButton and T.CreatePlateButton(bar, 'Filters', 66, 24, { variant = 'secondary', pill = true, fontSize = 11, icon = T and T.ASSETS and T.ASSETS.icon_bars, iconSize = 11 })
+        v.filtersButton = T and T.CreatePlateButton and T.CreatePlateButton(bar, 'Filters', 66, 26, { variant = 'secondary', pill = true, fontSize = 11, icon = T and T.ASSETS and T.ASSETS.icon_bars, iconSize = 11 })
             or CreateFrame('Button', nil, bar)
+        v.filtersButton:SetSize(66, 26)
         v.filtersButton:SetPoint('RIGHT', v.resetButton, 'LEFT', -6, 0)
+        if v.filtersButton.fs and v.filtersButton.fs.SetJustifyV then v.filtersButton.fs:SetJustifyV('MIDDLE') end
         v.filtersButton:SetScript('OnClick', function(self)
             if S.host and S.host.toggleScreenFilters then
                 S.host.toggleScreenFilters(self)
@@ -10675,32 +10895,38 @@ do
                 S.host.toggleFiltersPopover(self)
             end
         end)
+        attachHeaderTooltip(v.filtersButton, 'All Items Filters', 'Filter items by type, role, tradeability, demand, and skill range.', 'ANCHOR_BOTTOMLEFT')
 
-        local shiftBadge = CreateFrame('Frame', nil, bar)
-        shiftBadge:SetSize(88, 20)
-        shiftBadge:SetPoint('RIGHT', v.filtersButton, 'LEFT', -6, 0)
-        if T and T.RoundRect and T.ASSETS and T.ASSETS.pill_fill then
-            shiftBadge.bg = T.RoundRect(shiftBadge, shiftBadge, 'BACKGROUND', 0, 10, 0, 0.14, 0.50, 0.24, 0.90, T.ASSETS.pill_fill)
-        else
-            shiftBadge.bg = shiftBadge:CreateTexture(nil, 'BACKGROUND')
-            shiftBadge.bg:SetAllPoints()
-            shiftBadge.bg:SetColorTexture(0.14, 0.50, 0.24, 0.90)
+        local badgePill = (type(T) == 'table' and type(T.CreateBadgePill) == 'function')
+            and T.CreateBadgePill(bar, 'Quick-Add Mode', 'blue', { height = 22, fontSize = 11, padX = 12 })
+            or nil
+        local shiftBadge = badgePill and badgePill.frame or CreateFrame('Frame', nil, bar)
+        shiftBadge._pill = badgePill
+        if not badgePill then
+            shiftBadge:SetSize(102, 22)
+            shiftBadge.label = shiftBadge:CreateFontString(nil, 'OVERLAY', 'GameFontHighlightSmall')
+            shiftBadge.label:SetAllPoints()
+            shiftBadge.label:SetJustifyH('CENTER')
+            if shiftBadge.label.SetJustifyV then shiftBadge.label:SetJustifyV('MIDDLE') end
+            shiftBadge.label:SetText('Quick-Add Mode')
+            applyFont(shiftBadge.label, 11, 'semibold')
+        elseif badgePill.label and badgePill.label.SetJustifyV then
+            badgePill.label:SetJustifyV('MIDDLE')
         end
-        shiftBadge.fs = shiftBadge:CreateFontString(nil, 'OVERLAY', 'GameFontHighlightSmall')
-        shiftBadge.fs:SetAllPoints()
-        shiftBadge.fs:SetJustifyH('CENTER')
-        shiftBadge.fs:SetText('Shift: Quick-Add')
-        applyFont(shiftBadge.fs, 10, 'semibold')
+        shiftBadge:SetPoint('RIGHT', v.filtersButton, 'LEFT', -8, 0)
+        shiftBadge:EnableMouse(true)
+        attachHeaderTooltip(shiftBadge, 'Quick-Add Mode', 'Hold Shift and left-click a row to add +1 to Shopping List, or right-click to remove -1.', 'ANCHOR_BOTTOM')
         shiftBadge:Hide()
         v.shiftBadge = shiftBadge
 
+        v.summaryLeftAnchor = prevPill
         v.summary = bar:CreateFontString(nil, 'OVERLAY', 'GameFontHighlightSmall')
-        v.summary:SetPoint('LEFT', prevPill, 'RIGHT', 8, 0)
-        v.summary:SetPoint('RIGHT', v.filtersButton, 'LEFT', -8, 0)
         v.summary:SetJustifyH('RIGHT')
+        if v.summary.SetJustifyV then v.summary:SetJustifyV('MIDDLE') end
         v.summary:SetWordWrap(false)
         applyFont(v.summary, 11, 'regular')
         v.summary:SetText('0 / 0 items')
+        H.updateShiftHeader()
     end
 
     function H.buildSidebarControls(v, context, T)
@@ -10898,7 +11124,7 @@ do
         local want = on == true
         if S.shiftActive == want then return end
         S.shiftActive = want
-        if S.view and S.view.shiftBadge then S.view.shiftBadge:SetShown(want) end
+        H.updateShiftHeader()
         aiProvider.RepaintShoppingQty()
     end
 
@@ -11287,6 +11513,9 @@ do
             aiProvider.CancelPresentation()
         end)
         v.CloseHeatPopover = aiProvider.CloseHeatPopover
+        if type(T) == 'table' and type(T.NineApple) == 'function' then
+            v._mmCard = T.NineApple(v, 'glass_r10', 'cardBg', false, { noSpecular = true })
+        end
 
         H.buildHeader(v, T)
 

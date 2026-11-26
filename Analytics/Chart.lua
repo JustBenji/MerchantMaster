@@ -196,13 +196,25 @@ local function formatAxisX(raw, longSpan)
         if a == b then return formatAxisX(a, longSpan) end
         return formatAxisX(a, longSpan) .. " - " .. formatAxisX(b, longSpan)
     end
-    local y, m, d = s:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
-    if y and m and d then
-        local mn = MONTH_NAMES[tonumber(m)] or m
+    local y, m, d, hhmm = s:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)%s+(%d%d:%d%d)$")
+    if y and m and d and hhmm then
         if longSpan then
-            return mn .. " '" .. y:sub(3, 4)
+            local mn = MONTH_NAMES[tonumber(m)] or m
+            return mn .. " " .. d
         end
-        return mn .. " " .. d
+        return hhmm
+    end
+    local hm = s:match("^(%d%d:%d%d)$")
+    if hm then
+        return hm
+    end
+    local dy, dm, dd = s:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)$")
+    if dy and dm and dd then
+        local mn = MONTH_NAMES[tonumber(dm)] or dm
+        if longSpan then
+            return mn .. " '" .. dy:sub(3, 4)
+        end
+        return mn .. " " .. dd
     end
     return s
 end
@@ -310,21 +322,44 @@ local function sample(points)
     return out
 end
 
-local function applySurface(chart, pal)
+local function applyPlotBg(plotBg, pal)
+    if not plotBg then return end
+    local alt = pal and pal.cardAltBg
+    if type(alt) == "table" and alt[1] ~= nil then
+        if pal.mode == "light" then
+            plotBg:SetColorTexture(alt[1], alt[2], alt[3], 0.85)
+        else
+            plotBg:SetColorTexture(alt[1] * 0.62, alt[2] * 0.62, alt[3] * 0.65, 0.82)
+        end
+    elseif pal and pal.mode == "light" then
+        plotBg:SetColorTexture(0.955, 0.955, 0.968, 0.85)
+    else
+        plotBg:SetColorTexture(0.055, 0.059, 0.067, 0.78)
+    end
+end
+
+local function applySurface(chart, pal, strokeKey)
     local h = H()
     local theme = h and h.Theme
     if not chart._surfaceInit then
         chart._surfaceInit = true
+        chart._strokeKey = strokeKey or false
         if theme and theme.NineApple then
-            chart.card = theme.NineApple(chart, "glass_r10", pal.cardBg, false, { noSpecular = true })
+            chart.card = theme.NineApple(chart, "glass_r10", "cardBg", chart._strokeKey, { noSpecular = true })
         elseif theme and theme.Card then
             chart.card = theme.Card(chart, chart, 10, false, pal.cardBg)
         end
     end
     if chart.card then
-        if chart.card.SetFill then chart.card:SetFill(pal.cardBg[1], pal.cardBg[2], pal.cardBg[3], pal.cardBg[4] or 1) end
-        if chart.card.SetColors then chart.card:SetColors(pal.cardBg, false) end
-        if chart.card.border and chart.card.border.SetShown then chart.card.border:SetShown(false) end
+        if chart.card.UpdateTheme then
+            chart.card:UpdateTheme("cardBg", chart._strokeKey)
+        else
+            if chart.card.SetFill then chart.card:SetFill(pal.cardBg[1], pal.cardBg[2], pal.cardBg[3], pal.cardBg[4] or 1) end
+            if chart.card.SetColors then chart.card:SetColors(pal.cardBg, false) end
+        end
+        if not chart._strokeKey and chart.card.border and chart.card.border.SetShown then
+            chart.card.border:SetShown(false)
+        end
     end
 end
 
@@ -334,7 +369,7 @@ local function stylePillButton(btn, pal)
         local host = H()
         local theme = host and host.Theme
         if theme and theme.NineApple then
-            btn._pillSurface = theme.NineApple(btn, "pill", pal.pillTrack, false, { noSpecular = true })
+            btn._pillSurface = theme.NineApple(btn, "pill", "pillTrack", false, { noSpecular = true })
         else
             local bg = btn:CreateTexture(nil, "BACKGROUND")
             bg:SetAllPoints()
@@ -344,7 +379,11 @@ local function stylePillButton(btn, pal)
     end
     local r, g, b, a = unpack(pal.pillTrack)
     if btn._pillSurface then
-        btn._pillSurface:SetFill(r, g, b, a)
+        if btn._pillSurface.UpdateTheme then
+            btn._pillSurface:UpdateTheme("pillTrack", false)
+        elseif btn._pillSurface.SetFill then
+            btn._pillSurface:SetFill(r, g, b, a)
+        end
     elseif btn._pillBg and btn._pillBg.SetVertexColor then
         btn._pillBg:SetVertexColor(r, g, b, a or 0.10)
     end
@@ -362,40 +401,41 @@ local function base(parent, width, height, opts)
     local pal = getPalette()
     local chart = CreateFrame("Frame", nil, parent)
     chart:SetSize(width, height)
-    applySurface(chart, pal)
+    chart._compactOpt = (opts.compact == true)
+    chart._defaultEmptyText = opts.emptyText or "No data for selected period"
+    applySurface(chart, pal, opts.borderKey)
 
-    chart.title = label(chart, "TOPLEFT", 16, -15, "LEFT", 15, "semibold")
+    local isCompact = chart._compactOpt or ((tonumber(height) or 195) <= 165)
+    local hdrH = isCompact and 34 or 48
+
+    chart.title = label(chart, "TOPLEFT", isCompact and 12 or 16, isCompact and -9 or -15, "LEFT", isCompact and 12 or 15, "semibold")
     setColor(chart.title, pal.text)
 
-    chart.summary = label(chart, "TOPRIGHT", -16, -16, "RIGHT", 12, "regular")
+    chart.summary = label(chart, "TOPRIGHT", isCompact and -12 or -16, isCompact and -10 or -16, "RIGHT", isCompact and 11 or 12, "regular")
     setColor(chart.summary, pal.textSecondary)
-    chart.summary:SetWidth(math.max(1, width * 0.34))
-    chart.title:SetPoint("TOPRIGHT", chart.summary, "TOPLEFT", -12, 1)
+    chart.summary:SetWidth(math.max(1, width * (isCompact and 0.44 or 0.34)))
+    chart.title:SetPoint("TOPRIGHT", chart.summary, "TOPLEFT", isCompact and -8 or -12, 1)
 
     local headerSep = chart:CreateTexture(nil, "BORDER")
-    headerSep:SetPoint("TOPLEFT", 0, -48)
-    headerSep:SetPoint("TOPRIGHT", 0, -48)
+    headerSep:SetPoint("TOPLEFT", 0, -hdrH)
+    headerSep:SetPoint("TOPRIGHT", 0, -hdrH)
     headerSep:SetHeight(1)
     headerSep:SetColorTexture(pal.separator[1], pal.separator[2], pal.separator[3], (pal.separator[4] or 0.4) * 0.50)
     chart.headerSep = headerSep
 
     chart.empty = label(chart, "CENTER", 0, -14, "CENTER", 12, "regular")
     setColor(chart.empty, pal.textMuted)
-    chart.empty:SetText("No data for selected period")
+    chart.empty:SetText(chart._defaultEmptyText)
 
     chart.plot = CreateFrame("Frame", nil, chart)
-    chart.plot:SetPoint("TOPLEFT", 76, -50)
-    chart.plot:SetSize(math.max(1, width - 94), math.max(1, height - 66))
-    chart.plotWidth, chart.plotHeight = math.max(1, width - 94), math.max(1, height - 66)
+    chart.plot:SetPoint("TOPLEFT", 76, -(hdrH + 2))
+    chart.plot:SetSize(math.max(1, width - 94), math.max(1, height - hdrH - 18))
+    chart.plotWidth, chart.plotHeight = math.max(1, width - 94), math.max(1, height - hdrH - 18)
 
     -- TSM-style deep recessed plot canvas so anti-aliased curves & gridlines pop cleanly
     chart._plotBg = chart.plot:CreateTexture(nil, "BACKGROUND", nil, -2)
     chart._plotBg:SetAllPoints(chart.plot)
-    if pal.mode == "light" then
-        chart._plotBg:SetColorTexture(0.955, 0.955, 0.968, 0.85)
-    else
-        chart._plotBg:SetColorTexture(0.055, 0.059, 0.067, 0.78)
-    end
+    applyPlotBg(chart._plotBg, pal)
 
     chart.yLabels, chart.xLabels, chart._grids = {}, {}, {}
     for i = 1, 3 do
@@ -449,8 +489,8 @@ local function base(parent, width, height, opts)
     chart._selectionBox:Hide()
 
     chart.resetZoom = CreateFrame("Button", nil, chart)
-    chart.resetZoom:SetSize(78, 22)
-    chart.resetZoom:SetPoint("TOPRIGHT", chart, "TOPRIGHT", -14, -54)
+    chart.resetZoom:SetSize(isCompact and 70 or 78, isCompact and 18 or 22)
+    chart.resetZoom:SetPoint("TOPRIGHT", chart.plot, "TOPRIGHT", -4, -4)
     if chart.plot.GetFrameLevel and chart.resetZoom.SetFrameLevel then
         chart.resetZoom:SetFrameLevel(chart.plot:GetFrameLevel() + 5)
     end
@@ -553,11 +593,7 @@ local function base(parent, width, height, opts)
             self.baseline:SetColorTexture(p.separator[1], p.separator[2], p.separator[3], math.min(0.65, (p.separator[4] or 0.4) * 0.90))
         end
         if self._plotBg then
-            if p.mode == "light" then
-                self._plotBg:SetColorTexture(0.955, 0.955, 0.968, 0.85)
-            else
-                self._plotBg:SetColorTexture(0.055, 0.059, 0.067, 0.78)
-            end
+            applyPlotBg(self._plotBg, p)
         end
         if self._selectionBox then
             self._selectionBox:SetColorTexture(p.accentBlue[1], p.accentBlue[2], p.accentBlue[3], 0.18)
@@ -570,13 +606,31 @@ local function base(parent, width, height, opts)
         chartWidth = math.max(1, chartWidth or (self.GetWidth and self:GetWidth()) or width)
         chartHeight = math.max(1, chartHeight or (self.GetHeight and self:GetHeight()) or height)
         if self.SetSize then self:SetSize(chartWidth, chartHeight) end
+        local isCompact = self._compactOpt or (chartHeight <= 165)
+        local hdrH = isCompact and 34 or 48
         self.axisWidth = moneyAxisWidth()
         local plotLeft = self.axisWidth + 12
-        self.plotWidth, self.plotHeight = math.max(1, chartWidth - plotLeft - 18), math.max(1, chartHeight - 66)
-        self.summary:SetWidth(math.max(1, chartWidth * 0.34))
+        self.plotWidth = math.max(1, chartWidth - plotLeft - 18)
+        self.plotHeight = math.max(1, chartHeight - hdrH - 18)
+        self.summary:ClearAllPoints()
+        self.summary:SetPoint("TOPRIGHT", self, "TOPRIGHT", isCompact and -12 or -16, isCompact and -10 or -16)
+        self.summary:SetWidth(math.max(1, math.floor(chartWidth * (isCompact and 0.44 or 0.34))))
+        self.title:ClearAllPoints()
+        self.title:SetPoint("TOPLEFT", self, "TOPLEFT", isCompact and 12 or 16, isCompact and -9 or -15)
+        self.title:SetPoint("TOPRIGHT", self.summary, "TOPLEFT", isCompact and -8 or -12, 1)
+        if self.headerSep then
+            self.headerSep:ClearAllPoints()
+            self.headerSep:SetPoint("TOPLEFT", self, "TOPLEFT", 0, -hdrH)
+            self.headerSep:SetPoint("TOPRIGHT", self, "TOPRIGHT", 0, -hdrH)
+        end
         self.plot:ClearAllPoints()
-        self.plot:SetPoint("TOPLEFT", plotLeft, -50)
+        self.plot:SetPoint("TOPLEFT", plotLeft, -(hdrH + 2))
         self.plot:SetSize(self.plotWidth, self.plotHeight)
+        if self.resetZoom then
+            self.resetZoom:SetSize(isCompact and 70 or 78, isCompact and 18 or 22)
+            self.resetZoom:ClearAllPoints()
+            self.resetZoom:SetPoint("TOPRIGHT", self.plot, "TOPRIGHT", -4, -4)
+        end
         for i = 1, 3 do
             local fraction = (i - 1) / 2
             self.yLabels[i]:ClearAllPoints()
@@ -806,7 +860,9 @@ local function base(parent, width, height, opts)
     end
 
     local h = H()
-    if h and h.Theme and h.Theme.OnModeChanged then
+    if h and h.Theme and h.Theme.RegisterWidget then
+        h.Theme.RegisterWidget(chart, function() chart:ApplyTheme() end)
+    elseif h and h.Theme and h.Theme.OnModeChanged then
         h.Theme.OnModeChanged(function() chart:ApplyTheme() end)
     end
 
@@ -849,19 +905,44 @@ function Chart.CreateLineChart(parent, width, height, opts)
         local formatY = settings.formatY or opts.formatY or money
         local isMoney = (settings.formatY == nil and opts.formatY == nil)
         if settings.title then self:SetTitle(settings.title) end
+        if self.empty then
+            self.empty:SetText(settings.emptyText or opts.emptyText or self._defaultEmptyText or "No data for selected period")
+        end
         local lo, hi, reference, longest = nil, nil, nil, 0
         local maps, categories, seen, pointKeys = {}, {}, {}, {}
+        local catOrder, catSortKey = {}, {}
+        local preserveOrder = (settings.preserveOrder == true) or (opts.preserveOrder == true)
+        local hasSortKey = false
         for _, series in ipairs(seriesList or {}) do
             for i, point in ipairs(series.points or series.data or {}) do
                 local pointKey = key(point, i)
                 pointKeys[point] = pointKey
-                if not seen[pointKey] then seen[pointKey] = true; categories[#categories + 1] = pointKey end
+                local sk = tonumber(point.sortKey) or tonumber(point.ts)
+                if sk ~= nil then hasSortKey = true end
+                if not seen[pointKey] then
+                    seen[pointKey] = true
+                    categories[#categories + 1] = pointKey
+                    catOrder[pointKey] = #categories
+                    if sk ~= nil then catSortKey[pointKey] = sk end
+                elseif sk ~= nil and catSortKey[pointKey] == nil then
+                    catSortKey[pointKey] = sk
+                end
             end
         end
-        table.sort(categories, function(a, b)
-            if type(a) == type(b) then return a < b end
-            return tostring(a) < tostring(b)
-        end)
+        if hasSortKey then
+            table.sort(categories, function(a, b)
+                local sa, sb = catSortKey[a], catSortKey[b]
+                if sa ~= nil and sb ~= nil and sa ~= sb then return sa < sb end
+                if sa ~= nil and sb == nil then return true end
+                if sa == nil and sb ~= nil then return false end
+                return (catOrder[a] or 0) < (catOrder[b] or 0)
+            end)
+        elseif not preserveOrder then
+            table.sort(categories, function(a, b)
+                if type(a) == type(b) then return a < b end
+                return tostring(a) < tostring(b)
+            end)
+        end
         local categoryIndex = {}
         for i, category in ipairs(categories) do categoryIndex[category] = i end
         self._rawCategories, self._rawPointCount = categories, #categories
@@ -871,6 +952,7 @@ function Chart.CreateLineChart(parent, width, height, opts)
         for _, series in ipairs(seriesList or {}) do
             if #(series.points or series.data or {}) > 0 then activeSeriesCount = activeSeriesCount + 1 end
         end
+        local preserveColor = (settings.preserveColor == true) or (opts.preserveColor == true)
         for s, series in ipairs(seriesList or {}) do
             local sourcePoints = series.points or series.data or {}
             local points = {}
@@ -878,15 +960,16 @@ function Chart.CreateLineChart(parent, width, height, opts)
                 local index = categoryIndex[key(source, i)]
                 if index and index >= selectedFirst and index <= selectedLast then points[#points + 1] = source end
             end
+            if hasSortKey and #points > 1 then
+                table.sort(points, function(a, b)
+                    return (categoryIndex[pointKeys[a]] or 0) < (categoryIndex[pointKeys[b]] or 0)
+                end)
+            end
             local sampled = sample(points)
             local resolvedColor = resolveSeriesColor(series, s, pal)
-            if (activeSeriesCount == 1 or settings.trendColor) and #sampled >= 2 then
+            if not preserveColor and (activeSeriesCount == 1 or settings.trendColor) and #sampled >= 2 then
                 local firstV, lastV = value(sampled[1]), value(sampled[#sampled])
-                if pal.mode == "light" then
-                    resolvedColor = (lastV >= firstV) and pal.accentGreen or pal.accentRed
-                else
-                    resolvedColor = (lastV >= firstV) and { 0.110, 0.855, 0.463, 1.0 } or { 0.961, 0.298, 0.278, 1.0 }
-                end
+                resolvedColor = (lastV >= firstV) and pal.accentGreen or pal.accentRed
             end
             self._lastSeries[s] = {
                 name = series.name,
@@ -1454,23 +1537,31 @@ local function buildFallbackSeries(fallbackQuickLook)
             for i = 1, maxIdx do
                 local v = tonumber(entry.values[i])
                 if v ~= nil and v == v then
-                    local lbl
+                    local dayKey, lbl, sk
                     if is24h and startSlot then
                         local ts = (startSlot + i - 1) * 3600
                         local fn = _G.date or (os and os.date)
+                        dayKey = fn and fn("!%Y-%m-%d %H:00", ts) or string.format("H%02d", i)
                         lbl = fn and fn("!%H:00", ts) or string.format("%02d:00", (i - 1) % 24)
+                        sk = ts
                     elseif startDay then
                         local ts = (startDay + i - 1) * 86400
                         local fn = _G.date or (os and os.date)
-                        lbl = fn and fn("!%Y-%m-%d", ts) or ("D" .. i)
+                        dayKey = fn and fn("!%Y-%m-%d", ts) or ("D" .. i)
+                        lbl = dayKey
+                        sk = ts
                     elseif nowTs > 0 and maxIdx <= 7 then
                         local ts = nowTs - (maxIdx - i) * 86400
                         local fn = _G.date or (os and os.date)
-                        lbl = fn and fn("!%Y-%m-%d", ts) or ("D" .. i)
+                        dayKey = fn and fn("!%Y-%m-%d", ts) or ("D" .. i)
+                        lbl = dayKey
+                        sk = ts
                     else
-                        lbl = is24h and string.format("%02d:00", (i - 1) % 24) or ("D" .. i)
+                        dayKey = is24h and string.format("%02d:00", (i - 1) % 24) or ("D" .. i)
+                        lbl = dayKey
+                        sk = i
                     end
-                    pts[#pts + 1] = { day = lbl, label = lbl, value = v }
+                    pts[#pts + 1] = { day = dayKey, label = lbl, value = v, sortKey = sk }
                 end
             end
         end
@@ -1487,6 +1578,7 @@ local function buildFallbackSeries(fallbackQuickLook)
     if #out == 0 then return nil end
     return out
 end
+Chart.BuildQuickLookSeries = buildFallbackSeries
 
 local function mergeTwoHourCell(c0, c1, overallAvg)
     if not c0 and not c1 then return nil end

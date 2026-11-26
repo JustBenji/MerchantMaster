@@ -2841,6 +2841,15 @@ do
         allAhData = nil,
         allAhRows = {},
         allAhUsedCount = 0,
+        dirtyThemeRender = false,
+        qlDualCache = nil,
+        chartsRow = nil,
+        chart24h = nil,
+        chart7d = nil,
+        baselineCard = nil,
+        chartsCollapsed = true,
+        charts24Pts = 0,
+        charts7dPts = 0,
     }
 
     local function daTheme()
@@ -3210,6 +3219,15 @@ do
         btn.extFs = makeFs(btn, 11, "semibold", "RIGHT", "text")
         btn.tagFs = makeFs(btn, 10, "semibold", "RIGHT", "textMuted")
         btn.stockFs = makeFs(btn, 10, "regular", "RIGHT", "textSecondary")
+        btn.shareTrack = btn:CreateTexture(nil, "BORDER")
+        btn.shareTrack:SetHeight(3)
+        btn.shareTrack:Hide()
+        btn.shareFill = btn:CreateTexture(nil, "ARTWORK")
+        btn.shareFill:SetHeight(3)
+        btn.shareFill:Hide()
+        btn._hasShareBar = false
+        btn._shareRatio = nil
+        btn._shareColorKey = "accentBlue"
 
         btn:SetScript("OnEnter", function(self)
             local pal = daPal()
@@ -3552,6 +3570,332 @@ do
         allAh:Show()
     end
 
+    local function isTargetWatchlisted(target)
+        local h = H() or host
+        local wl = h and h.Watchlist
+        if not wl or not target then return false end
+        if type(wl.IsFavorite) == "function" then
+            local ok, res = pcall(wl.IsFavorite, target)
+            if ok then return res and true or false end
+        elseif type(wl.IsWatched) == "function" then
+            local ok, res = pcall(wl.IsWatched, target)
+            if ok then return res and true or false end
+        elseif type(wl.Has) == "function" then
+            local ok, res = pcall(wl.Has, target)
+            if ok then return res and true or false end
+        elseif type(wl.Contains) == "function" then
+            local ok, res = pcall(wl.Contains, target)
+            if ok then return res and true or false end
+        end
+        return false
+    end
+
+    local function syncFavButton()
+        local btn = state.header and state.header.favBtn
+        if not btn then return end
+        local h = H() or host
+        local wl = h and h.Watchlist
+        if wl and type(wl.RegisterListener) == "function" and not state._wlListenerBound then
+            state._wlListenerBound = true
+            pcall(wl.RegisterListener, function()
+                if state.built and state.header and state.header.favBtn then
+                    syncFavButton()
+                end
+            end)
+        end
+        local pal = daPal()
+        local watched = isTargetWatchlisted(state.target)
+        btn._watched = watched
+        local ic = btn._mmIcon
+        if ic and ic.SetVertexColor then
+            if watched then
+                ic:SetVertexColor(1.0, 0.82, 0.18, 1.0)
+            else
+                local mc = pal.textMuted or { 0.6, 0.6, 0.62, 1.0 }
+                ic:SetVertexColor(mc[1], mc[2], mc[3], mc[4] or 1.0)
+            end
+        end
+    end
+
+    local function countMaxPoints(seriesList)
+        local best = 0
+        for _, s in ipairs(seriesList or {}) do
+            local pts = s and (s.points or s.data)
+            if type(pts) == "table" and #pts > best then
+                best = #pts
+            end
+        end
+        return best
+    end
+
+    local function extractDualChartSeries(ql)
+        local Chart = ns.Chart
+        if type(ql) ~= "table" or not (Chart and Chart.BuildQuickLookSeries) then return nil end
+        local all = Chart.BuildQuickLookSeries(ql)
+        if type(all) ~= "table" or #all == 0 then return nil end
+        local out = {}
+        for _, s in ipairs(all) do
+            if s.name == "Sell Price" or s.name == "Craft Cost" then
+                out[#out + 1] = s
+            end
+        end
+        if #out == 0 then
+            out[#out + 1] = all[1]
+        end
+        return out
+    end
+
+    local function buildItemChartSeries(itemID, econKey)
+        local h = H() or host
+        local ms = h and h.MarketScan
+        local dateFn = _G.date or (os and os.date)
+        local pts24, pct24 = {}, nil
+        local pts7d, pct7d = {}, nil
+
+        if itemID and itemID > 0 then
+            -- 24h series: prefer MarketScan.GetItemTrend24h, fallback to Pricing hourly / ReadHistory
+            if ms and type(ms.GetItemTrend24h) == "function" then
+                local ok, t24 = pcall(ms.GetItemTrend24h, itemID, econKey)
+                if ok and type(t24) == "table" and type(t24.points) == "table" then
+                    pct24 = tonumber(t24.trendPct)
+                    for _, pt in ipairs(t24.points) do
+                        local p = tonumber(pt.price)
+                        if p and p > 0 then
+                            local ts = tonumber(pt.at) or ((tonumber(pt.h) or 0) * 3600)
+                            local dayKey = dateFn and dateFn("!%Y-%m-%d %H:00", ts) or string.format("H%d", #pts24 + 1)
+                            local lbl = dateFn and dateFn("!%H:00", ts) or dayKey
+                            pts24[#pts24 + 1] = { day = dayKey, label = lbl, value = p, sortKey = ts }
+                        end
+                    end
+                end
+            end
+            if #pts24 < 2 and h and h.Pricing then
+                local strip = type(h.Pricing.GetItemHeatStrip24h) == "function" and h.Pricing.GetItemHeatStrip24h(itemID, econKey) or nil
+                local hm = (not strip or not strip.hourly) and type(h.Pricing.GetItemHeatmap) == "function" and h.Pricing.GetItemHeatmap(itemID, econKey) or nil
+                local hourly = (strip and strip.hourly) or (hm and hm.hourly)
+                if type(hourly) == "table" then
+                    pts24 = {}
+                    for hr = 0, 23 do
+                        local rec = hourly[hr]
+                        local p = type(rec) == "table" and tonumber(rec.avgPrice) or tonumber(rec)
+                        if p and p > 0 then
+                            local lbl = string.format("%02d:00", hr)
+                            pts24[#pts24 + 1] = { day = lbl, label = lbl, value = p, sortKey = hr }
+                        end
+                    end
+                end
+            end
+            if #pts24 < 2 and ms and type(ms.ReadHistory) == "function" then
+                local raw = db().ahHistory and db().ahHistory[econKey] and db().ahHistory[econKey][itemID]
+                local ring = raw and ms.ReadHistory(raw) or nil
+                if type(ring) == "table" then
+                    local now = (time and time()) or 0
+                    local cutoff = now - 86400
+                    pts24 = {}
+                    for _, e in ipairs(ring) do
+                        local ts = type(e) == "table" and tonumber(e.t)
+                        local p = type(e) == "table" and tonumber(e.p)
+                        if ts and p and p > 0 and (now == 0 or ts >= cutoff) then
+                            local dayKey = dateFn and dateFn("!%Y-%m-%d %H:00", ts) or string.format("H%d", #pts24 + 1)
+                            local lbl = dateFn and dateFn("!%H:00", ts) or dayKey
+                            pts24[#pts24 + 1] = { day = dayKey, label = lbl, value = p, sortKey = ts }
+                        end
+                    end
+                end
+            end
+
+            -- 7d series: prefer MarketScan.GetItemTrend7d, fallback to ReadDaily
+            if ms and type(ms.GetItemTrend7d) == "function" then
+                local ok, t7 = pcall(ms.GetItemTrend7d, itemID, econKey)
+                if ok and type(t7) == "table" and type(t7.points) == "table" then
+                    pct7d = tonumber(t7.trendPct)
+                    for _, pt in ipairs(t7.points) do
+                        local p = tonumber(pt.price)
+                        local d = tonumber(pt.d)
+                        if p and p > 0 and d then
+                            local ts = d * 86400
+                            local dayKey = dateFn and dateFn("!%Y-%m-%d", ts) or ("D" .. tostring(d))
+                            pts7d[#pts7d + 1] = { day = dayKey, label = dayKey, value = p, sortKey = d }
+                        end
+                    end
+                end
+            end
+            if #pts7d < 2 and ms and type(ms.ReadDaily) == "function" then
+                local raw = db().ahDaily and db().ahDaily[econKey] and db().ahDaily[econKey][itemID]
+                local buckets = raw and ms.ReadDaily(raw) or nil
+                if type(buckets) == "table" then
+                    pts7d = {}
+                    for _, b in ipairs(buckets) do
+                        local d = type(b) == "table" and tonumber(b.d)
+                        local p = type(b) == "table" and (tonumber(b.lastP) or tonumber(b.obsP))
+                        if d and p and p > 0 then
+                            local ts = d * 86400
+                            local dayKey = dateFn and dateFn("!%Y-%m-%d", ts) or ("D" .. tostring(d))
+                            pts7d[#pts7d + 1] = { day = dayKey, label = dayKey, value = p, sortKey = d }
+                        end
+                    end
+                end
+            end
+        end
+
+        local s24 = (#pts24 >= 2) and { { name = "Market Price", colorKey = "blue", points = pts24 } } or {}
+        local s7d = (#pts7d >= 2) and { { name = "Market Price", colorKey = "blue", points = pts7d } } or {}
+        return s24, pct24, s7d, pct7d
+    end
+
+    local HEAT_TIERS = {
+        { label = "Cold",     colorKey = "accentBlue" },
+        { label = "Steady",   colorKey = "accentGreen" },
+        { label = "Hot",      colorKey = "accentOrange" },
+        { label = "Monopoly", colorKey = "accentPurple" },
+    }
+
+    local function resolveHeatTier(heatLabel, demandInfo, liveSales)
+        local raw = tostring(heatLabel or ""):lower()
+        if demandInfo and demandInfo.tier then
+            local t = tostring(demandInfo.tier):lower()
+            raw = raw .. " " .. t
+        end
+        if raw:find("monopoly", 1, true) or raw:find("dominat", 1, true) or raw:find("corner", 1, true) then
+            return 4
+        elseif raw:find("hot", 1, true) or raw:find("fast", 1, true) or raw:find("high", 1, true) or raw:find("strong", 1, true) or raw:find("booming", 1, true) then
+            return 3
+        elseif raw:find("steady", 1, true) or raw:find("moderate", 1, true) or raw:find("fair", 1, true) or raw:find("normal", 1, true) or raw:find("med", 1, true) then
+            return 2
+        elseif raw:find("cold", 1, true) or raw:find("slow", 1, true) or raw:find("dead", 1, true) or raw:find("low", 1, true) then
+            return 1
+        end
+        local s = tonumber(liveSales) or 0
+        if s >= 15 then return 3
+        elseif s >= 2 then return 2 end
+        return 1
+    end
+
+    local function paintVisualCards(pal)
+        local sep = pal.separator or pal.border or { 1, 1, 1, 0.14 }
+        local isLight = (pal.mode == "light")
+        local trackAlpha = isLight and 0.14 or 0.16
+        local trackCol = { sep[1], sep[2], sep[3], math.max(trackAlpha, (sep[4] or 0.4) * 0.55) }
+
+        local function paintFsLocal(fs, overrideCol)
+            if not fs then return end
+            applyFont(fs, fs._daFontSize or 11, fs._daFontWeight or "regular")
+            local col = overrideCol or pal[fs._daColorKey or "text"] or pal.text
+            setTextColor(fs, col)
+        end
+
+        if state.baselineCard then
+            paintFsLocal(state.baselineCard.titleFs, pal.textMuted)
+            paintFsLocal(state.baselineCard.stripFs, pal.text)
+            paintFsLocal(state.baselineCard.hintFs, pal.textSecondary)
+        end
+
+        local ec = state.leftCard and state.leftCard.econBarCard
+        if ec then
+            for _, slot in ipairs(ec.craftBars or {}) do
+                paintFsLocal(slot.lblFs, pal.textSecondary)
+                local col = (slot._colorKey and pal[slot._colorKey]) or pal.accentBlue
+                paintFsLocal(slot.valFs, slot._valColorKey and pal[slot._valColorKey] or pal.text)
+                if slot.trackTex then
+                    slot.trackTex:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], trackCol[4])
+                end
+                if slot.fillTex and col then
+                    slot.fillTex:SetColorTexture(col[1], col[2], col[3], col[4] or 0.90)
+                end
+            end
+            if ec.rangeTrack then
+                ec.rangeTrack:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], trackCol[4])
+            end
+            if ec.rangeSpan then
+                local scCol = pal.accentBlue or { 0.0, 0.57, 1.0, 1.0 }
+                ec.rangeSpan:SetColorTexture(scCol[1], scCol[2], scCol[3], isLight and 0.25 or 0.30)
+            end
+            for i, lbl in ipairs(ec.rangeLabels or {}) do
+                paintFsLocal(lbl, i == 2 and pal.text or pal.textSecondary)
+            end
+            local mkKeys = ec._markerColorKeys or { "textMuted", "accentBlue", "accentOrange" }
+            for i, mk in ipairs(ec.rangeMarkers or {}) do
+                local col = pal[mkKeys[i]] or pal.accentBlue
+                mk:SetColorTexture(col[1], col[2], col[3], 1.0)
+            end
+        end
+
+        for _, r in ipairs(state.reagentRows or {}) do
+            if r.shareTrack then
+                r.shareTrack:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], trackCol[4])
+            end
+            if r.shareFill then
+                local col = pal[r._shareColorKey or "accentBlue"] or pal.accentBlue
+                r.shareFill:SetColorTexture(col[1], col[2], col[3], col[4] or 0.85)
+            end
+        end
+
+        local cc = state.compCard
+        if cc and cc.heatTiers then
+            local activeIdx = cc._activeTier or 1
+            for i, tier in ipairs(cc.heatTiers) do
+                local spec = HEAT_TIERS[i]
+                local col = pal[spec.colorKey] or pal.accentBlue
+                if i == activeIdx then
+                    tier.bgTex:SetColorTexture(col[1], col[2], col[3], isLight and 0.20 or 0.26)
+                    paintFsLocal(tier.lblFs, col)
+                else
+                    tier.bgTex:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], isLight and 0.10 or 0.12)
+                    paintFsLocal(tier.lblFs, pal.textMuted)
+                end
+            end
+        end
+
+        local lc = state.ledgerCard
+        if lc then
+            paintFsLocal(lc.emptyTradesFs, pal.textMuted)
+            for _, colFrame in ipairs(lc.horizonCols or {}) do
+                local col = pal[colFrame._colorKey or "accentGreen"] or pal.accentGreen
+                paintFsLocal(colFrame.valFs, colFrame._valColorKey and pal[colFrame._valColorKey] or pal.text)
+                paintFsLocal(colFrame.lblFs, pal.textMuted)
+                if colFrame.barTrack then
+                    colFrame.barTrack:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], trackCol[4])
+                end
+                if colFrame.barFill then
+                    colFrame.barFill:SetColorTexture(col[1], col[2], col[3], col[4] or 0.88)
+                end
+            end
+            if lc.saleRateRow then
+                paintFsLocal(lc.saleRateRow.lblFs, pal.textSecondary)
+                if lc.saleRateRow.fallbackTrack then
+                    lc.saleRateRow.fallbackTrack:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], trackCol[4])
+                end
+                if lc.saleRateRow.fallbackFill then
+                    local fc = pal[lc.saleRateRow._colorKey or "accentGreen"] or pal.accentGreen
+                    lc.saleRateRow.fallbackFill:SetColorTexture(fc[1], fc[2], fc[3], fc[4] or 0.90)
+                end
+                if lc.saleRateRow.bar and lc.saleRateRow.bar.SetColor then
+                    local fc = pal[lc.saleRateRow._colorKey or "accentGreen"] or pal.accentGreen
+                    lc.saleRateRow.bar:SetColor(fc)
+                end
+            end
+            for _, chip in ipairs(lc.stockChips or {}) do
+                local hasQty = (chip._qty or 0) > 0
+                if hasQty then
+                    local ac = pal.accentBlue or { 0.0, 0.57, 1.0, 1.0 }
+                    chip.bgTex:SetColorTexture(ac[1], ac[2], ac[3], isLight and 0.14 or 0.20)
+                    paintFsLocal(chip.lblFs, pal.text)
+                else
+                    chip.bgTex:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], isLight and 0.10 or 0.12)
+                    paintFsLocal(chip.lblFs, pal.textMuted)
+                end
+            end
+        end
+    end
+
+    local function isRootVisible()
+        if not state.root then return false end
+        if state.root.IsShown and not state.root:IsShown() then return false end
+        local p = state.root.GetParent and state.root:GetParent() or nil
+        if p and p.IsShown and not p:IsShown() then return false end
+        return true
+    end
+
     local function applyTheme()
         if not state.built or not state.root then return end
         local pal = daPal()
@@ -3567,11 +3911,18 @@ do
         if state.header then
             paintFs(state.header.titleFs, pal.text)
             paintFs(state.header.subtitleFs, pal.textSecondary)
+            syncFavButton()
         end
         for _, card in ipairs(state.kpiCards or {}) do
             paintFs(card.titleFs, pal.textMuted)
             paintFs(card.valueFs, card._valColorKey and pal[card._valColorKey] or pal.text)
             paintFs(card.subFs, pal.textSecondary)
+        end
+        if state.chart24h and state.chart24h.ApplyTheme then
+            state.chart24h:ApplyTheme()
+        end
+        if state.chart7d and state.chart7d.ApplyTheme then
+            state.chart7d:ApplyTheme()
         end
         if state.timingDrawer and state.timingDrawer.ApplyTheme then
             state.timingDrawer:ApplyTheme()
@@ -3659,6 +4010,7 @@ do
                 paintFs(card.bodyFs, pal.text)
             end
         end
+        paintVisualCards(pal)
         if state.allAhCard then
             local allAh = state.allAhCard
             paintFs(allAh.titleFs, pal.textMuted)
@@ -3670,7 +4022,12 @@ do
             end
         end
         if state.target then
-            DeepAnalysis.Render(state.target, true)
+            if isRootVisible() then
+                state.dirtyThemeRender = false
+                DeepAnalysis.Render(state.target, true)
+            else
+                state.dirtyThemeRender = true
+            end
         end
     end
 
@@ -3767,16 +4124,43 @@ do
             end
         end)
 
+        hdr.favBtn = mkBtn(hdr, "", 28, 28, {
+            icon = (T and T.ASSETS and T.ASSETS.icon_star) or "star",
+            iconSize = 13,
+            variant = "secondary",
+            pill = true,
+            border = true,
+        })
+        hdr.favBtn:SetPoint("RIGHT", hdr.addBtn, "LEFT", -6, 0)
+        hdr.favBtn:SetScript("OnClick", function()
+            local h = H() or host
+            local wl = h and h.Watchlist
+            if wl and type(wl.Toggle) == "function" and state.target then
+                pcall(wl.Toggle, state.target)
+            end
+            syncFavButton()
+        end)
+        hdr.favBtn:SetScript("OnEnter", function(self)
+            if not _G.GameTooltip then return end
+            local tip = _G.GameTooltip
+            tip:SetOwner(self, "ANCHOR_BOTTOMLEFT")
+            tip:SetText(self._watched and "Remove from Watchlist" or "Add to Watchlist", 1, 1, 1)
+            local TT = daTheme()
+            if TT and TT.LiftTooltip then TT.LiftTooltip(tip) end
+            tip:Show()
+        end)
+        hdr.favBtn:SetScript("OnLeave", hideTooltip)
+
         hdr.titleFs = makeFs(hdr, 16, "semibold", "LEFT", "text")
         if hdr.titleFs.SetWordWrap then hdr.titleFs:SetWordWrap(false) end
         hdr.titleFs:SetPoint("TOPLEFT", hdr.icon, "TOPRIGHT", 10, 0)
-        hdr.titleFs:SetPoint("RIGHT", hdr.addBtn, "LEFT", -12, 0)
+        hdr.titleFs:SetPoint("RIGHT", hdr.favBtn, "LEFT", -10, 0)
         hdr.titleFs:SetHeight(20)
 
         hdr.subtitleFs = makeFs(hdr, 11, "regular", "LEFT", "textSecondary")
         if hdr.subtitleFs.SetWordWrap then hdr.subtitleFs:SetWordWrap(false) end
         hdr.subtitleFs:SetPoint("TOPLEFT", hdr.titleFs, "BOTTOMLEFT", 0, -1)
-        hdr.subtitleFs:SetPoint("RIGHT", hdr.addBtn, "LEFT", -12, 0)
+        hdr.subtitleFs:SetPoint("RIGHT", hdr.favBtn, "LEFT", -10, 0)
         hdr.subtitleFs:SetHeight(15)
 
         hdr.titleHover = CreateFrame("Frame", nil, hdr)
@@ -3848,6 +4232,55 @@ do
             state.kpiCards[i] = card
         end
         DeepAnalysis.kpiCards = state.kpiCards
+
+        -- Row 1.5: Dual Side-by-Side 24h & 7d Charts Strip (DA.chartsRow) + 44px Baseline Fallback
+        local chartsFrame = CreateFrame("Frame", nil, sc)
+        chartsFrame:SetHeight(152)
+        local Chart = ns.Chart
+        local chart24h = Chart and Chart.CreateLineChart and Chart.CreateLineChart(chartsFrame, 480, 152, {
+            title = "24h Price Trend",
+            preserveColor = true,
+            preserveOrder = true,
+            compact = true,
+            borderKey = "border",
+            emptyText = "Need 2+ AH scans for 24h trend",
+        }) or nil
+        local chart7d = Chart and Chart.CreateLineChart and Chart.CreateLineChart(chartsFrame, 480, 152, {
+            title = "7d Price Trend",
+            preserveColor = true,
+            preserveOrder = true,
+            compact = true,
+            borderKey = "border",
+            emptyText = "Need 2+ daily scans for 7d trend",
+        }) or nil
+
+        local baselineCard = makeCard(chartsFrame, "glass_r10", "cardBg", "border")
+        baselineCard:SetHeight(44)
+        baselineCard.titleFs = makeFs(baselineCard, 9, "semibold", "LEFT", "textMuted")
+        baselineCard.titleFs:SetPoint("TOPLEFT", 12, -6)
+        baselineCard.titleFs:SetText("PRICE BASELINE")
+        baselineCard.stripFs = makeFs(baselineCard, 11, "semibold", "LEFT", "text")
+        if baselineCard.stripFs.SetWordWrap then baselineCard.stripFs:SetWordWrap(false) end
+        baselineCard.stripFs:SetPoint("BOTTOMLEFT", 12, 7)
+        baselineCard.hintFs = makeFs(baselineCard, 10, "regular", "RIGHT", "textSecondary")
+        if baselineCard.hintFs.SetWordWrap then baselineCard.hintFs:SetWordWrap(false) end
+        baselineCard.hintFs:SetPoint("RIGHT", -12, 0)
+        baselineCard.hintFs:SetText("Run 2+ AH scans over time to plot 24h & 7d trends")
+        baselineCard:Hide()
+
+        state.chart24h = chart24h
+        state.chart7d = chart7d
+        state.baselineCard = baselineCard
+        state.chartsRow = {
+            frame = chartsFrame,
+            chart24h = chart24h,
+            chart7d = chart7d,
+            baselineCard = baselineCard,
+        }
+        DeepAnalysis.chart24h = chart24h
+        DeepAnalysis.chart7d = chart7d
+        DeepAnalysis.baselineCard = baselineCard
+        DeepAnalysis.chartsRow = state.chartsRow
 
         -- Row 2: Concept B Split Timing Drawer (415px, mounted only when Snapshots / Snapshot Extension active)
         state.ensureTimingDrawer = function()
@@ -4009,11 +4442,65 @@ do
         left.win24Btn:SetScript("OnClick", function() switchWindow("24h") end)
         left.win7dBtn:SetScript("OnClick", function() switchWindow("7d") end)
 
+        -- Visual Economy Bar Card (54px at y=-36 inside leftCard)
+        local econCard = makeCard(left, "glass_r10", "cardAltBg", "border")
+        econCard:SetHeight(54)
+        econCard.craftFrame = CreateFrame("Frame", nil, econCard)
+        econCard.craftFrame:SetAllPoints(econCard)
+        econCard.craftBars = {}
+        local craftDefs = {
+            { label = "Craft Cost",  colorKey = "accentOrange" },
+            { label = "Net AH Sale", colorKey = "accentBlue" },
+            { label = "Net Profit",  colorKey = "accentGreen" },
+        }
+        for i, cd in ipairs(craftDefs) do
+            local slot = CreateFrame("Frame", nil, econCard.craftFrame)
+            slot:SetHeight(14)
+            slot.lblFs = makeFs(slot, 9, "semibold", "LEFT", "textSecondary")
+            if slot.lblFs.SetWordWrap then slot.lblFs:SetWordWrap(false) end
+            slot.lblFs:SetText(cd.label)
+            slot.trackTex = slot:CreateTexture(nil, "BORDER")
+            slot.trackTex:SetHeight(5)
+            slot.fillTex = slot:CreateTexture(nil, "ARTWORK")
+            slot.fillTex:SetHeight(5)
+            slot.valFs = makeFs(slot, 10, "semibold", "RIGHT", "text")
+            if slot.valFs.SetWordWrap then slot.valFs:SetWordWrap(false) end
+            slot._ratio = 0
+            slot._colorKey = cd.colorKey
+            slot._valColorKey = "text"
+            econCard.craftBars[i] = slot
+        end
+
+        econCard.rangeFrame = CreateFrame("Frame", nil, econCard)
+        econCard.rangeFrame:SetAllPoints(econCard)
+        econCard.rangeLabels = {
+            makeFs(econCard.rangeFrame, 10, "regular", "LEFT", "textSecondary"),
+            makeFs(econCard.rangeFrame, 10, "semibold", "CENTER", "text"),
+            makeFs(econCard.rangeFrame, 10, "regular", "RIGHT", "textSecondary"),
+        }
+        for _, rlbl in ipairs(econCard.rangeLabels) do
+            if rlbl.SetWordWrap then rlbl:SetWordWrap(false) end
+        end
+        econCard.rangeTrack = econCard.rangeFrame:CreateTexture(nil, "BORDER")
+        econCard.rangeTrack:SetHeight(6)
+        econCard.rangeSpan = econCard.rangeFrame:CreateTexture(nil, "ARTWORK", nil, 0)
+        econCard.rangeSpan:SetHeight(6)
+        econCard.rangeMarkers = {}
+        econCard._markerFracs = { 0, 0.5, 1 }
+        econCard._markerColorKeys = { "textMuted", "accentBlue", "accentOrange" }
+        for i = 1, 3 do
+            local mk = econCard.rangeFrame:CreateTexture(nil, "OVERLAY")
+            mk:SetSize(8, 10)
+            econCard.rangeMarkers[i] = mk
+        end
+        econCard.rangeFrame:Hide()
+        left.econBarCard = econCard
+
         left.overviewRows = {}
         local sep = pal.separator or pal.border or { 1, 1, 1, 0.14 }
         for i = 1, 6 do
             local r = CreateFrame("Frame", nil, left)
-            r:SetHeight(24)
+            r:SetHeight(21)
             r.sep = r:CreateTexture(nil, "BORDER")
             r.sep:SetPoint("TOPLEFT", 0, 0)
             r.sep:SetPoint("TOPRIGHT", 0, 0)
@@ -4071,8 +4558,109 @@ do
         end
 
         state.compCard = makeInfoCard("COMPETITION, VELOCITY & QUALITY")
+        state.compCard.heatBar = CreateFrame("Frame", nil, state.compCard)
+        state.compCard.heatBar:SetHeight(24)
+        state.compCard.heatTiers = {}
+        state.compCard._activeTier = 1
+        for i, spec in ipairs(HEAT_TIERS) do
+            local tf = CreateFrame("Frame", nil, state.compCard.heatBar)
+            tf:SetHeight(22)
+            tf.bgTex = tf:CreateTexture(nil, "BACKGROUND")
+            tf.bgTex:SetAllPoints(tf)
+            tf.lblFs = makeFs(tf, 10, "semibold", "CENTER", "textMuted")
+            tf.lblFs:SetAllPoints(tf)
+            tf.lblFs:SetText(spec.label)
+            state.compCard.heatTiers[i] = tf
+        end
+
         state.ledgerCard = makeInfoCard("PERSONAL LEDGER & CROSS-ALT INVENTORY")
+        local lc = state.ledgerCard
+        lc.horizonFrame = CreateFrame("Frame", nil, lc)
+        lc.horizonFrame:SetHeight(56)
+        lc.horizonCols = {}
+        for i, hLbl in ipairs({ "7d", "30d", "All-Time" }) do
+            local cf = CreateFrame("Frame", nil, lc.horizonFrame)
+            cf:SetHeight(56)
+            cf.valFs = makeFs(cf, 10, "semibold", "CENTER", "text")
+            if cf.valFs.SetWordWrap then cf.valFs:SetWordWrap(false) end
+            cf.barTrack = cf:CreateTexture(nil, "BORDER")
+            cf.barTrack:SetHeight(20)
+            cf.barFill = cf:CreateTexture(nil, "ARTWORK")
+            cf.barFill:SetHeight(6)
+            cf.lblFs = makeFs(cf, 9, "semibold", "CENTER", "textMuted")
+            cf.lblFs:SetText(hLbl)
+            cf._ratio = 0
+            cf._colorKey = "accentGreen"
+            cf._valColorKey = "text"
+            lc.horizonCols[i] = cf
+        end
+        lc.emptyTradesFs = makeFs(lc, 10, "regular", "LEFT", "textMuted")
+        lc.emptyTradesFs:SetText("No personal AH trades recorded yet")
+        lc.emptyTradesFs:Hide()
+
+        lc.saleRateRow = CreateFrame("Frame", nil, lc)
+        lc.saleRateRow:SetHeight(24)
+        lc.saleRateRow.lblFs = makeFs(lc.saleRateRow, 10, "semibold", "LEFT", "textSecondary")
+        if lc.saleRateRow.lblFs.SetWordWrap then lc.saleRateRow.lblFs:SetWordWrap(false) end
+        if T and T.CreateProgressBar then
+            lc.saleRateRow.bar = T.CreateProgressBar(lc.saleRateRow, 6, { width = 200 })
+        else
+            lc.saleRateRow.fallbackTrack = lc.saleRateRow:CreateTexture(nil, "BORDER")
+            lc.saleRateRow.fallbackTrack:SetHeight(6)
+            lc.saleRateRow.fallbackFill = lc.saleRateRow:CreateTexture(nil, "ARTWORK")
+            lc.saleRateRow.fallbackFill:SetHeight(6)
+        end
+        lc.saleRateRow._frac = 0
+        lc.saleRateRow._colorKey = "accentGreen"
+        lc.saleRateRow:Hide()
+
+        lc.stockRow = CreateFrame("Frame", nil, lc)
+        lc.stockRow:SetHeight(22)
+        lc.stockChips = {}
+        for i, sLbl in ipairs({ "Bags", "Bank", "Mail", "AH" }) do
+            local ch = CreateFrame("Frame", nil, lc.stockRow)
+            ch:SetHeight(20)
+            ch.bgTex = ch:CreateTexture(nil, "BACKGROUND")
+            ch.bgTex:SetAllPoints(ch)
+            ch.lblFs = makeFs(ch, 10, "semibold", "CENTER", "textMuted")
+            if ch.lblFs.SetWordWrap then ch.lblFs:SetWordWrap(false) end
+            ch.lblFs:SetAllPoints(ch)
+            ch.lblFs:SetText(sLbl .. " 0")
+            ch._qty = 0
+            lc.stockChips[i] = ch
+        end
+
         state.acqCard = makeInfoCard("ACQUISITION, SCROLL, SKILL & COOLDOWN")
+        local ac = state.acqCard
+        ac.pillRow = CreateFrame("Frame", nil, ac)
+        ac.pillRow:SetHeight(22)
+        ac.pills = {}
+        for i = 1, 4 do
+            local p
+            if T and T.CreateBadgePill then
+                p = T.CreateBadgePill(ac.pillRow, "", "neutral", { height = 20, fontSize = 10, padX = 12 })
+                p.frame:Hide()
+            else
+                local pf = CreateFrame("Frame", nil, ac.pillRow)
+                pf:SetSize(72, 20)
+                local bg = pf:CreateTexture(nil, "BACKGROUND")
+                bg:SetAllPoints(pf)
+                bg:SetColorTexture(0.3, 0.3, 0.35, 0.25)
+                local lbl = makeFs(pf, 10, "semibold", "CENTER", "text")
+                lbl:SetAllPoints(pf)
+                p = {
+                    frame = pf,
+                    label = lbl,
+                    SetVariant = function(self, _, txt)
+                        self.label:SetText(tostring(txt or ""))
+                        self.frame:SetWidth(math.max(44, #tostring(txt or "") * 6 + 14))
+                    end,
+                }
+                pf:Hide()
+            end
+            ac.pills[i] = p
+        end
+
         DeepAnalysis.compCard = state.compCard
         DeepAnalysis.ledgerCard = state.ledgerCard
         DeepAnalysis.acqCard = state.acqCard
@@ -4130,8 +4718,16 @@ do
         DeepAnalysis.allAhCard = allAh
 
         if T and T.RegisterWidget then T.RegisterWidget(root, applyTheme) end
-        if T and T.OnModeChanged then T.OnModeChanged(applyTheme) end
-        if T and T.OnSkinChanged then T.OnSkinChanged(applyTheme) end
+        local function flushDirtyTheme()
+            if state.dirtyThemeRender and state.target and isRootVisible() then
+                state.dirtyThemeRender = false
+                DeepAnalysis.Render(state.target, true)
+            end
+        end
+        root:SetScript("OnShow", flushDirtyTheme)
+        if parent and parent.HookScript then
+            parent:HookScript("OnShow", flushDirtyTheme)
+        end
 
         state.built = true
         return root
@@ -4159,7 +4755,7 @@ do
         state.viewportW, state.viewportH = mainW, mainH
         if a and a._openingDeepAnalysis then return end
 
-        local W = math.max(720, math.floor(mainW - 18))
+        local W = math.max(480, math.floor(mainW - 18))
         state.scrollChild:SetWidth(W)
 
         -- Row 1: 5 KPI Cards
@@ -4174,8 +4770,86 @@ do
             card:SetSize(cw, 68)
         end
 
-        -- Row 2 (optional, above Timing Drawer so Proposal A shows above the fold): Vendor Yield & Material Buy Caps Card
+        -- Row 1.5: Dual Side-by-Side 24h & 7d Charts Strip (or 44px Baseline Fallback)
         local nextY = -78
+        if state.chartsRow and state.chartsRow.frame then
+            local cf = state.chartsRow.frame
+            local c24 = state.chart24h
+            local c7 = state.chart7d
+            local bc = state.baselineCard
+            local chartsRowH = 0
+            if state.chartsCollapsed then
+                chartsRowH = 44
+                if c24 then c24:Hide() end
+                if c7 then c7:Hide() end
+                if bc then
+                    bc:ClearAllPoints()
+                    bc:SetPoint("TOPLEFT", cf, "TOPLEFT", 0, 0)
+                    bc:SetSize(W, 44)
+                    bc.titleFs:ClearAllPoints()
+                    bc.titleFs:SetPoint("TOPLEFT", bc, "TOPLEFT", 12, -6)
+                    bc.titleFs:SetSize(120, 12)
+                    bc.stripFs:ClearAllPoints()
+                    bc.stripFs:SetPoint("BOTTOMLEFT", bc, "BOTTOMLEFT", 12, 7)
+                    if W >= 740 then
+                        local hintW = math.min(310, math.floor(W * 0.42))
+                        bc.hintFs:ClearAllPoints()
+                        bc.hintFs:SetPoint("RIGHT", bc, "RIGHT", -12, 0)
+                        bc.hintFs:SetSize(hintW, 16)
+                        bc.hintFs:Show()
+                        bc.stripFs:SetSize(math.max(180, W - hintW - 36), 16)
+                    else
+                        bc.hintFs:ClearAllPoints()
+                        bc.hintFs:SetPoint("TOPRIGHT", bc, "TOPRIGHT", -12, -6)
+                        bc.hintFs:SetSize(math.max(160, W - 144), 12)
+                        bc.hintFs:Show()
+                        bc.stripFs:SetSize(math.max(200, W - 24), 16)
+                    end
+                    bc:Show()
+                end
+            else
+                if bc then bc:Hide() end
+                local sideBySide = (W >= 860)
+                local chartGap = 10
+                if sideBySide then
+                    chartsRowH = 152
+                    local halfW = math.floor((W - chartGap) / 2)
+                    if c24 then
+                        c24:ClearAllPoints()
+                        c24:SetPoint("TOPLEFT", cf, "TOPLEFT", 0, 0)
+                        c24:Show()
+                        c24:Layout(halfW, 152, skipDrawerRedraw)
+                    end
+                    if c7 then
+                        c7:ClearAllPoints()
+                        c7:SetPoint("TOPLEFT", cf, "TOPLEFT", halfW + chartGap, 0)
+                        c7:Show()
+                        c7:Layout(W - halfW - chartGap, 152, skipDrawerRedraw)
+                    end
+                else
+                    chartsRowH = 314
+                    if c24 then
+                        c24:ClearAllPoints()
+                        c24:SetPoint("TOPLEFT", cf, "TOPLEFT", 0, 0)
+                        c24:Show()
+                        c24:Layout(W, 152, skipDrawerRedraw)
+                    end
+                    if c7 then
+                        c7:ClearAllPoints()
+                        c7:SetPoint("TOPLEFT", cf, "TOPLEFT", 0, -162)
+                        c7:Show()
+                        c7:Layout(W, 152, skipDrawerRedraw)
+                    end
+                end
+            end
+            cf:ClearAllPoints()
+            cf:SetPoint("TOPLEFT", state.scrollChild, "TOPLEFT", 0, nextY)
+            cf:SetSize(W, chartsRowH)
+            cf:Show()
+            nextY = nextY - chartsRowH - 10
+        end
+
+        -- Row 2 (optional, above Timing Drawer so Proposal A shows above the fold): Vendor Yield & Material Buy Caps Card
         local vc = state.vcCard
         if vc and vc.IsShown and vc:IsShown() then
             local twoColVC = (W >= 820)
@@ -4358,21 +5032,96 @@ do
 
         -- Left Card internal layout
         local left = state.leftCard
-        local ovY = -36
+        local rw = leftW - 24
+        if left.econBarCard then
+            local ec = left.econBarCard
+            ec:ClearAllPoints()
+            ec:SetPoint("TOPLEFT", left, "TOPLEFT", 12, -36)
+            ec:SetSize(rw, 54)
+            local innerW = math.max(180, rw - 20)
+            if ec.craftFrame and ec.craftFrame:IsShown() then
+                local lblW = 72
+                local valW = math.min(148, math.max(96, math.floor(innerW * 0.34)))
+                local barW = math.max(40, innerW - lblW - valW - 16)
+                for i, slot in ipairs(ec.craftBars or {}) do
+                    slot:ClearAllPoints()
+                    slot:SetPoint("TOPLEFT", ec, "TOPLEFT", 10, -4 - (i - 1) * 16)
+                    slot:SetSize(innerW, 14)
+                    slot.lblFs:ClearAllPoints()
+                    slot.lblFs:SetPoint("LEFT", slot, "LEFT", 0, 0)
+                    slot.lblFs:SetSize(lblW, 14)
+                    slot.valFs:ClearAllPoints()
+                    slot.valFs:SetPoint("RIGHT", slot, "RIGHT", 0, 0)
+                    slot.valFs:SetSize(valW, 14)
+                    slot.trackTex:ClearAllPoints()
+                    slot.trackTex:SetPoint("LEFT", slot, "LEFT", lblW + 8, 0)
+                    slot.trackTex:SetSize(barW, 5)
+                    local ratio = math.max(0, math.min(1, tonumber(slot._ratio) or 0))
+                    slot.fillTex:ClearAllPoints()
+                    slot.fillTex:SetPoint("LEFT", slot.trackTex, "LEFT", 0, 0)
+                    if ratio > 0 then
+                        slot.fillTex:SetSize(math.max(3, math.floor(barW * ratio + 0.5)), 5)
+                        slot.fillTex:Show()
+                    else
+                        slot.fillTex:Hide()
+                    end
+                end
+            elseif ec.rangeFrame and ec.rangeFrame:IsShown() then
+                local thirdW = math.floor(innerW / 3)
+                for i, rlbl in ipairs(ec.rangeLabels or {}) do
+                    rlbl:ClearAllPoints()
+                    rlbl:SetPoint("TOPLEFT", ec, "TOPLEFT", 10 + (i - 1) * thirdW, -8)
+                    rlbl:SetSize(i == 3 and (innerW - 2 * thirdW) or thirdW, 14)
+                end
+                ec.rangeTrack:ClearAllPoints()
+                ec.rangeTrack:SetPoint("TOPLEFT", ec, "TOPLEFT", 10, -34)
+                ec.rangeTrack:SetSize(innerW, 6)
+                local fracs = ec._markerFracs or { 0, 0.5, 1 }
+                local minF, maxF = 1, 0
+                local anyShown = false
+                for i, mk in ipairs(ec.rangeMarkers or {}) do
+                    local f = fracs[i]
+                    if f ~= nil then
+                        anyShown = true
+                        local cf = math.max(0, math.min(1, f))
+                        if cf < minF then minF = cf end
+                        if cf > maxF then maxF = cf end
+                        local mx = math.floor(cf * math.max(1, innerW - 8) + 0.5)
+                        mk:ClearAllPoints()
+                        mk:SetPoint("LEFT", ec.rangeTrack, "LEFT", mx, 0)
+                        mk:SetSize(8, 10)
+                        mk:Show()
+                    else
+                        mk:Hide()
+                    end
+                end
+                if anyShown and maxF > minF then
+                    local sx = math.floor(minF * innerW + 0.5)
+                    local sw = math.max(4, math.floor((maxF - minF) * innerW + 0.5))
+                    ec.rangeSpan:ClearAllPoints()
+                    ec.rangeSpan:SetPoint("LEFT", ec.rangeTrack, "LEFT", sx, 0)
+                    ec.rangeSpan:SetSize(sw, 6)
+                    ec.rangeSpan:Show()
+                else
+                    ec.rangeSpan:Hide()
+                end
+            end
+        end
+
+        local ovY = -98
         for i = 1, 6 do
             local r = left.overviewRows[i]
             r:ClearAllPoints()
-            r:SetPoint("TOPLEFT", left, "TOPLEFT", 12, ovY - (i - 1) * 24)
-            r:SetSize(leftW - 24, 24)
-            local rw = leftW - 24
-            r.labelFs:ClearAllPoints(); r.labelFs:SetPoint("LEFT", 2, 0); r.labelFs:SetWidth(math.max(110, rw - 270))
+            r:SetPoint("TOPLEFT", left, "TOPLEFT", 12, ovY - (i - 1) * 21)
+            r:SetSize(rw, 21)
+            r.labelFs:ClearAllPoints(); r.labelFs:SetPoint("LEFT", 2, 0); r.labelFs:SetWidth(math.max(96, rw - 270))
             r.qtyFs:ClearAllPoints(); r.qtyFs:SetPoint("RIGHT", r, "RIGHT", -212, 0); r.qtyFs:SetWidth(52)
             r.valueFs:ClearAllPoints(); r.valueFs:SetPoint("RIGHT", r, "RIGHT", -104, 0); r.valueFs:SetWidth(104)
             r.deltaFs:ClearAllPoints(); r.deltaFs:SetPoint("RIGHT", r, "RIGHT", -44, 0); r.deltaFs:SetWidth(56)
             r.covFs:ClearAllPoints(); r.covFs:SetPoint("RIGHT", r, "RIGHT", -2, 0); r.covFs:SetWidth(40)
         end
 
-        local divY = ovY - 6 * 24 - 8
+        local divY = ovY - 6 * 21 - 8
         left.divider:ClearAllPoints()
         left.divider:SetPoint("TOPLEFT", left, "TOPLEFT", 12, divY)
         left.divider:SetPoint("TOPRIGHT", left, "TOPRIGHT", -12, divY)
@@ -4382,12 +5131,11 @@ do
         left.reagTitle:SetPoint("TOPLEFT", left, "TOPLEFT", 12, reagTitleY)
 
         local hdrY = reagTitleY - 16
-        local rw = leftW - 24
         local colDefs = {
-            { x = 28, w = math.max(100, rw - 342) },
-            { r = -296, w = 40 },
-            { r = -212, w = 80 },
-            { r = -124, w = 84 },
+            { x = 28, w = math.max(96, rw - 368) },
+            { r = -320, w = 36 },
+            { r = -238, w = 78 },
+            { r = -124, w = 110 },
             { r = -62, w = 58 },
             { r = -2, w = 56 },
         }
@@ -4410,7 +5158,25 @@ do
                 row:ClearAllPoints()
                 row:SetPoint("TOPLEFT", left, "TOPLEFT", 12, rowsTopY - (i - 1) * 26)
                 row:SetSize(rw, 26)
-                row.nameFs:ClearAllPoints(); row.nameFs:SetPoint("LEFT", 28, 0); row.nameFs:SetWidth(colDefs[1].w)
+                row.nameFs:ClearAllPoints()
+                if row._hasShareBar and row._shareRatio then
+                    row.nameFs:SetPoint("LEFT", 28, 3)
+                    row.nameFs:SetWidth(colDefs[1].w)
+                    local trackW = math.max(32, colDefs[1].w - 6)
+                    row.shareTrack:ClearAllPoints()
+                    row.shareTrack:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 28, 3)
+                    row.shareTrack:SetSize(trackW, 3)
+                    row.shareTrack:Show()
+                    row.shareFill:ClearAllPoints()
+                    row.shareFill:SetPoint("LEFT", row.shareTrack, "LEFT", 0, 0)
+                    row.shareFill:SetSize(math.max(3, math.floor(trackW * row._shareRatio + 0.5)), 3)
+                    row.shareFill:Show()
+                else
+                    row.nameFs:SetPoint("LEFT", 28, 0)
+                    row.nameFs:SetWidth(colDefs[1].w)
+                    if row.shareTrack then row.shareTrack:Hide() end
+                    if row.shareFill then row.shareFill:Hide() end
+                end
                 row.qtyFs:ClearAllPoints(); row.qtyFs:SetPoint("RIGHT", row, "RIGHT", colDefs[2].r, 0); row.qtyFs:SetWidth(colDefs[2].w)
                 row.unitFs:ClearAllPoints(); row.unitFs:SetPoint("RIGHT", row, "RIGHT", colDefs[3].r, 0); row.unitFs:SetWidth(colDefs[3].w)
                 row.extFs:ClearAllPoints(); row.extFs:SetPoint("RIGHT", row, "RIGHT", colDefs[4].r, 0); row.extFs:SetWidth(colDefs[4].w)
@@ -4424,22 +5190,145 @@ do
             left.reagEmptyFs:SetSize(rw, 28)
         end
 
-        local leftH = math.max(320, math.abs(rowsTopY) + math.max(1, used) * 26 + 16)
+        local leftH = math.max(340, math.abs(rowsTopY) + math.max(1, used) * 26 + 16)
         left:ClearAllPoints()
         left:SetPoint("TOPLEFT", state.scrollChild, "TOPLEFT", 0, row3Y)
         left:SetSize(leftW, leftH)
 
-        -- Right Column: 3 Stacked Cards
+        -- Right Column: 3 Stacked Visual Cards
         local rightX = twoCol and (leftW + colGap) or 0
         local curY = twoCol and row3Y or (row3Y - leftH - colGap)
         local rightTotalH = 0
+        local bodyW = math.max(180, rightW - 24)
         local cards = { state.compCard, state.ledgerCard, state.acqCard }
         for idx, card in ipairs(cards) do
-            local bodyW = rightW - 24
+            local visualH = 28
+            if card == state.compCard and card.heatBar then
+                card.heatBar:ClearAllPoints()
+                card.heatBar:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -28)
+                card.heatBar:SetSize(bodyW, 24)
+                local tGap = 4
+                local tW = math.floor((bodyW - tGap * 3) / 4)
+                for i, tf in ipairs(card.heatTiers or {}) do
+                    local tx = (i - 1) * (tW + tGap)
+                    local w = (i == 4) and (bodyW - tx) or tW
+                    tf:ClearAllPoints()
+                    tf:SetPoint("TOPLEFT", card.heatBar, "TOPLEFT", tx, 0)
+                    tf:SetSize(math.max(24, w), 22)
+                end
+                visualH = 58
+            elseif card == state.ledgerCard then
+                local yOff = 28
+                if card._hasTrades and card.horizonFrame then
+                    card.horizonFrame:ClearAllPoints()
+                    card.horizonFrame:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -yOff)
+                    card.horizonFrame:SetSize(bodyW, 56)
+                    local cGap = 8
+                    local cW = math.floor((bodyW - cGap * 2) / 3)
+                    for i, cf in ipairs(card.horizonCols or {}) do
+                        local cx = (i - 1) * (cW + cGap)
+                        local w = (i == 3) and (bodyW - cx) or cW
+                        cf:ClearAllPoints()
+                        cf:SetPoint("TOPLEFT", card.horizonFrame, "TOPLEFT", cx, 0)
+                        cf:SetSize(math.max(40, w), 56)
+                        cf.valFs:ClearAllPoints()
+                        cf.valFs:SetPoint("TOPLEFT", cf, "TOPLEFT", 0, 0)
+                        cf.valFs:SetSize(math.max(40, w), 14)
+                        cf.lblFs:ClearAllPoints()
+                        cf.lblFs:SetPoint("BOTTOMLEFT", cf, "BOTTOMLEFT", 0, 0)
+                        cf.lblFs:SetSize(math.max(40, w), 12)
+                        cf.barTrack:ClearAllPoints()
+                        cf.barTrack:SetPoint("BOTTOMLEFT", cf, "BOTTOMLEFT", 4, 15)
+                        cf.barTrack:SetSize(math.max(24, w - 8), 22)
+                        local ratio = math.max(0.08, math.min(1, tonumber(cf._ratio) or 0))
+                        local fillH = math.max(4, math.floor(22 * ratio + 0.5))
+                        cf.barFill:ClearAllPoints()
+                        cf.barFill:SetPoint("BOTTOMLEFT", cf.barTrack, "BOTTOMLEFT", 0, 0)
+                        cf.barFill:SetSize(math.max(24, w - 8), fillH)
+                    end
+                    yOff = yOff + 60
+                    if card.saleRateRow and card.saleRateRow:IsShown() then
+                        card.saleRateRow:ClearAllPoints()
+                        card.saleRateRow:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -yOff)
+                        card.saleRateRow:SetSize(bodyW, 24)
+                        card.saleRateRow.lblFs:ClearAllPoints()
+                        card.saleRateRow.lblFs:SetPoint("TOPLEFT", card.saleRateRow, "TOPLEFT", 0, 0)
+                        card.saleRateRow.lblFs:SetSize(bodyW, 13)
+                        if card.saleRateRow.bar and card.saleRateRow.bar.frame then
+                            local bf = card.saleRateRow.bar.frame
+                            bf:ClearAllPoints()
+                            bf:SetPoint("TOPLEFT", card.saleRateRow, "TOPLEFT", 0, -16)
+                            bf:SetSize(bodyW, 6)
+                            card.saleRateRow.bar:SetValue(card.saleRateRow._frac or 0)
+                        elseif card.saleRateRow.fallbackTrack then
+                            card.saleRateRow.fallbackTrack:ClearAllPoints()
+                            card.saleRateRow.fallbackTrack:SetPoint("TOPLEFT", card.saleRateRow, "TOPLEFT", 0, -16)
+                            card.saleRateRow.fallbackTrack:SetSize(bodyW, 6)
+                            local fw = math.max(2, math.floor(bodyW * (card.saleRateRow._frac or 0) + 0.5))
+                            card.saleRateRow.fallbackFill:ClearAllPoints()
+                            card.saleRateRow.fallbackFill:SetPoint("LEFT", card.saleRateRow.fallbackTrack, "LEFT", 0, 0)
+                            card.saleRateRow.fallbackFill:SetSize(fw, 6)
+                        end
+                        yOff = yOff + 28
+                    end
+                elseif card.emptyTradesFs then
+                    card.emptyTradesFs:ClearAllPoints()
+                    card.emptyTradesFs:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -yOff)
+                    card.emptyTradesFs:SetSize(bodyW, 16)
+                    yOff = yOff + 20
+                end
+                if card.stockRow then
+                    card.stockRow:ClearAllPoints()
+                    card.stockRow:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -yOff)
+                    card.stockRow:SetSize(bodyW, 22)
+                    local sGap = 6
+                    local sW = math.floor((bodyW - sGap * 3) / 4)
+                    for i, ch in ipairs(card.stockChips or {}) do
+                        local sx = (i - 1) * (sW + sGap)
+                        local w = (i == 4) and (bodyW - sx) or sW
+                        ch:ClearAllPoints()
+                        ch:SetPoint("TOPLEFT", card.stockRow, "TOPLEFT", sx, 0)
+                        ch:SetSize(math.max(36, w), 20)
+                    end
+                    yOff = yOff + 26
+                end
+                visualH = yOff + 2
+            elseif card == state.acqCard and card.pillRow then
+                local px, py, rowCount, shownPills = 0, 0, 1, 0
+                for _, p in ipairs(card.pills or {}) do
+                    if p and p.frame and p.frame:IsShown() then
+                        shownPills = shownPills + 1
+                        local pw = math.max(32, p.frame:GetWidth() or 60)
+                        if px > 0 and (px + pw) > bodyW then
+                            px = 0
+                            py = py - 24
+                            rowCount = rowCount + 1
+                        end
+                        p.frame:ClearAllPoints()
+                        p.frame:SetPoint("TOPLEFT", card.pillRow, "TOPLEFT", px, py)
+                        px = px + pw + 6
+                    end
+                end
+                if shownPills > 0 then
+                    local prH = rowCount * 20 + (rowCount - 1) * 4
+                    card.pillRow:ClearAllPoints()
+                    card.pillRow:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -28)
+                    card.pillRow:SetSize(bodyW, prH)
+                    card.pillRow:Show()
+                    visualH = 28 + prH + 8
+                else
+                    card.pillRow:Hide()
+                    visualH = 28
+                end
+            end
+
+            card.bodyFs:ClearAllPoints()
+            card.bodyFs:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -visualH)
+            card.bodyFs:SetPoint("TOPRIGHT", card, "TOPRIGHT", -12, -visualH)
             card.bodyFs:SetWidth(bodyW)
-            local textH = estimateWrappedHeight(card.bodyFs:GetText(), bodyW, 17)
-            local cardH = math.max(106, textH + 40)
-            card.bodyFs:SetHeight(cardH - 36)
+            local textH = estimateWrappedHeight(card.bodyFs:GetText(), bodyW, 16)
+            local cardH = math.max(visualH + 30, visualH + textH + 12)
+            card.bodyFs:SetHeight(math.max(22, cardH - visualH - 8))
             card:ClearAllPoints()
             card:SetPoint("TOPLEFT", state.scrollChild, "TOPLEFT", rightX, curY)
             card:SetSize(rightW, cardH)
@@ -4701,21 +5590,48 @@ do
         local pal = daPal()
         local econKey, econInfo = getActiveEcon()
 
+        state.dirtyThemeRender = false
         local win = (db().quickLookWindow == "24h") and "24h" or "7d"
         state.window = win
         state.target = target
         local kind = target.kind or "recipe"
         local itemID = getTargetItemID(target)
 
-        local qlData
+        local r = target.row or {}
+        local rec = target.recipe or r.recipe
+        local applyAHCut = not _G.MerchantMasterDB or _G.MerchantMasterDB.applyAHCut ~= false
+        local priceVer = (h and h.priceCacheEpoch) or 0
+        local dualCacheKey = tostring(kind) .. "|" .. tostring(itemID or 0) .. "|"
+            .. tostring(rec and rec.spellID or 0) .. "|" .. tostring(econKey or "") .. "|"
+            .. tostring(priceVer) .. "|" .. tostring(applyAHCut)
+
+        local qlData, ql24, ql7d
         if kind == "item" then
             qlData = buildItemDeepData(target, itemID, econKey)
         elseif h and h.RecipeStats and h.RecipeStats.BuildQuickLook and target.row then
-            local ctx = {}
-            for k, v in pairs(target.context or {}) do ctx[k] = v end
-            ctx.kind = kind
-            ctx.window = win
-            qlData = h.RecipeStats.BuildQuickLook(target.row, ctx)
+            local function buildForWin(w)
+                local ctx = {}
+                for k, v in pairs(target.context or {}) do ctx[k] = v end
+                ctx.kind = kind
+                ctx.window = w
+                return h.RecipeStats.BuildQuickLook(target.row, ctx)
+            end
+            if state.qlDualCache and state.qlDualCache.key == dualCacheKey then
+                ql24 = state.qlDualCache.ql24
+                ql7d = state.qlDualCache.ql7d
+                if win == "24h" then
+                    if not ql24 then ql24 = buildForWin("24h"); state.qlDualCache.ql24 = ql24 end
+                    qlData = ql24
+                else
+                    if not ql7d then ql7d = buildForWin("7d"); state.qlDualCache.ql7d = ql7d end
+                    qlData = ql7d
+                end
+            else
+                ql24 = buildForWin("24h")
+                ql7d = buildForWin("7d")
+                state.qlDualCache = { key = dualCacheKey, ql24 = ql24, ql7d = ql7d }
+                qlData = (win == "24h") and ql24 or ql7d
+            end
         end
         if not qlData and itemID then
             qlData = buildItemDeepData(target, itemID, econKey)
@@ -4732,6 +5648,7 @@ do
         hdr.icon:SetTexture(icon)
         hdr.titleFs:SetText(title)
         hdr.subtitleFs:SetText(buildSubtitle(target, qlData))
+        syncFavButton()
 
         -- Right action buttons
         if kind == "writ" then
@@ -4755,9 +5672,6 @@ do
         end
 
         -- Gather shared market metrics for KPIs + right cards
-        local r = target.row or {}
-        local rec = target.recipe or r.recipe
-        local applyAHCut = not _G.MerchantMasterDB or _G.MerchantMasterDB.applyAHCut ~= false
         local dep24 = (itemID and h and h.GetAHListingDeposit) and h.GetAHListingDeposit(itemID, 2, 1) or (qlData and qlData.dep24)
         local vendorFloor = (itemID and h and h.GetVendorSellPrice) and h.GetVendorSellPrice(itemID) or (qlData and qlData.vendorSell)
         local snapPrice, snapRec = nil, nil
@@ -4899,6 +5813,83 @@ do
         local ownSub = "Own " .. daNum(ownedOut) .. (ownedScroll > 0 and (" · Scrolls " .. daNum(ownedScroll)) or "")
         k5.subFs:SetText("Sellers " .. tostring(sellerInfo.display or "n/a") .. " · " .. ownSub)
 
+        -- Row 1.5: Dual Side-by-Side 24h & 7d Charts Strip (DA.chartsRow)
+        local series24, series7d = {}, {}
+        local pct24, pct7d = nil, nil
+        local title24, title7d = "24h Price Trend", "7d Price Trend"
+        if kind == "item" then
+            series24, pct24, series7d, pct7d = buildItemChartSeries(itemID, econKey)
+            title24 = "24h Market Price"
+            title7d = "7d Market Price"
+        else
+            series24 = extractDualChartSeries(ql24 or qlData) or {}
+            series7d = extractDualChartSeries(ql7d or qlData) or {}
+            pct24 = (ql24 and ((ql24.output and ql24.output.pct) or (ql24.cost and ql24.cost.pct))) or nil
+            pct7d = (ql7d and ((ql7d.output and ql7d.output.pct) or (ql7d.cost and ql7d.cost.pct))) or nil
+            local hasDual24 = (#series24 >= 2)
+            local hasDual7d = (#series7d >= 2)
+            title24 = hasDual24 and "24h Price vs Cost" or "24h Trend"
+            title7d = hasDual7d and "7d Price vs Cost" or "7d Trend"
+        end
+        local pts24 = countMaxPoints(series24)
+        local pts7d = countMaxPoints(series7d)
+        state.charts24Pts = pts24
+        state.charts7dPts = pts7d
+
+        local liveRefPrice = (kind == "recipe" and tonumber(r.unitAH or r.ahPrice or r.targetPrice))
+            or (qlData and qlData.output and tonumber(qlData.output.last))
+            or (itemID and h and h.GetItemMarketPrice and h.GetItemMarketPrice(itemID))
+            or snapPrice
+        if pts24 >= 2 or pts7d >= 2 then
+            state.chartsCollapsed = false
+            if state.chart24h then
+                if pts24 >= 2 then
+                    local sum24 = (pct24 ~= nil and daPct(pct24, true) or (tostring(pts24) .. " pts"))
+                    if #series24 >= 2 then sum24 = "Sell / Cost  " .. sum24 end
+                    state.chart24h:SetData(series24, {
+                        title = title24,
+                        summary = sum24,
+                        preserveColor = true,
+                        preserveOrder = true,
+                    })
+                else
+                    state.chart24h:SetData({}, {
+                        title = title24,
+                        emptyText = "Need 2+ AH scans for 24h trend",
+                    })
+                end
+            end
+            if state.chart7d then
+                if pts7d >= 2 then
+                    local sum7d = (pct7d ~= nil and daPct(pct7d, true) or (tostring(pts7d) .. " pts"))
+                    if #series7d >= 2 then sum7d = "Sell / Cost  " .. sum7d end
+                    state.chart7d:SetData(series7d, {
+                        title = title7d,
+                        summary = sum7d,
+                        preserveColor = true,
+                        preserveOrder = true,
+                    })
+                else
+                    state.chart7d:SetData({}, {
+                        title = title7d,
+                        emptyText = "Need 2+ daily scans for 7d trend",
+                    })
+                end
+            end
+        else
+            state.chartsCollapsed = true
+            if state.chart24h then state.chart24h:Clear() end
+            if state.chart7d then state.chart7d:Clear() end
+            if state.baselineCard then
+                state.baselineCard.stripFs:SetText(
+                    "Vendor Floor " .. daMoney(vendorFloor, false)
+                    .. " -> Live AH " .. daMoney(liveRefPrice, false)
+                    .. " -> 24h Deposit " .. daMoney(dep24, false)
+                )
+                state.baselineCard.hintFs:SetText("Run 2+ AH scans over time to plot 24h & 7d trends")
+            end
+        end
+
         -- Row 2: Concept B Split Timing Drawer (only when snapshots / snapshot extension active)
         if hasSnaps then
             if state.ensureTimingDrawer then state.ensureTimingDrawer() end
@@ -4908,7 +5899,7 @@ do
                 if state.timingDrawer.Layout then
                     local mainW = state.viewportW or (a and a.ui and a.ui.deepAnalysisView and a.ui.deepAnalysisView:GetWidth()) or 1060
                     if mainW <= 100 then mainW = 1060 end
-                    local drawerW = math.max(720, math.floor(mainW - 18))
+                    local drawerW = math.max(480, math.floor(mainW - 18))
                     state.timingDrawer:Layout(drawerW, 415, true)
                 end
                 local hm = (itemID and h and h.Pricing and h.Pricing.GetItemHeatmap) and h.Pricing.GetItemHeatmap(itemID, econKey) or nil
@@ -5284,10 +6275,82 @@ do
             de:Hide()
         end
 
-        -- Row 3 Left Card: Overview + Full Reagents / Linked Recipes
+        -- Row 3 Left Card: Economy Bar Card + Overview + Full Reagents / Linked Recipes
         paintWindowButtons(win)
         local left = state.leftCard
         left.hdrTitle:SetText(kind == "item" and "MARKET OVERVIEW" or "CRAFT & MARKET OVERVIEW")
+
+        if left.econBarCard then
+            local ec = left.econBarCard
+            if kind == "recipe" then
+                local made = math.max(1, tonumber(qlData and qlData.made or r.numMade or (rec and rec.numMade)) or 1)
+                local costVal = (tonumber(r.craftCost) and tonumber(r.craftCost) * made) or (qlData and qlData.cost and qlData.cost.last) or 0
+                local sellUnit = tonumber(r.unitAH or r.ahPrice or r.targetPrice) or (qlData and qlData.output and qlData.output.last) or 0
+                local grossSale = sellUnit * made
+                local netSale = applyAHCut and math.floor(grossSale * 0.95 + 0.5) or grossSale
+                local profitVal = (tonumber(r.profit) and tonumber(r.profit) * made) or (qlData and qlData.net and qlData.net.last) or (netSale - costVal)
+                local marginPct = (costVal and costVal > 0 and profitVal) and (profitVal / costVal * 100) or tonumber(r.marginPct)
+                local maxBar = math.max(1, costVal or 0, netSale or 0, math.abs(profitVal or 0))
+
+                local b1, b2, b3 = ec.craftBars[1], ec.craftBars[2], ec.craftBars[3]
+                b1._ratio = (costVal and costVal > 0) and (costVal / maxBar) or 0
+                b1._colorKey = "accentOrange"
+                b1._valColorKey = "text"
+                b1.valFs:SetText(daMoney(costVal, false))
+
+                b2._ratio = (netSale and netSale > 0) and (netSale / maxBar) or 0
+                b2._colorKey = "accentBlue"
+                b2._valColorKey = "text"
+                b2.valFs:SetText(daMoney(netSale, false))
+
+                b3._ratio = (profitVal and profitVal ~= 0) and (math.abs(profitVal) / maxBar) or 0
+                b3._colorKey = (profitVal and profitVal < 0) and "accentRed" or "accentGreen"
+                b3._valColorKey = b3._colorKey
+                b3.valFs:SetText(daMoney(profitVal, true) .. (marginPct and (" (" .. daPct(marginPct, false) .. ")") or ""))
+
+                ec.craftFrame:Show()
+                ec.rangeFrame:Hide()
+            else
+                local avg7d = nil
+                if series7d and series7d[1] and series7d[1].points and #series7d[1].points > 0 then
+                    local sum, cnt = 0, 0
+                    for _, pt in ipairs(series7d[1].points) do
+                        local pv = tonumber(pt.value)
+                        if pv and pv > 0 then sum = sum + pv; cnt = cnt + 1 end
+                    end
+                    if cnt > 0 then avg7d = math.floor(sum / cnt + 0.5) end
+                end
+                if not avg7d then
+                    avg7d = (snapRec and snapRec.marketValue) or snapPrice or liveRefPrice
+                end
+                local vFloor = (vendorFloor and vendorFloor > 0) and vendorFloor or nil
+                local vLive = (liveRefPrice and liveRefPrice > 0) and liveRefPrice or nil
+                local vAvg = (avg7d and avg7d > 0) and avg7d or nil
+                ec.rangeLabels[1]:SetText("Vendor " .. (vFloor and daMoney(vFloor, false) or "-"))
+                ec.rangeLabels[2]:SetText("Live AH " .. (vLive and daMoney(vLive, false) or "-"))
+                ec.rangeLabels[3]:SetText("7d Avg " .. (vAvg and daMoney(vAvg, false) or "-"))
+
+                local minV, maxV = nil, nil
+                for _, v in ipairs({ vFloor, vLive, vAvg }) do
+                    if v then
+                        minV = minV and math.min(minV, v) or v
+                        maxV = maxV and math.max(maxV, v) or v
+                    end
+                end
+                local span = (minV and maxV and maxV > minV) and (maxV - minV) or nil
+                local function norm(v, fallbackFrac)
+                    if not v then return nil end
+                    if not span then return fallbackFrac end
+                    return (v - minV) / span
+                end
+                ec._markerFracs = { norm(vFloor, 0.1), norm(vLive, 0.5), norm(vAvg, 0.9) }
+                ec._markerColorKeys = { "textMuted", "accentBlue", "accentOrange" }
+
+                ec.craftFrame:Hide()
+                ec.rangeFrame:Show()
+            end
+        end
+
         local ovList = (qlData and qlData.overviewRows) or {}
         for i = 1, 6 do
             local rowFrame = left.overviewRows[i]
@@ -5322,7 +6385,17 @@ do
         local linked = (kind == "item" and qlData and qlData.linkedRecipes) or nil
         local used = 0
         if kind ~= "item" then
-            left.reagTitle:SetText("REAGENTS & MOVERS BREAKDOWN (" .. tostring(#movers) .. " · click market item to inspect)")
+            left.reagTitle:SetText("REAGENTS & MOVERS BREAKDOWN (" .. tostring(#movers) .. " | click market item to inspect)")
+            local totalExt = 0
+            if kind == "recipe" then
+                for _, m in ipairs(movers) do
+                    local mQty = tonumber(m.qty) or 1
+                    local mUnit = tonumber(m.unitPrice) or (m.series and m.series.last)
+                    if mUnit and mUnit > 0 and mQty > 0 then
+                        totalExt = totalExt + (mUnit * mQty)
+                    end
+                end
+            end
             for idx, m in ipairs(movers) do
                 used = used + 1
                 local row = ensureReagentRow(used)
@@ -5346,7 +6419,21 @@ do
                 setTextColor(row.nameFs, row.clickable and (pal.textBlue or pal.accentBlue or pal.text) or pal.text)
                 row.qtyFs:SetText(tostring(mQty) .. "x")
                 row.unitFs:SetText(daMoney(mUnit, false))
-                row.extFs:SetText(daMoney(mExt, false))
+
+                if kind == "recipe" and mExt and mExt > 0 and totalExt > 0 then
+                    local sharePct = math.max(0, math.min(100, math.floor((mExt / totalExt) * 100 + 0.5)))
+                    row._hasShareBar = true
+                    row._shareRatio = math.max(0.03, math.min(1, mExt / totalExt))
+                    row._shareColorKey = isVendor and "textMuted" or (sharePct >= 45 and "accentOrange" or "accentBlue")
+                    row.extFs:SetText(daMoney(mExt, false) .. " (" .. tostring(sharePct) .. "%)")
+                else
+                    row._hasShareBar = false
+                    row._shareRatio = nil
+                    if row.shareTrack then row.shareTrack:Hide() end
+                    if row.shareFill then row.shareFill:Hide() end
+                    row.extFs:SetText(daMoney(mExt, false))
+                end
+
                 if isVendor then
                     row.tagFs:SetText("VENDOR")
                     row._tagColKey = "textMuted"
@@ -5362,7 +6449,7 @@ do
                 row:Show()
             end
         else
-            left.reagTitle:SetText("RELATED CATALOG RECIPES (" .. tostring(linked and #linked or 0) .. " · click to inspect craft)")
+            left.reagTitle:SetText("RELATED CATALOG RECIPES (" .. tostring(linked and #linked or 0) .. " | click to inspect craft)")
             for _, entry in ipairs(linked or {}) do
                 used = used + 1
                 local row = ensureReagentRow(used)
@@ -5376,6 +6463,10 @@ do
                 row.itemIcon = rIcon
                 row.drillRecipe = lrec
                 row.clickable = true
+                row._hasShareBar = false
+                row._shareRatio = nil
+                if row.shareTrack then row.shareTrack:Hide() end
+                if row.shareFill then row.shareFill:Hide() end
                 row.icon:SetTexture(rIcon)
                 row.nameFs:SetText(rName .. " >")
                 setTextColor(row.nameFs, pal.textBlue or pal.accentBlue or pal.text)
@@ -5395,10 +6486,11 @@ do
         end
         left.reagEmptyFs:SetShown(used == 0)
         if used == 0 then
-            left.reagEmptyFs:SetText(kind == "item" and "Standalone market item — no linked catalog recipes." or "No reagents listed.")
+            left.reagEmptyFs:SetText(kind == "item" and "Standalone market item - no linked catalog recipes." or "No reagents listed.")
         end
 
         -- Row 3 Right Column Card 1: Competition, Velocity & Quality
+        state.compCard._activeTier = resolveHeatTier(heatLabel, demandInfo, liveSales)
         local compLines = {}
         local mutedHex = daHex(pal, "hexMuted")
         local textHex = daHex(pal, "hexText")
@@ -5418,104 +6510,161 @@ do
         if effText ~= "" then
             compLines[#compLines + 1] = mutedHex .. "Forever Effect:|r " .. textHex .. effText .. "|r"
         end
+        local velParts = {}
+        velParts[#velParts + 1] = "Sales/Day " .. daRate(liveSales) .. (salesSrc and salesSrc ~= "" and (" (" .. tostring(salesSrc) .. ")") or "")
         if md then
-            local realmLabel = (econInfo and econInfo.effectiveKey) or econKey or "Realm"
-            local regionPortal = (econInfo and econInfo.portal)
-                or (econInfo and econInfo.regionKey and econInfo.regionKey:match("([^%-]+)$"))
-                or "EU"
             local personalRate = tonumber(md.personalDailySold)
             if personalRate and personalRate > 0 then
-                compLines[#compLines + 1] = mutedHex .. "Personal (7d):|r " .. greenHex .. daRate(personalRate) .. "|r"
+                velParts[#velParts + 1] = "Personal " .. daRate(personalRate)
             end
             local snapRate = tonumber(md.snapDailySold)
-            local snapObs = tonumber(md.snapObsHours)
-            local metaObs = tonumber(md.velocityObsHours)
             if snapRate ~= nil then
-                local obsH = (snapObs and snapObs > 0) and snapObs or ((metaObs and metaObs > 0) and metaObs or nil)
-                local obsStr = obsH and (" (" .. daNum(obsH) .. "h obs)") or ""
-                compLines[#compLines + 1] = mutedHex .. "Blizzard Realm (" .. tostring(realmLabel) .. "):|r " .. textHex .. daRate(snapRate) .. obsStr .. "|r"
-            elseif metaObs and metaObs > 0 then
-                if metaObs < 3 then
-                    compLines[#compLines + 1] = mutedHex .. "Blizzard Realm (" .. tostring(realmLabel) .. "):|r " .. textHex .. "Warming up (" .. daNum(metaObs) .. "/3h obs)|r"
-                else
-                    compLines[#compLines + 1] = mutedHex .. "Blizzard Realm (" .. tostring(realmLabel) .. "):|r " .. textHex .. "0/d (" .. daNum(metaObs) .. "h obs)|r"
-                end
-            end
-            if md.localClearsPerDay ~= nil then
-                compLines[#compLines + 1] = mutedHex .. "Local AH Scans:|r " .. textHex .. "Local " .. daRate(md.localClearsPerDay) .. "|r"
+                local obsH = tonumber(md.snapObsHours) or tonumber(md.velocityObsHours)
+                velParts[#velParts + 1] = "Realm " .. daRate(snapRate) .. ((obsH and obsH > 0) and (" (" .. daNum(obsH) .. "h)") or "")
             end
         end
-        compLines[#compLines + 1] = mutedHex .. "Demand Heat:|r " .. textHex .. heatLabel
-            .. " · Sales/Day " .. daRate(liveSales)
-            .. (salesSrc and salesSrc ~= "" and (" (" .. tostring(salesSrc) .. ")") or "") .. "|r"
-        local sellerLine = mutedHex .. "Seller Stats:|r " .. textHex .. tostring(sellerInfo.display or "n/a")
-            .. " (" .. tostring(sellerInfo.status or "unavailable") .. ")"
-            .. (liveListed ~= nil and (" · " .. daNum(liveListed) .. " listed on AH") or "") .. "|r"
-        compLines[#compLines + 1] = sellerLine
-        if sellerInfo.reason and sellerInfo.status ~= "complete" then
-            compLines[#compLines + 1] = mutedHex .. "Note:|r " .. mutedHex .. tostring(sellerInfo.reason) .. "|r"
+        compLines[#compLines + 1] = mutedHex .. "Velocity:|r " .. textHex .. table.concat(velParts, " | ") .. "|r"
+        local sellerDisplay = tostring(sellerInfo.display or "")
+        if sellerDisplay == "" or sellerDisplay:lower() == "n/a" then
+            sellerDisplay = "Unscanned"
         end
+        local sellerStatus = tostring(sellerInfo.status or "unscanned")
+        if sellerStatus == "unavailable" then sellerStatus = "unscanned" end
+        compLines[#compLines + 1] = mutedHex .. "Seller Stats:|r " .. textHex .. sellerDisplay
+            .. " (" .. sellerStatus .. ")"
+            .. (liveListed ~= nil and (" | " .. daNum(liveListed) .. " listed on AH") or "") .. "|r"
         state.compCard.bodyFs:SetText(table.concat(compLines, "\n"))
 
         -- Row 3 Right Column Card 2: Personal Ledger & Cross-Alt Inventory
-        local ledgerLines = {}
+        local lc = state.ledgerCard
         local detail = (itemID and ns.Model and ns.Model.GetItemDetail)
             and ns.Model.GetItemDetail(itemID, { char = "all", period = "all", faction = "all", source = "all" })
             or nil
-        if detail then
-            local w7 = detail.windows and detail.windows.d7 or {}
-            local w30 = detail.windows and detail.windows.d30 or {}
-            local wAll = detail.windows and detail.windows.all or {}
-            ledgerLines[#ledgerLines + 1] = mutedHex .. "7d:|r " .. textHex .. "Sold " .. daNum(w7.sold)
-                .. " @ " .. daMoney(w7.avgSell) .. " · Bought " .. daNum(w7.bought) .. " · Profit " .. daMoney(w7.profit, true) .. "|r"
-            ledgerLines[#ledgerLines + 1] = mutedHex .. "30d:|r " .. textHex .. "Sold " .. daNum(w30.sold)
-                .. " @ " .. daMoney(w30.avgSell) .. " · Bought " .. daNum(w30.bought) .. " · Profit " .. daMoney(w30.profit, true) .. "|r"
-            ledgerLines[#ledgerLines + 1] = mutedHex .. "All-Time:|r " .. textHex .. "Sold " .. daNum(wAll.sold)
-                .. " · Bought " .. daNum(wAll.bought) .. " · Profit " .. daMoney(wAll.profit, true) .. "|r"
-            local slowStr = detail.isSlowing and (orangeHex .. "Slowing (" .. decimal(detail.slowRatio) .. "x)|r") or (greenHex .. "Healthy|r")
-            ledgerLines[#ledgerLines + 1] = mutedHex .. "180d Sale Rate:|r " .. textHex .. percent(detail.saleRate)
-                .. " · Exp " .. daNum(detail.expSinceSale) .. " · Can " .. daNum(detail.canSinceSale) .. " · " .. slowStr
-            local inv = detail.inventory or {}
-            ledgerLines[#ledgerLines + 1] = mutedHex .. "Cross-Alt Stock:|r " .. textHex
-                .. "Bags " .. daNum(inv.bags) .. " · Bank " .. daNum(inv.bank) .. " · Mail " .. daNum(inv.mail)
-                .. " · AH " .. daNum(inv.ah) .. " · Total " .. daNum(inv.total) .. "|r"
+        local w7 = (detail and detail.windows and detail.windows.d7) or {}
+        local w30 = (detail and detail.windows and detail.windows.d30) or {}
+        local wAll = (detail and detail.windows and detail.windows.all) or {}
+        local allSold = tonumber(wAll.sold) or 0
+        local allBought = tonumber(wAll.bought) or 0
+        local hasTrades = (detail ~= nil) and (allSold > 0 or allBought > 0)
+        lc._hasTrades = hasTrades
+
+        if hasTrades then
+            local p7 = tonumber(w7.profit) or 0
+            local p30 = tonumber(w30.profit) or 0
+            local pAll = tonumber(wAll.profit) or 0
+            local maxAbs = math.max(1, math.abs(p7), math.abs(p30), math.abs(pAll))
+            local horizons = {
+                { profit = p7,   sold = tonumber(w7.sold) or 0 },
+                { profit = p30,  sold = tonumber(w30.sold) or 0 },
+                { profit = pAll, sold = allSold },
+            }
+            for i, hz in ipairs(horizons) do
+                local cf = lc.horizonCols[i]
+                if cf then
+                    cf._ratio = math.abs(hz.profit) / maxAbs
+                    cf._colorKey = (hz.profit < 0) and "accentRed" or "accentGreen"
+                    cf._valColorKey = (hz.profit ~= 0) and cf._colorKey or "textSecondary"
+                    cf.valFs:SetText(daMoney(hz.profit, true))
+                end
+            end
+            lc.horizonFrame:Show()
+            lc.emptyTradesFs:Hide()
+
+            local sr = tonumber(detail.saleRate) or 0
+            local srClamped = math.max(0, math.min(1, sr))
+            local isSlowing = (detail.isSlowing == true)
+            local slowStr = isSlowing and ("Slowing (" .. decimal(detail.slowRatio or 0) .. "x)") or "Healthy"
+            lc.saleRateRow._frac = srClamped
+            lc.saleRateRow._colorKey = isSlowing and "accentOrange" or "accentGreen"
+            lc.saleRateRow.lblFs:SetText("180d Sale Rate: " .. percent(sr)
+                .. " | Exp " .. daNum(detail.expSinceSale or 0)
+                .. " | Can " .. daNum(detail.canSinceSale or 0)
+                .. " | " .. slowStr)
+            if lc.saleRateRow.bar then
+                lc.saleRateRow.bar:SetValue(srClamped, pal[lc.saleRateRow._colorKey] or pal.accentGreen)
+            end
+            lc.saleRateRow:Show()
         else
-            ledgerLines[#ledgerLines + 1] = mutedHex .. "No personal ledger transactions recorded for this item yet.|r"
-            ledgerLines[#ledgerLines + 1] = mutedHex .. "Owned Across Alts:|r " .. textHex .. daNum(ownedOut)
-                .. (ownedScroll > 0 and (" output · " .. daNum(ownedScroll) .. " recipe scrolls") or " units") .. "|r"
+            lc.horizonFrame:Hide()
+            lc.saleRateRow:Hide()
+            lc.emptyTradesFs:SetText("No personal AH trades recorded yet")
+            lc.emptyTradesFs:Show()
         end
-        state.ledgerCard.bodyFs:SetText(table.concat(ledgerLines, "\n"))
+
+        local inv = (detail and type(detail.inventory) == "table") and detail.inventory or nil
+        local qBags = inv and (tonumber(inv.bags) or 0) or (tonumber(ownedOut) or 0)
+        local qBank = inv and (tonumber(inv.bank) or 0) or 0
+        local qMail = inv and (tonumber(inv.mail) or 0) or 0
+        local qAH = inv and (tonumber(inv.ah) or 0) or 0
+        local qTotal = inv and (tonumber(inv.total) or (qBags + qBank + qMail + qAH)) or (qBags + qBank + qMail + qAH)
+        local stockSpecs = {
+            { "Bags", qBags },
+            { "Bank", qBank },
+            { "Mail", qMail },
+            { "AH",   qAH },
+        }
+        for i, sp in ipairs(stockSpecs) do
+            local ch = lc.stockChips[i]
+            if ch then
+                ch._qty = sp[2]
+                ch.lblFs:SetText(sp[1] .. " " .. daNum(sp[2]))
+            end
+        end
+        local ledgerSummary = mutedHex .. "Owned:|r " .. textHex
+            .. "Bags " .. daNum(qBags) .. " | Bank " .. daNum(qBank)
+            .. " | Mail " .. daNum(qMail) .. " | AH " .. daNum(qAH)
+            .. " (Total " .. daNum(qTotal) .. ")"
+            .. (hasTrades and (" | Sold 7d " .. daNum(w7.sold or 0) .. " / All " .. daNum(allSold)) or "")
+            .. (ownedScroll > 0 and (" | Scrolls " .. daNum(ownedScroll)) or "") .. "|r"
+        lc.bodyFs:SetText(ledgerSummary)
 
         -- Row 3 Right Column Card 3: Acquisition, Scroll, Skill & Cooldown
+        local ac = state.acqCard
+        local pillSpecs = {}
         local acqLines = {}
         if kind == "recipe" then
-            state.acqCard.titleFs:SetText("ACQUISITION, SCROLL, SKILL & COOLDOWN")
+            ac.titleFs:SetText("ACQUISITION, SCROLL, SKILL & COOLDOWN")
             local whereStr = stripCodes((qlData and qlData.scrollInfo and qlData.scrollInfo.whereToBuy) or r.sourceLabel or "Trainer / AH")
+            local srcShort = truncateText(r.sourceLabel or whereStr, 18)
+            pillSpecs[#pillSpecs + 1] = { "neutral", srcShort }
+
+            local ab = r.craftAbility or {}
+            if ab.known then
+                pillSpecs[#pillSpecs + 1] = { "positive", "Known" }
+            elseif ab.knownAltName then
+                pillSpecs[#pillSpecs + 1] = { "blue", "Alt: " .. truncateText(ab.knownAltName, 14) }
+            elseif ab.knownOnAlt then
+                pillSpecs[#pillSpecs + 1] = { "blue", "Alt Known" }
+            else
+                pillSpecs[#pillSpecs + 1] = { "warning", "Unlearned" }
+            end
+            local repDisplay = formatRepLabel(r, rec)
+            if repDisplay then
+                pillSpecs[#pillSpecs + 1] = { "purple", "Rep: " .. truncateText(repDisplay, 18) }
+            end
+            if r.cdText and r.cdText ~= "" and r.cdText ~= "-" then
+                pillSpecs[#pillSpecs + 1] = { "warning", "CD: " .. truncateText(stripCodes(r.cdText), 14) }
+            end
+
             acqLines[#acqLines + 1] = mutedHex .. "Source:|r " .. textHex .. whereStr .. "|r"
             local sCost = qlData and qlData.scrollCost
             local sListed = qlData and qlData.scrollLiveListed
             local sFixed = qlData and qlData.scrollFixed
             local sBreak = qlData and qlData.scrollInfo and qlData.scrollInfo.breakEvenText
             acqLines[#acqLines + 1] = mutedHex .. "Recipe Scroll:|r " .. textHex
-                .. (sCost and daMoney(sCost) or "Not tradeable / N/A")
+                .. (sCost and daMoney(sCost) or "Not tradeable")
                 .. (sFixed and " (VENDOR)" or "")
-                .. (sListed ~= nil and (" · " .. daNum(sListed) .. " AH listed") or "")
-                .. (sBreak and (" · " .. sBreak) or "") .. "|r"
-            local ab = r.craftAbility or {}
-            local knowText = ab.known and (greenHex .. "Known on active character|r")
-                or (ab.knownAltName and (blueHex .. "Known on alt: " .. tostring(ab.knownAltName) .. "|r"))
-                or (ab.knownOnAlt and (blueHex .. "Known on alt|r"))
-                or (orangeHex .. "Unlearned|r")
-            acqLines[#acqLines + 1] = mutedHex .. "Status:|r " .. knowText
-            local repDisplay = formatRepLabel(r, rec)
-            if repDisplay then
-                acqLines[#acqLines + 1] = mutedHex .. "Reputation:|r " .. textHex .. repDisplay .. "|r"
-            end
-            if r.cdText and r.cdText ~= "" and r.cdText ~= "-" then
-                acqLines[#acqLines + 1] = mutedHex .. "Cooldown:|r " .. textHex .. stripCodes(r.cdText) .. "|r"
-            end
+                .. (sListed ~= nil and (" | " .. daNum(sListed) .. " AH") or "")
+                .. (sBreak and (" | " .. sBreak) or "") .. "|r"
         elseif kind == "writ" or kind == "crate" or kind == "forged" then
-            state.acqCard.titleFs:SetText("TURN-IN & MECHANICS")
+            ac.titleFs:SetText("TURN-IN & MECHANICS")
+            local meta = qlData and qlData.meta
+            if meta then
+                if meta.rep then pillSpecs[#pillSpecs + 1] = { "purple", "+" .. tostring(meta.rep) .. " Rep" } end
+                if meta.tokens then pillSpecs[#pillSpecs + 1] = { "positive", "+" .. tostring(meta.tokens) .. " Favor" } end
+                if meta.cdText then pillSpecs[#pillSpecs + 1] = { "warning", "CD " .. tostring(meta.cdText) } end
+                if meta.mode then pillSpecs[#pillSpecs + 1] = { "neutral", tostring(meta.mode) } end
+            end
             local whereStr = stripCodes((qlData and qlData.sourceInfo and qlData.sourceInfo.whereToBuy) or "")
             if whereStr ~= "" then
                 acqLines[#acqLines + 1] = mutedHex .. "Mechanics:|r " .. textHex .. whereStr .. "|r"
@@ -5523,41 +6672,43 @@ do
             if qlData and qlData.breakdown and qlData.breakdown ~= "" then
                 acqLines[#acqLines + 1] = mutedHex .. "Breakdown:|r " .. textHex .. stripCodes(qlData.breakdown) .. "|r"
             end
-            local meta = qlData and qlData.meta
-            if meta then
-                local mParts = {}
-                if meta.rep then mParts[#mParts + 1] = "+" .. tostring(meta.rep) .. " Rep" end
-                if meta.tokens then mParts[#mParts + 1] = "+" .. tostring(meta.tokens) .. " Favor" end
-                if meta.cdText then mParts[#mParts + 1] = "CD " .. tostring(meta.cdText) end
-                if meta.mode then mParts[#mParts + 1] = "Mode " .. tostring(meta.mode) end
-                if #mParts > 0 then
-                    acqLines[#acqLines + 1] = mutedHex .. "Summary:|r " .. textHex .. table.concat(mParts, " · ") .. "|r"
-                end
+            if #acqLines == 0 then
+                acqLines[#acqLines + 1] = mutedHex .. "Source:|r " .. textHex .. "Turn-in objective|r"
             end
         else
+            ac.titleFs:SetText(hasSnaps and "ITEM & SNAPSHOT METADATA" or "ITEM & MARKET METADATA")
+            pillSpecs[#pillSpecs + 1] = { "neutral", "ID #" .. tostring(itemID or "-") }
+            pillSpecs[#pillSpecs + 1] = { "neutral", "Vendor " .. (vendorFloor and stripCodes(daMoney(vendorFloor, false)) or "-") }
+            pillSpecs[#pillSpecs + 1] = { "neutral", "Dep " .. (dep24 and stripCodes(daMoney(dep24, false)) or "-") }
+            pillSpecs[#pillSpecs + 1] = { "blue", hasSnaps and "Snapshot" or "Live AH" }
             if hasSnaps then
-                state.acqCard.titleFs:SetText("ITEM & SNAPSHOT METADATA")
-                acqLines[#acqLines + 1] = mutedHex .. "Item ID:|r " .. textHex .. tostring(itemID or "-")
-                    .. " · Vendor Floor " .. (vendorFloor and daMoney(vendorFloor) or "-")
-                    .. " · 24h Deposit " .. (dep24 and daMoney(dep24) or "-") .. "|r"
                 local sm = (h and h.Pricing and h.Pricing.GetSnapshotMeta) and h.Pricing.GetSnapshotMeta(econKey) or nil
                 if sm then
-                    acqLines[#acqLines + 1] = mutedHex .. "Snapshot Pack:|r " .. textHex .. tostring(sm.source or "local")
-                        .. " · " .. tostring(sm.windowDays or "-") .. "d window · "
+                    acqLines[#acqLines + 1] = mutedHex .. "Source:|r " .. textHex .. tostring(sm.source or "local")
+                        .. " | " .. tostring(sm.windowDays or "-") .. "d window | "
                         .. daNum(sm.itemCount) .. " items (" .. daNum(sm.heatmapCount) .. " heatmaps)|r"
                 else
-                    acqLines[#acqLines + 1] = mutedHex .. "Snapshot Pack:|r " .. mutedHex .. "No snapshot data loaded for this economy yet.|r"
+                    acqLines[#acqLines + 1] = mutedHex .. "Source:|r " .. mutedHex .. "No snapshot pack loaded for this economy yet.|r"
                 end
             else
-                state.acqCard.titleFs:SetText("ITEM & MARKET METADATA")
-                acqLines[#acqLines + 1] = mutedHex .. "Item ID:|r " .. textHex .. tostring(itemID or "-")
-                    .. " · Vendor Floor " .. (vendorFloor and daMoney(vendorFloor) or "-")
-                    .. " · 24h Deposit " .. (dep24 and daMoney(dep24) or "-") .. "|r"
-                acqLines[#acqLines + 1] = mutedHex .. "Price Source:|r " .. textHex .. "Live AH Scans (scan at an Auctioneer to build local history)|r"
+                acqLines[#acqLines + 1] = mutedHex .. "Source:|r " .. textHex .. "Live AH Scans (scan at an Auctioneer to build local history)|r"
             end
         end
-        state.acqCard.bodyFs:SetText(table.concat(acqLines, "\n"))
+        for i = 1, 4 do
+            local p = ac.pills and ac.pills[i]
+            local sp = pillSpecs[i]
+            if p then
+                if sp then
+                    p:SetVariant(sp[1], sp[2])
+                    p.frame:Show()
+                else
+                    p.frame:Hide()
+                end
+            end
+        end
+        ac.bodyFs:SetText(table.concat(acqLines, "\n"))
 
+        paintVisualCards(pal)
         renderAllAhCard(itemID, econKey)
 
         if not preserveScroll then
@@ -5569,8 +6720,8 @@ do
         end
 
         if a and a.ui and a.ui.statusText then
-            a.ui.statusText:SetText("Deep Analysis · " .. stripCodes(title)
-                .. (econInfo and econInfo.label and (" · " .. econInfo.label) or ""))
+            a.ui.statusText:SetText("Deep Analysis | " .. stripCodes(title)
+                .. (econInfo and econInfo.label and (" | " .. econInfo.label) or ""))
         end
         return true
     end
@@ -5584,6 +6735,10 @@ do
         if a and a._openingDeepAnalysis then return false end
         local tgt = (a and a._deepAnalysisTarget) or state.target
         if not tgt then return false end
+        if state.built and not isRootVisible() then
+            state.dirtyThemeRender = true
+            return false
+        end
         return DeepAnalysis.Render(tgt, true)
     end
 
@@ -5595,6 +6750,11 @@ do
             data = state.data,
             window = state.window,
             scrollOffset = state.scrollOffset,
+            dirtyThemeRender = state.dirtyThemeRender == true,
+            favWatched = (state.header and state.header.favBtn and state.header.favBtn._watched) and true or false,
+            chartsCollapsed = state.chartsCollapsed == true,
+            charts24Pts = state.charts24Pts or 0,
+            charts7dPts = state.charts7dPts or 0,
             vcShown = (state.vcCard and state.vcCard:IsShown()) and true or false,
             vcCapUsed = state.vcCapUsed or 0,
             vcHistBuckets = state.vcHistBuckets,

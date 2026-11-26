@@ -1443,6 +1443,8 @@ local SKIN_ICON_BY_ID = {
 	[13521] = "INV_Scroll_03",                   -- Recipe: Flask of Supreme Power
 	[6050] = "INV_Potion_32",                    -- Frost Oil
 	[6049] = "INV_Potion_32",
+	[10504] = "INV_Misc_Lens_01",                -- Green Lens
+	[4304] = "INV_Misc_LeatherScrap_02",         -- Thick Leather
 }
 local SKIN_POTION_ICONS = { "INV_Potion_32", "INV_Potion_25", "INV_Potion_76", "INV_Potion_54", "INV_Potion_41", "INV_Potion_80" }
 local function guessSkinIconPath(numId, low)
@@ -1451,6 +1453,7 @@ local function guessSkinIconPath(numId, low)
 		if low:find("crate", 1, true) then base = "INV_Crate_03"
 		elseif low:find("vial", 1, true) then base = "INV_Drink_05"
 		elseif low:find("writ", 1, true) then base = "INV_Scroll_05"
+		elseif low:find("lens", 1, true) or low:find("goggle", 1, true) then base = "INV_Misc_Lens_01"
 		elseif low:find("recipe", 1, true) or low:find("pattern", 1, true) or low:find("plans", 1, true)
 			or low:find("formula", 1, true) or low:find("schematic", 1, true) or low:find("manual", 1, true)
 			or low:find("scroll", 1, true) then base = "INV_Scroll_03"
@@ -1464,10 +1467,15 @@ local function guessSkinIconPath(numId, low)
 			or low:find("sansam", 1, true) or low:find("herb", 1, true) then base = "INV_Misc_Herb_07"
 		elseif low:find("cloth", 1, true) or low:find("bolt", 1, true) or low:find("linen", 1, true)
 			or low:find("silk", 1, true) or low:find("wool", 1, true) or low:find("mageweave", 1, true)
-			or low:find("runecloth", 1, true) or low:find("hood", 1, true) then base = "INV_Fabric_Linen_01"
+			or low:find("runecloth", 1, true) or low:find("hood", 1, true) or low:find("robe", 1, true)
+			or low:find("cuff", 1, true) or low:find("sandal", 1, true) then base = "INV_Fabric_Linen_01"
 		elseif low:find("hide", 1, true) or low:find("leather", 1, true) or low:find("glove", 1, true)
 			or low:find("bracer", 1, true) or low:find("belt", 1, true) or low:find("boot", 1, true)
-			or low:find("cloak", 1, true) or low:find("pants", 1, true) then base = "INV_Misc_LeatherScrap_02"
+			or low:find("cloak", 1, true) or low:find("pants", 1, true) or low:find("legging", 1, true)
+			or low:find("gauntlet", 1, true) or low:find("helm", 1, true) or low:find("plate", 1, true)
+			or low:find("shoulder", 1, true) then base = "INV_Misc_LeatherScrap_02"
+		elseif low:find("hammer", 1, true) or low:find("blade", 1, true) or low:find("sword", 1, true)
+			or low:find("axe", 1, true) or low:find("mace", 1, true) or low:find("staff", 1, true) then base = "INV_Weapon_Blade_01"
 		elseif low:find("flame", 1, true) or low:find("fire", 1, true) or low:find("sac", 1, true) then base = "INV_Potion_24"
 		elseif low:find("oil", 1, true) or low:find("frost", 1, true) then base = "INV_Potion_83"
 		elseif low:find("water", 1, true) or low:find("snapper", 1, true) or low:find("fish", 1, true) then base = "INV_Potion_100"
@@ -2165,6 +2173,35 @@ local function dumpScene(sceneName, winFrameOverride, extraMeta)
 						__s1 = strata, __s2 = lvl, __s3 = idx, __s4 = -1, __s5 = -1, __s6 = 0, __s7 = 0,
 					}
 				end
+			end
+
+			if alpha > 0.001 and w._type == "EditBox" and w._text and w._text ~= "" and ww > 0 and hh > 0 then
+				local ins = w._textInsets or { 0, 0, 0, 0 }
+				local padL = tonumber(ins[1]) or 6
+				local padR = tonumber(ins[2]) or 6
+				local padT = tonumber(ins[3]) or 0
+				local padB = tonumber(ins[4]) or 0
+				local ew = math.max(1, ww - padL - padR)
+				local eh = math.max(1, hh - padT - padB)
+				items[#items + 1] = {
+					kind = "text",
+					id = w._id * 100000 + 1,
+					x = x + padL, y = y + padT, w = ew, h = eh,
+					alpha = alpha,
+					text = w._text,
+					fontSize = w._fontSize or 11,
+					fontPath = w._fontPath,
+					fontFlags = w._fontFlags,
+					color = w._textColor or { 0.96, 0.96, 0.98, 1 },
+					shadowOffset = w._shadowOffset or { 0, 0 },
+					shadowColor = w._shadowColor or { 0, 0, 0, 0 },
+					constrainedW = true,
+					justifyH = (w._justifyH and w._justifyH ~= "CENTER") and w._justifyH or "LEFT",
+					justifyV = "MIDDLE",
+					wordWrap = false,
+					clip = emitClipBox(w),
+					__s1 = strata, __s2 = lvl, __s3 = idx, __s4 = 1, __s5 = 3, __s6 = 1, __s7 = 9999,
+				}
 			end
 
 			if alpha > 0.001 and w._regions then
@@ -3415,11 +3452,270 @@ if skinsMode then
 	local priorMode = Theme.GetUserMode and Theme.GetUserMode() or Theme.GetMode()
 	local priorTab = app.activeTab
 
+	-- Shared synthetic snapshot & morning brief seeders for Goblin Baron v3.3.2 previews
+	local BARON_B32 = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
+	local function baronEnc32(num)
+		num = math.floor(tonumber(num) or 0)
+		if num <= 0 then return "0" end
+		local d = {}
+		while num > 0 do
+			local rem = num % 32
+			d[#d + 1] = string.sub(BARON_B32, rem + 1, rem + 1)
+			num = math.floor(num / 32)
+		end
+		local out = {}
+		for i = #d, 1, -1 do out[#out + 1] = d[i] end
+		return table.concat(out)
+	end
+
+	local function buildBaronSnapPayloads(itemID, basePrice, qtyBase, nowTs)
+		local h24 = {}
+		local cells = {}
+		for dow = 1, 7 do
+			for hr = 0, 23 do
+				local mult = (hr <= 5 and 0.80) or (hr <= 11 and 0.93) or (hr <= 16 and 1.00) or (hr <= 20 and 1.18) or 1.33
+				if dow >= 6 then mult = mult * 1.04 end
+				local avgP = math.floor(basePrice * mult + 0.5)
+				local minP = math.floor(avgP * 0.92 + 0.5)
+				local qty = (hr <= 5) and math.floor(qtyBase * 1.6) or ((hr >= 18) and math.max(3, math.floor(qtyBase * 0.5)) or qtyBase)
+				local slot = (dow - 1) * 24 + hr
+				cells[#cells + 1] = tostring(slot) .. "=" .. baronEnc32(avgP) .. "," .. baronEnc32(minP) .. "," .. baronEnc32(qty) .. ",4"
+				if dow == 1 then h24[hr + 1] = baronEnc32(avgP) end
+			end
+		end
+		local bbSlot = 3
+		local bsSlot = 6 * 24 + 21
+		local bbP = math.floor(basePrice * 0.80 + 0.5)
+		local bsP = math.floor(basePrice * 1.33 * 1.04 + 0.5)
+		local latest = string.format("%d:%s,%s,%s,%s,%s,%s",
+			itemID, baronEnc32(math.floor(basePrice * 0.93 + 0.5)), baronEnc32(basePrice), baronEnc32(basePrice),
+			baronEnc32(qtyBase), baronEnc32((nowTs or simTime) - 600), baronEnc32(basePrice))
+		local heat24 = string.format("%d:%s,%s,%s,%s,%s,%d,%s,%d,%s|%s",
+			itemID, baronEnc32(basePrice), baronEnc32(basePrice), baronEnc32(qtyBase), baronEnc32(15), baronEnc32(672),
+			bbSlot, baronEnc32(bbP), bsSlot, baronEnc32(bsP), table.concat(h24, ","))
+		local heat7x24 = tostring(itemID) .. ":" .. table.concat(cells, "|")
+		return latest, heat24, heat7x24
+	end
+
+	local function withMorningBriefSeed(fn)
+		local Store = ns.Analytics and ns.Analytics.Store
+		local db = _G.MerchantMasterDB
+		local econ = ns.CurrentEconomyInfo().effectiveKey
+		local priorSimTime = simTime
+		local priorLedgerDB = _G.MerchantMasterLedgerDB
+		local priorStoreDB = Store and Store.db
+		local priorDashMode = db.dashboardMode
+		local priorDashRange = db.dashboardBriefRange
+		local priorAhDaily = db.ahDaily
+		local priorLivePrices = db.ahPrices and db.ahPrices[econ]
+		local savedPrices = {}
+
+		-- Set deterministic morning time (09:20 local) so greeting is "Good morning, Grommash"
+		local morningTs = priorSimTime + 7 * 3600
+		simTime = morningTs
+		local curDay = math.floor(morningTs / 86400)
+
+		-- Seed synthetic reagent drops: Thick Leather (4304) 8s -> 6s (-25% -> Green Lens),
+		-- Dreamfoil (13463) 52s -> 42s (-19% -> Greater Arcane Elixir / Mongoose),
+		-- Mountain Silversage (13465) 82s -> 68s (-17% -> Elixir of the Mongoose),
+		-- Golden Sansam (13464) 38s -> 31s (-18% -> Major Healing Potion)
+		local dropPrices = {
+			[4304]  = { cur = 600,  base = 800,  qty = 46 },  -- Thick Leather
+			[10504] = { cur = 165000, base = 158000, qty = 4 }, -- Green Lens
+			[13463] = { cur = 4200, base = 5200, qty = 54 },  -- Dreamfoil
+			[13465] = { cur = 6800, base = 8200, qty = 36 },  -- Mountain Silversage
+			[13464] = { cur = 3100, base = 3800, qty = 48 },  -- Golden Sansam
+			[13466] = { cur = 2800, base = 3400, qty = 30 },  -- Plaguebloom
+		}
+		db.ahPrices = db.ahPrices or {}
+		db.ahPrices[econ] = db.ahPrices[econ] or {}
+		db.ahDaily = db.ahDaily or {}
+		local dailyCopy = {}
+		for k, v in pairs((priorAhDaily and priorAhDaily[econ]) or {}) do dailyCopy[k] = v end
+		for id, spec in pairs(dropPrices) do
+			savedPrices[id] = db.ahPrices[econ][id]
+			db.ahPrices[econ][id] = { price = spec.cur, qty = spec.qty, at = morningTs - 240 }
+			dailyCopy[id] = {
+				{ d = curDay - 4, lastP = math.floor(spec.base * 1.03), lastQ = spec.qty + 8, at = morningTs - 4 * 86400 },
+				{ d = curDay - 3, lastP = spec.base, lastQ = spec.qty + 5, at = morningTs - 3 * 86400 },
+				{ d = curDay - 2, lastP = math.floor(spec.base * 0.99), lastQ = spec.qty + 3, at = morningTs - 2 * 86400 },
+				{ d = curDay - 1, lastP = spec.base, lastQ = spec.qty + 1, at = morningTs - 86400 },
+				{ d = curDay,     lastP = spec.cur, lastQ = spec.qty, at = morningTs - 240 },
+			}
+		end
+		db.ahDaily[econ] = dailyCopy
+		db.dashboardMode = "brief"
+		db.dashboardBriefRange = "7d"
+
+		-- Fresh synthetic ledger with strict AH_SELL profit history, CRAFT records & hourly wealth snapshots
+		_G.MerchantMasterLedgerDB = {}
+		if Store and Store.Init then Store.Init() end
+		local charKey = Store and select(1, Store.CurrentCharAndEcon()) or "Normal-Horde-Forever-Grommash"
+		local dailyItems = {
+			{ id = 13512, name = "Flask of Supreme Power",         gross = 274000, fee = 13700, cogs = 178000, qty = 2 },
+			{ id = 10504, name = "Green Lens",                     gross = 168000, fee = 8400,  cogs = 72000,  qty = 2 },
+			{ id = 13454, name = "Greater Arcane Elixir",          gross = 79500,  fee = 3975,  cogs = 41500,  qty = 6 },
+			{ id = 13452, name = "Elixir of the Mongoose",         gross = 68400,  fee = 3420,  cogs = 36800,  qty = 8 },
+			{ id = 13444, name = "Major Mana Potion",              gross = 41500,  fee = 2075,  cogs = 22400,  qty = 10 },
+			{ id = 5634,  name = "Free Action Potion",             gross = 24200,  fee = 1210,  cogs = 12800,  qty = 8 },
+			{ id = 13457, name = "Greater Fire Protection Potion", gross = 44500,  fee = 2225,  cogs = 24900,  qty = 5 },
+			{ id = 4304,  name = "Thick Leather",                  gross = 18000,  fee = 900,   cogs = 11500,  qty = 20 },
+		}
+		local runGold = 14800000
+		local dayMultipliers = { 0.88, 1.12, 0.76, 1.24, 1.05, 0.94, 1.18, 1.32 }
+		for dOff = 7, 1, -1 do
+			local baseTs = morningTs - dOff * 86400 - 7200
+			local mult = dayMultipliers[8 - dOff] or 1.0
+			local dayProfit = 0
+			for idx = 1, 5 do
+				local it = dailyItems[((dOff + idx - 1) % #dailyItems) + 1]
+				local q = math.max(1, math.floor(it.qty * mult + 0.5))
+				local g = it.gross * q
+				local f = it.fee * q
+				local c = it.cogs * q
+				dayProfit = dayProfit + (g - f - c)
+				Store.Append({
+					time = baseTs - (idx * 1800),
+					type = "AH_SELL",
+					char = charKey,
+					econ = econ,
+					itemID = it.id,
+					qty = q,
+					unit = it.gross,
+					total = g - f,
+					cogs = c,
+					where = "Orgrimmar",
+					skipRecon = true,
+					extra = { name = it.name, gross = g, fee = f },
+				})
+			end
+			runGold = runGold + dayProfit
+			Store.SaveSnapshot(charKey, Store.DayKey(baseTs), {
+				gold = runGold,
+				items = 3650000 + (8 - dOff) * 95000,
+				listed = 2100000,
+				bags = 1250000,
+				bank = 2400000 + (8 - dOff) * 95000,
+				mail = 0,
+				econ = econ,
+				time = baseTs,
+			})
+		end
+		-- Today's CRAFT records so Green Lens, Greater Arcane Elixir, Mongoose, Major Healing rank at top of Reagent Price-Drop Alerts
+		local todayCrafts = {
+			{ spellID = 12622, itemID = 10504, name = "Green Lens",            qty = 6 },
+			{ spellID = 17573, itemID = 13454, name = "Greater Arcane Elixir", qty = 14 },
+			{ spellID = 17571, itemID = 13452, name = "Elixir of the Mongoose", qty = 12 },
+			{ spellID = 17556, itemID = 13446, name = "Major Healing Potion",  qty = 18 },
+		}
+		for i, cr in ipairs(todayCrafts) do
+			Store.Append({
+				time = morningTs - 5 * 3600 + i * 300,
+				type = "CRAFT",
+				char = charKey,
+				econ = econ,
+				itemID = cr.itemID,
+				qty = cr.qty,
+				unit = 0,
+				total = 0,
+				cogs = 0,
+				where = "Orgrimmar",
+				skipRecon = true,
+				extra = { spellID = cr.spellID, name = cr.name },
+			})
+		end
+		-- Today's crisp AH_SELL log (10 varied sales for scrollable Recent AH Sales + Best Items)
+		local todaySales = {
+			{ minsAgo = 14,  id = 13512, name = "Flask of Supreme Power",         qty = 2,  gross = 548000, fee = 27400, cogs = 356000 },
+			{ minsAgo = 32,  id = 10504, name = "Green Lens",                     qty = 2,  gross = 336000, fee = 16800, cogs = 144000 },
+			{ minsAgo = 55,  id = 13454, name = "Greater Arcane Elixir",          qty = 8,  gross = 636000, fee = 31800, cogs = 332000 },
+			{ minsAgo = 82,  id = 13452, name = "Elixir of the Mongoose",         qty = 10, gross = 684000, fee = 34200, cogs = 368000 },
+			{ minsAgo = 115, id = 13444, name = "Major Mana Potion",              qty = 15, gross = 622500, fee = 31125, cogs = 336000 },
+			{ minsAgo = 148, id = 13457, name = "Greater Fire Protection Potion", qty = 6,  gross = 267000, fee = 13350, cogs = 149400 },
+			{ minsAgo = 190, id = 5634,  name = "Free Action Potion",             qty = 10, gross = 242000, fee = 12100, cogs = 128000 },
+			{ minsAgo = 235, id = 4304,  name = "Thick Leather",                  qty = 40, gross = 36000,  fee = 1800,  cogs = 24000 },
+			{ minsAgo = 285, id = 13446, name = "Major Healing Potion",           qty = 20, gross = 370000, fee = 18500, cogs = 212000 },
+			{ minsAgo = 340, id = 13456, name = "Greater Frost Protection Potion", qty = 5, gross = 182500, fee = 9125,  cogs = 105000 },
+		}
+		for idx, s in ipairs(todaySales) do
+			Store.Append({
+				time = morningTs - s.minsAgo * 60,
+				type = "AH_SELL",
+				char = charKey,
+				econ = econ,
+				itemID = s.id,
+				qty = s.qty,
+				unit = math.floor(s.gross / s.qty),
+				total = s.gross - s.fee,
+				cogs = s.cogs,
+				where = "Orgrimmar",
+				skipRecon = true,
+				extra = { name = s.name, gross = s.gross, fee = s.fee, replayOrder = 100 - idx },
+			})
+		end
+		-- Seed 10 hourly intraday wealth snapshots up to morningTs (Total Wealth Hourly Line Chart)
+		local hourlyWealthSteps = { 0, 140000, 220000, 390000, 510000, 680000, 920000, 1180000, 1460000, 1890000 }
+		for hIdx = 1, #hourlyWealthSteps do
+			local hTs = morningTs - (#hourlyWealthSteps - hIdx) * 3600
+			simTime = hTs
+			Store.SaveSnapshot(charKey, Store.DayKey(hTs), {
+				gold = runGold + hourlyWealthSteps[hIdx],
+				items = 4380000 + hIdx * 24000,
+				listed = 2240000 - hIdx * 12000,
+				bags = 1420000,
+				bank = 2960000 + hIdx * 24000,
+				mail = 0,
+				econ = econ,
+				time = hTs,
+			})
+		end
+		simTime = morningTs
+
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+		if ns.DashboardBrief and ns.DashboardBrief.InvalidateCache then ns.DashboardBrief.InvalidateCache() end
+		if ns.Analytics and ns.Analytics.Model and ns.Analytics.Model.Invalidate then ns.Analytics.Model.Invalidate() end
+
+		local ok, err = pcall(fn)
+
+		simTime = priorSimTime
+		_G.MerchantMasterLedgerDB = priorLedgerDB
+		if Store then Store.db = priorStoreDB end
+		db.dashboardMode = priorDashMode
+		db.dashboardBriefRange = priorDashRange
+		db.ahDaily = priorAhDaily
+		if priorLivePrices then
+			for id in pairs(dropPrices) do db.ahPrices[econ][id] = savedPrices[id] end
+		end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+		if ns.DashboardBrief and ns.DashboardBrief.InvalidateCache then ns.DashboardBrief.InvalidateCache() end
+		if ns.Analytics and ns.Analytics.Model and ns.Analytics.Model.Invalidate then ns.Analytics.Model.Invalidate() end
+		if not ok then error(err, 0) end
+	end
+
 if not cartAhOnly then
 	skinScene("overview-standard-dark", "standard", "dark")
 	skinScene("overview-standard-light", "standard", "light")
-	for _, key in ipairs({ "human", "night_elf", "orc", "undead", "goblin" }) do
+	for _, key in ipairs({ "human", "night_elf", "orc", "undead" }) do
 		skinScene("overview-" .. key, key)
+	end
+	if not onlyScenes or onlyScenes["overview-goblin"] then
+		withMorningBriefSeed(function()
+			sizeSkinViewport("goblin")
+			applySkin("goblin")
+			switchTab("dashboard")
+			if app.ui and app.ui.dashBriefView then
+				local bv = app.ui.dashBriefView
+				if bv.wealthToggle and bv.wealthToggle.SetActive then
+					bv.wealthToggle:SetActive("hourly", false)
+				end
+				if bv.Refresh then bv:Refresh(true) end
+			end
+			if app.refreshSkinLayout then app.refreshSkinLayout() end
+			drainTimers(500)
+			flushPendingLayout()
+			if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+			dumpScene("overview-goblin")
+		end)
 	end
 	skinScene("overview-goblin-bright", "goblin", nil, "dashboard", { brightBackdrop = true })
 
@@ -3472,6 +3768,784 @@ if not cartAhOnly then
 	skinScene("writs-goblin", "goblin", nil, "writs", nil, 1600, 880, 1728, 1080)
 	skinScene("ledger-goblin", "goblin", nil, "an_overview")
 	skinScene("allrecipes-night_elf", "night_elf", nil, "recipes")
+
+	-- deep-analysis-goblin (08-baron-deep-analysis.png): visual-first Deep Analysis for Flask of Supreme Power
+	if not onlyScenes or onlyScenes["deep-analysis-goblin"] then
+	do
+		local db = _G.MerchantMasterDB
+		local econ = ns.CurrentEconomyInfo().effectiveKey
+		local priorSnapRaw, priorSnapParsed, priorSnapHeat = ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache
+		local priorDaily, priorSnaps = db.ahDaily, db.ahSnapshots
+		local priorLive = db.ahPrices and db.ahPrices[econ]
+		local savedLive = {}
+		local Store = ns.Analytics and ns.Analytics.Store
+		local priorLedgerDB = _G.MerchantMasterLedgerDB
+		local priorStoreDB = Store and Store.db
+
+		local day = math.floor(simTime / 86400)
+		local scanAt = simTime - 240
+		local daDaily, daSnaps = {}, {}
+		local daSeries = {
+			[13512] = { 610000, 622000, 618000, 642000, 655000, 672000, 685000 }, -- Flask of Supreme Power
+			[13468] = { 320000, 326000, 330000, 344000, 355000, 370000, 382000 }, -- Black Lotus
+			[13463] = { 4750, 4620, 4560, 4440, 4390, 4290, 4200 },               -- Dreamfoil
+			[13465] = { 7300, 7420, 7480, 7560, 7610, 7720, 7800 },               -- Mountain Silversage
+			[13521] = { 1450000, 1410000, 1380000, 1340000, 1300000, 1260000, 1220000 },
+		}
+		local hourOffsets = { -23, -19, -15, -11, -7, -3, 0 }
+		for id, pts in pairs(daSeries) do
+			savedLive[id] = db.ahPrices[econ][id]
+			db.ahPrices[econ][id] = { price = pts[7], qty = 16, at = scanAt }
+			local b = {}
+			for i = 1, 7 do
+				b[i] = { d = day - 7 + i, lastP = pts[i], lastQ = 22 - i, at = scanAt - (7 - i) * 86400 }
+			end
+			daDaily[id] = b
+			local h = {}
+			for i, off in ipairs(hourOffsets) do
+				local mult = 0.94 + i * 0.011
+				h[#h + 1] = scanAt + off * 3600
+				h[#h + 1] = math.floor(pts[7] * mult + 0.5)
+				h[#h + 1] = 20 - i
+			end
+			daSnaps[id] = h
+		end
+		db.ahDaily = { [econ] = daDaily }
+		db.ahSnapshots = { [econ] = daSnaps }
+
+		-- Standalone Live AH mode (no 7x24 timing drawer) so side-by-side 24h & 7d charts,
+		-- Profit Waterfall, Reagent Cost Share bars, Demand Heat meter, and Ledger profit bars
+		-- all render cleanly in one crisp 1320x730 view at 1.000 scale!
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = {}, {}, {}
+
+		-- Seed personal ledger sales for Flask of Supreme Power so Ledger profit bars populate
+		_G.MerchantMasterLedgerDB = {}
+		if Store and Store.Init then Store.Init() end
+		local charKey = Store and select(1, Store.CurrentCharAndEcon()) or "Normal-Horde-Forever-Grommash"
+		local flaskSales = {
+			{ dOff = 6, qty = 2, gross = 1280000, cogs = 960000 },
+			{ dOff = 5, qty = 3, gross = 1965000, cogs = 1440000 },
+			{ dOff = 4, qty = 1, gross = 655000,  cogs = 485000 },
+			{ dOff = 3, qty = 4, gross = 2680000, cogs = 1940000 },
+			{ dOff = 2, qty = 2, gross = 1350000, cogs = 980000 },
+			{ dOff = 1, qty = 3, gross = 2055000, cogs = 1465000 },
+			{ dOff = 0, qty = 2, gross = 1370000, cogs = 985000 },
+		}
+		for _, fs in ipairs(flaskSales) do
+			local fee = math.floor(fs.gross * 0.05)
+			Store.Append({
+				time = simTime - fs.dOff * 86400 - 1200,
+				type = "AH_SELL",
+				char = charKey,
+				econ = econ,
+				itemID = 13512,
+				qty = fs.qty,
+				unit = math.floor(fs.gross / fs.qty),
+				total = fs.gross - fee,
+				cogs = fs.cogs,
+				where = "Orgrimmar",
+				skipRecon = true,
+				extra = { name = "Flask of Supreme Power", gross = fs.gross, fee = fee },
+			})
+		end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+		if ns.Analytics and ns.Analytics.Model and ns.Analytics.Model.Invalidate then ns.Analytics.Model.Invalidate() end
+
+		sizeSkinViewport("goblin")
+		applySkin("goblin")
+		switchTab("dashboard")
+		assert(app.openDeepAnalysis({ kind = "recipe", itemID = 13512 }, { tab = "recipes", wasQuickLookOpen = false }),
+			"deep-analysis-goblin must open Flask of Supreme Power")
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		drainTimers(500)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("deep-analysis-goblin")
+
+		if app.returnFromDeepAnalysis then app.returnFromDeepAnalysis() end
+		_G.MerchantMasterLedgerDB = priorLedgerDB
+		if Store then Store.db = priorStoreDB end
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = priorSnapRaw, priorSnapParsed, priorSnapHeat
+		db.ahDaily, db.ahSnapshots = priorDaily, priorSnaps
+		if priorLive then
+			for id in pairs(daSeries) do db.ahPrices[econ][id] = savedLive[id] end
+		end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+		if ns.Analytics and ns.Analytics.Model and ns.Analytics.Model.Invalidate then ns.Analytics.Model.Invalidate() end
+	end
+	end
+
+	-- all-items-goblin (09-baron-all-items.png): polished All Items with soft separators, light top card & Quick Look stars
+	if not onlyScenes or onlyScenes["all-items-goblin"] then
+	do
+		local db = _G.MerchantMasterDB
+		local econ = ns.CurrentEconomyInfo().effectiveKey
+		local priorSnapRaw, priorSnapParsed, priorSnapHeat = ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache
+		local priorWL = db.watchlist and _G.CopyTable(db.watchlist) or nil
+		local priorSearch = app.ui and app.ui.searchBox and app.ui.searchBox:GetText() or ""
+
+		-- Seed 24h heat strips on top items so Demand strips look rich in All Items
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = {}, {}, {}
+		local heatIDs = {
+			{ 13512, 265000, 14 }, { 13454, 79500, 18 }, { 13452, 68400, 22 },
+			{ 13444, 41500, 32 },  { 13468, 68000, 8 },  { 13463, 4200, 58 },
+			{ 13465, 6800, 42 },   { 13446, 18500, 46 }, { 5634, 24200, 19 },
+			{ 13457, 44500, 15 },  { 13456, 36500, 12 }, { 4304, 600, 64 },
+		}
+		local lParts, hParts, mParts = {}, {}, {}
+		for _, spec in ipairs(heatIDs) do
+			local l, h, m = buildBaronSnapPayloads(spec[1], spec[2], spec[3], simTime)
+			lParts[#lParts + 1] = l
+			hParts[#hParts + 1] = h
+			mParts[#mParts + 1] = m
+		end
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("META", econ,
+			string.format([[return {v=1,updatedAt=%d,source="blizzard",windowDays=30,itemCount=%d,heatmapCount=%d}]], simTime - 600, #heatIDs, #heatIDs))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("LATEST", econ, table.concat(lParts, ";"))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("HEAT24", econ, table.concat(hParts, ";"))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("HEAT7X24", econ, table.concat(mParts, ";"))
+
+		-- Star a few flagship items so filled gold Watchlist stars display alongside outline stars
+		if ns.Watchlist and ns.Watchlist.Clear then
+			ns.Watchlist.Clear()
+			ns.Watchlist.Add({ kind = "item", itemID = 13452 })
+			ns.Watchlist.Add({ kind = "item", itemID = 13454 })
+			ns.Watchlist.Add({ kind = "item", itemID = 4304 })
+		end
+		if app.ui and app.ui.searchBox then app.ui.searchBox:SetText("") end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+
+		sizeSkinViewport("goblin")
+		applySkin("goblin")
+		switchTab("all_items")
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		drainTimers(2000)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("all-items-goblin")
+
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = priorSnapRaw, priorSnapParsed, priorSnapHeat
+		db.watchlist = priorWL
+		if app.ui and app.ui.searchBox then app.ui.searchBox:SetText(priorSearch) end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+	end
+	end
+
+	-- watchlist-goblin (10-baron-watchlist.png): favorites mixing recipes + standalone items (e.g. Thick Leather with muted '-')
+	if not onlyScenes or onlyScenes["watchlist-goblin"] then
+	do
+		local db = _G.MerchantMasterDB
+		local econ = ns.CurrentEconomyInfo().effectiveKey
+		local priorSnapRaw, priorSnapParsed, priorSnapHeat = ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache
+		local priorWL = db.watchlist and _G.CopyTable(db.watchlist) or nil
+		local priorDaily = db.ahDaily
+		local priorLive = db.ahPrices and db.ahPrices[econ]
+		local savedLive = {}
+		local priorSearch = app.ui and app.ui.searchBox and app.ui.searchBox:GetText() or ""
+
+		local wlItems = {
+			[13512] = { cur = 278000, base = 252000, qty = 6,  vel = 4.6 },  -- Flask of Supreme Power (+10.3%)
+			[10504] = { cur = 168000, base = 152000, qty = 4,  vel = 5.2 },  -- Green Lens (+10.5%)
+			[13454] = { cur = 79500,  base = 73500,  qty = 11, vel = 18.4 }, -- Greater Arcane Elixir (+8.2%)
+			[13452] = { cur = 68400,  base = 64000,  qty = 9,  vel = 31.2 }, -- Elixir of the Mongoose (+6.9%)
+			[13444] = { cur = 41500,  base = 39800,  qty = 18, vel = 42.0 }, -- Major Mana Potion (+4.3%)
+			[5634]  = { cur = 24200,  base = 22800,  qty = 14, vel = 26.5 }, -- Free Action Potion (+6.1%)
+			[4304]  = { cur = 600,    base = 780,    qty = 52, vel = 68.0 }, -- Thick Leather (-23.1% drop)
+			[13468] = { cur = 68000,  base = 76500,  qty = 5,  vel = 12.0 }, -- Black Lotus (-11.1% drop)
+			[13463] = { cur = 4200,   base = 5200,   qty = 58, vel = 190.0 }, -- Dreamfoil (-19.2% drop)
+			[13465] = { cur = 6800,   base = 8100,   qty = 34, vel = 160.0 }, -- Mountain Silversage (-16.0% drop)
+		}
+		local day = math.floor(simTime / 86400)
+		local wlDaily = {}
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = {}, {}, {}
+		local lParts, hParts, mParts = {}, {}, {}
+		for id, spec in pairs(wlItems) do
+			savedLive[id] = db.ahPrices[econ][id]
+			db.ahPrices[econ][id] = { price = spec.cur, qty = spec.qty, at = simTime - 300 }
+			seededVelocity[id] = spec.vel
+			wlDaily[id] = {
+				{ d = day - 3, lastP = spec.base, lastQ = spec.qty + 4, at = simTime - 3 * 86400 },
+				{ d = day - 2, lastP = spec.base, lastQ = spec.qty + 2, at = simTime - 2 * 86400 },
+				{ d = day - 1, lastP = spec.base, lastQ = spec.qty + 1, at = simTime - 86400 },
+				{ d = day,     lastP = spec.cur,  lastQ = spec.qty,     at = simTime - 300 },
+			}
+			local l, h, m = buildBaronSnapPayloads(id, spec.base, spec.qty, simTime)
+			-- Overwrite LATEST minBuyout to cur so 7d trend reflects exact drop/rise
+			lParts[#lParts + 1] = string.format("%d:%s,%s,%s,%s,%s,%s",
+				id, baronEnc32(spec.cur), baronEnc32(spec.base), baronEnc32(spec.base),
+				baronEnc32(spec.qty), baronEnc32(simTime - 300), baronEnc32(spec.base))
+			hParts[#hParts + 1] = h
+			mParts[#mParts + 1] = m
+		end
+		db.ahDaily = { [econ] = wlDaily }
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("META", econ,
+			string.format([[return {v=1,updatedAt=%d,source="blizzard",windowDays=30,itemCount=%d,heatmapCount=%d}]], simTime - 300, #lParts, #hParts))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("LATEST", econ, table.concat(lParts, ";"))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("HEAT24", econ, table.concat(hParts, ";"))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("HEAT7X24", econ, table.concat(mParts, ";"))
+
+		-- Populate Watchlist with 6 recipes + 4 standalone items
+		local WL = assert(ns.Watchlist, "ns.Watchlist missing")
+		WL.Clear()
+		local wantedRecipes = { [17637] = true, [12622] = true, [17573] = true, [17571] = true, [17580] = true, [6624] = true }
+		for _, r in ipairs(ns.RECIPES or {}) do
+			if r and r.spellID and wantedRecipes[r.spellID] then
+				WL.Add({ kind = "recipe", recipe = r })
+			end
+		end
+		WL.Add({ kind = "item", itemID = 4304 })  -- Thick Leather
+		WL.Add({ kind = "item", itemID = 13468 }) -- Black Lotus
+		WL.Add({ kind = "item", itemID = 13463 }) -- Dreamfoil
+		WL.Add({ kind = "item", itemID = 13465 }) -- Mountain Silversage
+
+		if app.ui and app.ui.searchBox then app.ui.searchBox:SetText("") end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+
+		sizeSkinViewport("goblin")
+		applySkin("goblin")
+		switchTab("watchlist")
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		drainTimers(2000)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("watchlist-goblin")
+
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = priorSnapRaw, priorSnapParsed, priorSnapHeat
+		db.watchlist = priorWL
+		db.ahDaily = priorDaily
+		if priorLive then
+			for id in pairs(wlItems) do db.ahPrices[econ][id] = savedLive[id] end
+		end
+		if app.ui and app.ui.searchBox then app.ui.searchBox:SetText(priorSearch) end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+	end
+	end
+
+	-- disenchant-helper-goblin (11-baron-disenchant-helper.png): Disenchant Helper window + Professions Disenchant launcher icon
+	if not onlyScenes or onlyScenes["disenchant-helper-goblin"] then
+	do
+		local DH = assert(ns.DisenchantHelper, "ns.DisenchantHelper missing")
+		local db = _G.MerchantMasterDB
+		local econ = ns.CurrentEconomyInfo().effectiveKey
+		local priorContainer = _G.C_Container
+		local priorNumBags = _G.NUM_BAG_SLOTS
+		local priorGetProfs, priorGetProfInfo = _G.GetProfessions, _G.GetProfessionInfo
+		local priorGetSpellBook = _G.GetSpellBookItemInfo
+		local priorSpellBookProf = _G.SpellBookProfessionFrame
+		local priorProf1 = _G.PrimaryProfession1
+		local priorAS = db.disenchantHelperAS
+		local priorPanelShown = app.panel:IsShown()
+
+		-- Seed Enchanting dust/essence/shard AH prices for rich EV numbers
+		local deMatPrices = {
+			[11176] = 1250,  -- Dream Dust
+			[16204] = 1950,  -- Illusion Dust
+			[11175] = 18500, -- Greater Nether Essence
+			[16203] = 44500, -- Greater Eternal Essence
+			[11178] = 32000, -- Large Radiant Shard
+			[14344] = 49500, -- Large Brilliant Shard
+			[14343] = 18000, -- Small Brilliant Shard
+			[11177] = 11500, -- Small Radiant Shard
+			[10940] = 650,   -- Strange Dust
+			[11083] = 950,   -- Soul Dust
+			[11137] = 1450,  -- Vision Dust
+		}
+		local savedMatPrices = {}
+		for id, pr in pairs(deMatPrices) do
+			savedMatPrices[id] = db.ahPrices[econ][id]
+			db.ahPrices[econ][id] = { price = pr, qty = 40, at = simTime - 180 }
+		end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+
+		local deBagItems = {
+			[1] = { itemID = 8191,   stackCount = 1, iconFileID = 134256, hyperlink = "|cff1eff00|Hitem:8191:0:0:0:0:0:42:0|h[Turtle Scale Helm of the Owl]|h|r" },
+			[2] = { itemID = 8206,   stackCount = 1, iconFileID = 134256, hyperlink = "|cff1eff00|Hitem:8206:0:0:0:0:0:19:0|h[Tough Scorpid Leggings of the Tiger]|h|r" },
+			[3] = { itemID = 12428,  stackCount = 1, iconFileID = 136241, hyperlink = "|cff1eff00|Hitem:12428:0:0:0:0:0:11:0|h[Imperial Plate Shoulders]|h|r" },
+			[4] = { itemID = 15083,  stackCount = 1, iconFileID = 134256, hyperlink = "|cff1eff00|Hitem:15083:0:0:0:0:0:27:0|h[Wicked Leather Gauntlets of the Bear]|h|r" },
+			[5] = { itemID = 254123, stackCount = 1, iconFileID = 132641, hyperlink = "|cff1eff00|Hitem:254123:0:0:0:0:0:14:0|h[Runecloth Cuffs of Intellect]|h|r" },
+			[6] = { itemID = 250540, stackCount = 1, iconFileID = 136241, hyperlink = "|cff1eff00|Hitem:250540|h[Shining Mithril Breastplate]|h|r" },
+			[7] = { itemID = 254117, stackCount = 1, iconFileID = 132641, hyperlink = "|cff0070dd|Hitem:254117|h[Radiant Sandals]|h|r" },
+			[8] = { itemID = 285281, stackCount = 1, iconFileID = 135274, hyperlink = "|cff0070dd|Hitem:285281|h[Arcanite Blacksmith Hammer]|h|r" },
+			[9] = { itemID = 250541, stackCount = 1, iconFileID = 136241, hyperlink = "|cff1eff00|Hitem:250541|h[Shining Mithril Pauldrons]|h|r" },
+		}
+		_G.NUM_BAG_SLOTS = 0
+		_G.C_Container = {
+			GetContainerNumSlots = function(b) return b == 0 and #deBagItems or 0 end,
+			GetContainerNumFreeSlots = function() return 10, 0 end,
+			GetContainerItemInfo = function(b, s) return (b == 0) and deBagItems[s] or nil end,
+			GetContainerItemLink = function(b, s) return (b == 0 and deBagItems[s]) and deBagItems[s].hyperlink or nil end,
+		}
+
+		VIEWPORT_W, VIEWPORT_H = 1440, 900
+		_G.UIParent:SetSize(VIEWPORT_W, VIEWPORT_H)
+		applySkin("goblin")
+		app.panel:Hide()
+
+		-- Left side: Blizzard Spellbook Professions panel showing Enchanting -> Disenchant + real MerchantMaster launcher icon
+		local sbProf = makeWidget("Frame", "SpellBookProfessionFrame", _G.UIParent)
+		sbProf:SetSize(480, 420)
+		sbProf:ClearAllPoints()
+		sbProf:SetPoint("LEFT", _G.UIParent, "LEFT", 118, 0)
+		sbProf:SetFrameStrata("MEDIUM")
+		sbProf:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 10 })
+		sbProf:SetBackdropColor(0.08, 0.07, 0.06, 0.96)
+		sbProf:SetBackdropBorderColor(0.62, 0.48, 0.22, 0.94)
+
+		local sbTitle = sbProf:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+		sbTitle:SetPoint("TOPLEFT", sbProf, "TOPLEFT", 20, -18)
+		sbTitle:SetJustifyH("LEFT")
+		sbTitle:SetText("Spellbook & Professions")
+		sbTitle:SetTextColor(0.97, 0.84, 0.49, 1)
+
+		local sbSub = sbProf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		sbSub:SetPoint("TOPLEFT", sbProf, "TOPLEFT", 20, -42)
+		sbSub:SetJustifyH("LEFT")
+		sbSub:SetText("Professions Tab  -  Enchanting Disenchant Launcher")
+		sbSub:SetTextColor(0.68, 0.66, 0.60, 1)
+
+		local p1 = makeWidget("Frame", "PrimaryProfession1", sbProf)
+		p1:SetSize(440, 150)
+		p1:SetPoint("TOPLEFT", sbProf, "TOPLEFT", 20, -76)
+		p1:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 8 })
+		p1:SetBackdropColor(0.11, 0.10, 0.09, 0.95)
+		p1:SetBackdropBorderColor(0.46, 0.36, 0.20, 0.80)
+
+		local p1Ico = p1:CreateTexture(nil, "ARTWORK")
+		p1Ico:SetSize(38, 38)
+		p1Ico:SetPoint("TOPLEFT", p1, "TOPLEFT", 14, -14)
+		p1Ico:SetTexture(136244)
+
+		local p1Title = p1:CreateFontString(nil, "OVERLAY", "GameFontNormalMed3")
+		p1Title:SetPoint("TOPLEFT", p1Ico, "TOPRIGHT", 10, -2)
+		p1Title:SetJustifyH("LEFT")
+		p1Title:SetText("Enchanting")
+		p1Title:SetTextColor(0.98, 0.88, 0.56, 1)
+
+		local p1Rank = p1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		p1Rank:SetPoint("TOPLEFT", p1Title, "BOTTOMLEFT", 0, -4)
+		p1Rank:SetJustifyH("LEFT")
+		p1Rank:SetText("Artisan  300 / 300")
+		p1Rank:SetTextColor(0.50, 0.88, 0.56, 1)
+
+		local topBtn = makeWidget("Button", "PrimaryProfession1SpellButtonTop", p1)
+		topBtn:SetSize(34, 34)
+		topBtn:SetPoint("TOPLEFT", p1, "TOPLEFT", 18, -82)
+		local topTex = topBtn:CreateTexture(nil, "ARTWORK")
+		topTex:SetAllPoints(topBtn)
+		topTex:SetTexture(136244)
+		topBtn.spellString = topBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		topBtn.spellString:SetPoint("LEFT", topBtn, "RIGHT", 8, 0)
+		topBtn.spellString:SetJustifyH("LEFT")
+		topBtn.spellString:SetText("Enchanting")
+		topBtn.spellString:SetTextColor(0.95, 0.94, 0.90, 1)
+
+		local botBtn = makeWidget("Button", "PrimaryProfession1SpellButtonBottom", p1)
+		botBtn:SetSize(34, 34)
+		botBtn:SetPoint("LEFT", topBtn, "RIGHT", 140, 0)
+		local botTex = botBtn:CreateTexture(nil, "ARTWORK")
+		botTex:SetAllPoints(botBtn)
+		botTex:SetTexture(132853)
+		botBtn.spellString = botBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		botBtn.spellString:SetPoint("LEFT", botBtn, "RIGHT", 8, 0)
+		botBtn.spellString:SetJustifyH("LEFT")
+		botBtn.spellString:SetText("Disenchant")
+		botBtn.spellString:SetTextColor(0.95, 0.94, 0.90, 1)
+
+		p1.SpellButtonTop = topBtn
+		p1.SpellButtonBottom = botBtn
+		sbProf.PrimaryProfession1 = p1
+		_G.SpellBookProfessionFrame = sbProf
+		_G.PrimaryProfession1 = p1
+
+		local sbNote = sbProf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		sbNote:SetPoint("TOPLEFT", p1, "BOTTOMLEFT", 4, -18)
+		sbNote:SetPoint("TOPRIGHT", p1, "BOTTOMRIGHT", -4, -18)
+		sbNote:SetJustifyH("LEFT")
+		sbNote:SetWordWrap(true)
+		sbNote:SetText("MerchantMaster mounts a 1-click Disenchant Helper launcher right beside your Disenchant spell in the Professions book and Enchanting window.")
+		sbNote:SetTextColor(0.76, 0.78, 0.80, 1)
+
+		_G.GetProfessions = function() return 1, nil, nil, nil, nil, nil end
+		_G.GetProfessionInfo = function(idx)
+			if idx == 1 then return "Enchanting", 136244, 300, 300, 2, 10, 333 end
+		end
+		_G.GetSpellBookItemInfo = function(slot)
+			if slot == 11 then return "SPELL", 7411 end
+			if slot == 12 then return "SPELL", 13262 end
+		end
+
+		sbProf:Show()
+		solveLayout(false)
+		DH.RefreshProfessionButtons()
+
+		-- Right side: Standalone Goblin Baron Disenchant Helper window
+		DH.Show()
+		DH.ScanBags()
+		DH.SelectAll()
+		DH.SetArcaneSalvager(true)
+		local dhFrame = DH.GetState().frame
+		assert(dhFrame and dhFrame:IsShown(), "disenchant-helper-goblin must open DisenchantHelper frame")
+		dhFrame:ClearAllPoints()
+		dhFrame:SetPoint("LEFT", sbProf, "RIGHT", 64, 0)
+		drainTimers(500)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("disenchant-helper-goblin", dhFrame)
+
+		-- Clean up
+		DH.Hide()
+		sbProf:Hide()
+		_G.SpellBookProfessionFrame = priorSpellBookProf
+		_G.PrimaryProfession1 = priorProf1
+		_G.GetProfessions, _G.GetProfessionInfo = priorGetProfs, priorGetProfInfo
+		_G.GetSpellBookItemInfo = priorGetSpellBook
+		DH.RefreshProfessionButtons()
+		_G.C_Container = priorContainer
+		_G.NUM_BAG_SLOTS = priorNumBags
+		db.disenchantHelperAS = priorAS
+		for id in pairs(deMatPrices) do db.ahPrices[econ][id] = savedMatPrices[id] end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+		if priorPanelShown then app.panel:Show() end
+	end
+	end
+
+	-- mail-helper-goblin (13-baron-mail-helper.png): Console -> Mail presets (Bank, AH, Main Crafter, Professions + Live Mailbox Preview)
+	if not onlyScenes or onlyScenes["mail-helper-goblin"] then
+	do
+		local MH = assert(ns.MailHelper, "ns.MailHelper missing")
+		local db = _G.MerchantMasterDB
+		local priorMailPresets = db.mailPresets and _G.CopyTable(db.mailPresets) or nil
+		local priorChars = db.chars and _G.CopyTable(db.chars) or nil
+		local econ = ns.CurrentEconomyInfo().effectiveKey
+
+		db.chars = db.chars or {}
+		db.chars[econ .. "-Forever-Goldbank"] = { name = "Goldbank", realm = "Forever", economy = econ }
+		db.chars[econ .. "-Forever-Elara Vance"] = { name = "Elara Vance", realm = "Forever", economy = econ }
+		db.chars[econ .. "-Forever-Kazzak"] = { name = "Kazzak", realm = "Forever", economy = econ }
+		db.chars[econ .. "-Forever-Zuljin"] = { name = "Zuljin", realm = "Forever", economy = econ }
+		db.chars[econ .. "-Forever-Tinker"] = { name = "Tinker", realm = "Forever", economy = econ }
+
+		db.mailPresets = nil
+		MH.SetPresetCharacter("bank", "Goldbank")
+		MH.SetPresetCharacter("auction", "Elara Vance")
+		MH.SetPresetCharacter("mainCrafter", "Kazzak")
+		MH.SetPresetCharacter("alchemy", "Grommash")
+		MH.SetPresetCharacter("enchanting", "Zuljin")
+		MH.SetPresetCharacter("engineering", "Tinker")
+		MH.SetPresetCharacter("leatherworking", "Kazzak")
+		MH.SetPresetCharacter("tailoring", "Elara Vance")
+		MH.SetDisplayOption("showIcon", true)
+		MH.SetDisplayOption("showName", true)
+		MH.SetDisplayOption("showRole", true)
+		MH.SetDisplayOption("warnUnsaved", true)
+
+		sizeSkinViewport("goblin")
+		applySkin("goblin")
+		switchTab("console_mail")
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		drainTimers(500)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("mail-helper-goblin")
+
+		db.mailPresets = priorMailPresets
+		db.chars = priorChars
+	end
+	end
+
+	-- sell-helper-goblin (14-baron-sell-helper.png): Standalone Auction House "MM Sell" Tab
+	if not onlyScenes or onlyScenes["sell-helper-goblin"] then
+	do
+		local AHSell = assert(ns.AHSellTab, "ns.AHSellTab missing")
+		local OF = assert(app.orderFlow, "app.orderFlow missing")
+		local priorPanelShown = app.panel:IsShown()
+		local priorContainer = _G.C_Container
+		local priorNumBags = _G.NUM_BAG_SLOTS
+		local priorGetItemInfo = _G.C_Item.GetItemInfo
+		local priorAhf = _G.AuctionHouseFrame
+
+		VIEWPORT_W, VIEWPORT_H = 1440, 900
+		_G.UIParent:SetSize(VIEWPORT_W, VIEWPORT_H)
+		applySkin("goblin")
+		app.panel:Hide()
+
+		-- Seed sellable bag inventory across Consumable, Trade Goods, Armor
+		local sellBagItems = {
+			[1]  = { itemID = 13452, stackCount = 12, quality = 1, classID = 0, maxStack = 20, name = "Elixir of the Mongoose",          iconFileID = "Interface\\Icons\\INV_Potion_32" },
+			[2]  = { itemID = 13454, stackCount = 10, quality = 1, classID = 0, maxStack = 20, name = "Greater Arcane Elixir",           iconFileID = "Interface\\Icons\\INV_Potion_25" },
+			[3]  = { itemID = 13444, stackCount = 20, quality = 1, classID = 0, maxStack = 20, name = "Major Mana Potion",               iconFileID = "Interface\\Icons\\INV_Potion_76" },
+			[4]  = { itemID = 13446, stackCount = 15, quality = 1, classID = 0, maxStack = 20, name = "Major Healing Potion",            iconFileID = "Interface\\Icons\\INV_Potion_54" },
+			[5]  = { itemID = 13512, stackCount = 3,  quality = 1, classID = 0, maxStack = 20, name = "Flask of Supreme Power",          iconFileID = "Interface\\Icons\\INV_Potion_41" },
+			[6]  = { itemID = 5634,  stackCount = 10, quality = 1, classID = 0, maxStack = 20, name = "Free Action Potion",              iconFileID = "Interface\\Icons\\INV_Potion_80" },
+			[7]  = { itemID = 13457, stackCount = 8,  quality = 1, classID = 0, maxStack = 20, name = "Greater Fire Protection Potion",  iconFileID = "Interface\\Icons\\INV_Potion_24" },
+			[8]  = { itemID = 13463, stackCount = 40, quality = 1, classID = 7, maxStack = 20, name = "Dreamfoil",                       iconFileID = "Interface\\Icons\\INV_Misc_Herb_Dreamfoil" },
+			[9]  = { itemID = 13465, stackCount = 24, quality = 1, classID = 7, maxStack = 20, name = "Mountain Silversage",             iconFileID = "Interface\\Icons\\INV_Misc_Herb_MountainSilversage" },
+			[10] = { itemID = 13468, stackCount = 2,  quality = 2, classID = 7, maxStack = 20, name = "Black Lotus",                     iconFileID = "Interface\\Icons\\INV_Misc_Herb_BlackLotus" },
+			[11] = { itemID = 4304,  stackCount = 30, quality = 1, classID = 7, maxStack = 20, name = "Thick Leather",                   iconFileID = "Interface\\Icons\\INV_Misc_LeatherScrap_02" },
+			[12] = { itemID = 10504, stackCount = 1,  quality = 3, classID = 4, maxStack = 1,  name = "Green Lens",                      iconFileID = "Interface\\Icons\\INV_Misc_Lens_01" },
+			[13] = { itemID = 8191,  stackCount = 1,  quality = 2, classID = 4, maxStack = 1,  name = "Turtle Scale Helm",               iconFileID = "Interface\\Icons\\INV_Misc_LeatherScrap_02" },
+		}
+		local sellInfoByID = {}
+		for _, bi in ipairs(sellBagItems) do sellInfoByID[bi.itemID] = bi end
+		_G.NUM_BAG_SLOTS = 0
+		_G.C_Container = {
+			GetContainerNumSlots = function(b) return b == 0 and #sellBagItems or 0 end,
+			GetContainerNumFreeSlots = function() return 8, 0 end,
+			GetContainerItemInfo = function(b, s)
+				local bi = (b == 0) and sellBagItems[s]
+				if not bi then return nil end
+				return {
+					itemID = bi.itemID,
+					stackCount = bi.stackCount,
+					quality = bi.quality,
+					iconFileID = bi.iconFileID,
+					isBound = false,
+					isLocked = false,
+					hyperlink = "|cffffffff|Hitem:" .. bi.itemID .. "::::::::60:::::|h[" .. bi.name .. "]|h|r",
+				}
+			end,
+		}
+		_G.C_Item.GetItemInfo = function(q)
+			local id = tonumber(q) or tonumber(tostring(q or ""):match("item:(%d+)"))
+			local bi = id and sellInfoByID[id]
+			if bi then
+				local cls = (bi.classID == 0 and "Consumable") or (bi.classID == 4 and "Armor") or "Trade Goods"
+				return bi.name, "|cffffffff|Hitem:" .. bi.itemID .. "|h[" .. bi.name .. "]|h|r", bi.quality, 55, 45, cls, cls, bi.maxStack, "", bi.iconFileID, 500, bi.classID, 0, 0
+			end
+			return priorGetItemInfo(q)
+		end
+		_G.GetItemInfo = _G.C_Item.GetItemInfo
+
+		-- Build realistic full AuctionHouseFrame host with native tabs + MM Sell selected
+		local hostAH = makeWidget("Frame", "AuctionHouseFramePreviewSell", _G.UIParent)
+		hostAH:SetSize(1080, 660)
+		hostAH:ClearAllPoints()
+		hostAH:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 12)
+		hostAH:SetFrameStrata("MEDIUM")
+		hostAH:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 10 })
+		hostAH:SetBackdropColor(0.05, 0.06, 0.05, 0.96)
+		hostAH:SetBackdropBorderColor(0.68, 0.52, 0.20, 0.95)
+		function hostAH:SetDisplayMode() end
+		local ahHdr = hostAH:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		ahHdr:SetPoint("TOP", hostAH, "TOP", 0, -6)
+		ahHdr:SetText("MerchantMaster - Sell")
+		ahHdr:SetTextColor(0.97, 0.84, 0.49, 1)
+		hostAH.Tabs = {}
+		local tabNames = { "Buy", "Sell", "Auctions" }
+		for i, lbl in ipairs(tabNames) do
+			local tb = makeWidget("Button", "PreviewAHTab" .. i, hostAH)
+			tb:SetSize(84, 26)
+			if i == 1 then
+				tb:SetPoint("TOPLEFT", hostAH, "BOTTOMLEFT", 14, 0)
+			else
+				tb:SetPoint("TOPLEFT", hostAH.Tabs[i - 1], "TOPRIGHT", 4, 0)
+			end
+			tb:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 6 })
+			tb:SetBackdropColor(0.08, 0.09, 0.08, 0.92)
+			tb:SetBackdropBorderColor(0.45, 0.36, 0.18, 0.85)
+			local tfs = tb:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+			tfs:SetAllPoints(tb)
+			tfs:SetText(lbl)
+			tfs:SetTextColor(0.75, 0.72, 0.65, 1)
+			hostAH.Tabs[i] = tb
+		end
+		hostAH:Show()
+		_G.AuctionHouseFrame = hostAH
+
+		-- Seed OrderFlow Sell stage queue + live competitor listings on active item
+		local st = OF.GetState()
+		st.env.atAH = true
+		st.notice = nil
+		local sl = st.stages.sell
+		sl.duration = 3
+		sl.undercutMode = "1c"
+		sl.activeIndex = 1
+		sl.items = {
+			{
+				key = "sell:13452", itemID = 13452, name = "Elixir of the Mongoose", quality = 1,
+				channel = "ah", status = "ready", isCommodity = true, bag = 0, slot = 1,
+				totalQty = 12, soldQty = 0, remaining = 12, inBags = 12, postQty = 12,
+				liveUnit = 68400, marketRef = 68400, customPrice = nil, listingsScanned = true,
+				currentListings = {
+					{ price = 68399, quantity = 6,  containsOwnerItem = true },
+					{ price = 68400, quantity = 14, containsOwnerItem = false },
+					{ price = 68950, quantity = 10, containsOwnerItem = false },
+					{ price = 69500, quantity = 20, containsOwnerItem = false },
+					{ price = 71000, quantity = 15, containsOwnerItem = false },
+					{ price = 72400, quantity = 8,  containsOwnerItem = false },
+					{ price = 74000, quantity = 25, containsOwnerItem = false },
+				},
+			},
+			{
+				key = "sell:13454", itemID = 13454, name = "Greater Arcane Elixir", quality = 1,
+				channel = "ah", status = "ready", isCommodity = true, bag = 0, slot = 2,
+				totalQty = 10, soldQty = 0, remaining = 10, inBags = 10, postQty = 10,
+				liveUnit = 79500, marketRef = 79500, listingsScanned = true,
+			},
+			{
+				key = "sell:13444", itemID = 13444, name = "Major Mana Potion", quality = 1,
+				channel = "ah", status = "ready", isCommodity = true, bag = 0, slot = 3,
+				totalQty = 20, soldQty = 0, remaining = 20, inBags = 20, postQty = 20,
+				liveUnit = 41500, marketRef = 41500, listingsScanned = true,
+			},
+			{
+				key = "sell:13512", itemID = 13512, name = "Flask of Supreme Power", quality = 1,
+				channel = "ah", status = "ready", isCommodity = true, bag = 0, slot = 5,
+				totalQty = 3, soldQty = 0, remaining = 3, inBags = 3, postQty = 3,
+				liveUnit = 265000, marketRef = 265000, listingsScanned = true,
+			},
+			{
+				key = "sell:10504", itemID = 10504, name = "Green Lens", quality = 3,
+				channel = "ah", status = "ready", isCommodity = false, bag = 0, slot = 12,
+				totalQty = 1, soldQty = 0, remaining = 1, inBags = 1, postQty = 1,
+				liveUnit = 165000, marketRef = 165000, listingsScanned = true,
+			},
+		}
+
+		AHSell.SetSubTab("prices")
+		AHSell.SelectTab()
+		if AHSell.tabButton then
+			AHSell.tabButton:SetSize(84, 26)
+			AHSell.tabButton:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 6 })
+			AHSell.tabButton:SetBackdropColor(0.08, 0.28, 0.16, 0.98)
+			AHSell.tabButton:SetBackdropBorderColor(0.95, 0.78, 0.32, 0.98)
+			local tfs = AHSell.tabButton:GetFontString()
+			if tfs then
+				tfs:SetText("MM Sell")
+				tfs:SetTextColor(1.0, 0.94, 0.72, 1)
+			end
+		end
+		AHSell.Render()
+		drainTimers(500)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("sell-helper-goblin", hostAH)
+
+		-- Clean up
+		AHSell.HideTab()
+		hostAH:Hide()
+		_G.AuctionHouseFrame = priorAhf
+		_G.C_Container = priorContainer
+		_G.NUM_BAG_SLOTS = priorNumBags
+		_G.C_Item.GetItemInfo = priorGetItemInfo
+		_G.GetItemInfo = priorGetItemInfo
+		sl.items = {}
+		if priorPanelShown then app.panel:Show() end
+	end
+	end
+
+	-- sniper-goblin (16-baron-sniper.png): Gap Sniper with multi-tier snapshot order-book depth deals & price ladder
+	if not onlyScenes or onlyScenes["sniper-goblin"] then
+	do
+		local SE = assert(ns.SniperEngine, "ns.SniperEngine missing")
+		local db = _G.MerchantMasterDB
+		local econ = ns.CurrentEconomyInfo().effectiveKey
+		local priorSnapRaw, priorSnapParsed, priorSnapHeat = ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache
+		local priorGapDeals = SE.gapDeals
+		local priorSniperCfg = db.sniper and _G.CopyTable(db.sniper) or nil
+		local priorGetItemInfo = _G.C_Item.GetItemInfo
+		local priorAhPrices = db.ahPrices and db.ahPrices[econ]
+		local savedAhPrices = {}
+
+		-- Seed rich multi-tier DEPTH + LATEST + VELOCITY (milli-units/day) + REGSALE snapshot with clear >35% gap cliffs
+		local gapSeeds = {
+			-- { itemID, name, refPrice, vel1000, tiers = { {price, qty}, ... } }
+			{ 13468, "Black Lotus",                    78000,  18000,  { { 44000, 3 },  { 76500, 12 }, { 79500, 16 }, { 84000, 20 } } },
+			{ 13452, "Elixir of the Mongoose",         72000,  31200,  { { 43500, 6 },  { 70500, 18 }, { 73500, 24 }, { 78000, 30 } } },
+			{ 13454, "Greater Arcane Elixir",          82000,  22000,  { { 50000, 5 },  { 80500, 14 }, { 84500, 20 }, { 89000, 25 } } },
+			{ 13465, "Mountain Silversage",            8400,   160000, { { 4900, 22 },  { 8200, 65 },  { 8700, 80 },  { 9400, 95 } } },
+			{ 13463, "Dreamfoil",                      5400,   190000, { { 3100, 30 },  { 5250, 75 },  { 5700, 90 },  { 6200, 110 } } },
+			{ 13444, "Major Mana Potion",              44000,  42000,  { { 27500, 8 },  { 43000, 28 }, { 45500, 40 }, { 49000, 50 } } },
+			{ 13457, "Greater Fire Protection Potion", 48000,  14500,  { { 29500, 5 },  { 47000, 16 }, { 50000, 22 }, { 54000, 28 } } },
+			{ 4304,  "Thick Leather",                  1100,   68000,  { { 620, 30 },   { 1080, 120 }, { 1200, 150 }, { 1350, 180 } } },
+		}
+		local gapInfoByID = {}
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = {}, {}, {}
+		local lParts, dParts, vParts, rParts = {}, {}, {}, {}
+		for _, gs in ipairs(gapSeeds) do
+			local id, nm, refP, vel100, tiers = gs[1], gs[2], gs[3], gs[4], gs[5]
+			gapInfoByID[id] = { name = nm, icon = guessSkinIconPath(id, nm:lower()) }
+			if priorAhPrices then
+				savedAhPrices[id] = priorAhPrices[id]
+				priorAhPrices[id] = { price = refP, qty = 20, at = simTime - 300 }
+			end
+			local minP = tiers[1][1]
+			local totQ = 0
+			local tSegs = {}
+			for _, t in ipairs(tiers) do
+				totQ = totQ + t[2]
+				tSegs[#tSegs + 1] = baronEnc32(t[1]) .. "," .. baronEnc32(t[2])
+			end
+			lParts[#lParts + 1] = string.format("%d:%s,%s,%s,%s,%s,%s",
+				id, baronEnc32(minP), baronEnc32(refP), baronEnc32(refP),
+				baronEnc32(totQ), baronEnc32(simTime - 300), baronEnc32(refP))
+			dParts[#dParts + 1] = tostring(id) .. ":" .. table.concat(tSegs, "|")
+			vParts[#vParts + 1] = tostring(id) .. ":" .. baronEnc32(vel100) .. "," .. baronEnc32(24) .. "," .. baronEnc32(4) .. "," .. baronEnc32(30)
+			rParts[#rParts + 1] = tostring(id) .. ":" .. baronEnc32(refP) .. "," .. baronEnc32(vel100) .. "," .. baronEnc32(450)
+		end
+		_G.C_Item.GetItemInfo = function(q)
+			local id = tonumber(q) or tonumber(tostring(q or ""):match("item:(%d+)"))
+			local gi = id and gapInfoByID[id]
+			if gi then
+				return gi.name, "|cffffffff|Hitem:" .. id .. "|h[" .. gi.name .. "]|h|r", 1, 55, 45, "Trade Goods", "Herb", 20, "", gi.icon, 250, 7, 0, 0
+			end
+			return priorGetItemInfo(q)
+		end
+		_G.GetItemInfo = _G.C_Item.GetItemInfo
+
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("META", econ,
+			string.format([[return {v=1,updatedAt=%d,source="blizzard",windowDays=30,itemCount=%d,depthCount=%d,velocityCount=%d,regSaleCount=%d,velocityObsHours=24}]],
+				simTime - 300, #gapSeeds, #gapSeeds, #gapSeeds, #gapSeeds))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("LATEST", econ, table.concat(lParts, ";"))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("DEPTH", econ, table.concat(dParts, ";"))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("VELOCITY", econ, table.concat(vParts, ";"))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("REGSALE", econ, table.concat(rParts, ";"))
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+
+		sizeSkinViewport("goblin")
+		applySkin("goblin")
+		switchTab("sniper_gap")
+		SE.ScanSnapshotForGapDeals(econ, { minGapPct = 15, minRoiPct = 15, minProfitCopper = 10000, minDailySales = 1, minQty = 2 })
+		if ns.UISniper and ns.UISniper.Refresh then ns.UISniper.Refresh() end
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		drainTimers(500)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("sniper-goblin")
+
+		SE.ClearGapDeals()
+		SE.gapDeals = priorGapDeals or {}
+		_G.C_Item.GetItemInfo = priorGetItemInfo
+		_G.GetItemInfo = priorGetItemInfo
+		if priorAhPrices then
+			for id in pairs(gapInfoByID) do priorAhPrices[id] = savedAhPrices[id] end
+		end
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = priorSnapRaw, priorSnapParsed, priorSnapHeat
+		db.sniper = priorSniperCfg
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+	end
+	end
+
+	-- console-snapshots-goblin (17-baron-console-snapshots.png): Console -> Snapshot Settings split Windows PowerShell + Linux/Steam Deck view
+	if not onlyScenes or onlyScenes["console-snapshots-goblin"] then
+	do
+		local priorSnapRaw, priorSnapParsed, priorSnapHeat = ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = {}, {}, {}
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+
+		sizeSkinViewport("goblin")
+		applySkin("goblin")
+		switchTab("console_setup")
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		drainTimers(500)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("console-snapshots-goblin")
+
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = priorSnapRaw, priorSnapParsed, priorSnapHeat
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+	end
+	end
 
 	-- ah-minimap-brand: live Auction House SearchBar (28x28 Logo A open button) + live Minimap button (30x30, ring-free).
 	if not onlyScenes or onlyScenes["ah-minimap-brand"] then

@@ -798,6 +798,255 @@ do
     ns.InvalidatePriceCache()
 end
 
+-- 12. Feature B Visual-First Deep Analysis + Chart.lua Fixes + Header Star Button
+do
+    local Chart = assert(ns.Analytics and ns.Analytics.Chart, "ns.Analytics.Chart must exist")
+    local origSkin = Theme.GetSkin and Theme.GetSkin() or "standard"
+    local origMode = Theme.GetMode and Theme.GetMode() or "dark"
+
+    -- 12a. Chart.lua exports, midnight-crossing chronological order, preserveColor, compact resetZoom, empty state
+    check(type(Chart.BuildQuickLookSeries) == "function", "Chart.BuildQuickLookSeries must be exported")
+    local testChart = Chart.CreateLineChart(UIParent, 440, 152, {
+        title = "24h Test",
+        preserveColor = true,
+        preserveOrder = true,
+        compact = true,
+        emptyText = "Custom empty msg",
+    })
+    local midnightPts = {
+        { day = "2026-11-25 22:00", label = "22:00", value = 120000, sortKey = 1795557600 },
+        { day = "2026-11-25 23:00", label = "23:00", value = 115000, sortKey = 1795561200 },
+        { day = "2026-11-26 00:00", label = "00:00", value = 105000, sortKey = 1795564800 },
+        { day = "2026-11-26 01:00", label = "01:00", value = 98000,  sortKey = 1795568400 },
+    }
+    testChart:SetData({ { name = "Sell Price", colorKey = "blue", points = midnightPts } })
+    check(testChart._rawCategories[1] == "2026-11-25 22:00" and testChart._rawCategories[4] == "2026-11-26 01:00",
+        "Midnight-crossing 24h series must remain strictly chronological")
+    check(testChart.xLabels[1]:GetText() == "22:00" and testChart.xLabels[3]:GetText() == "01:00",
+        "formatAxisX must render YYYY-MM-DD HH:00 cleanly as HH:00, got " .. tostring(testChart.xLabels[1]:GetText()) .. " .. " .. tostring(testChart.xLabels[3]:GetText()))
+    local palNow = Theme.GetActivePalette()
+    local c1 = testChart._lastSeries[1] and testChart._lastSeries[1].color
+    check(c1 ~= nil and math.abs(c1[1] - palNow.accentBlue[1]) < 0.001 and math.abs(c1[3] - palNow.accentBlue[3]) < 0.001,
+        "preserveColor=true must keep semantic blue color even on a falling single series")
+    local rzPt = testChart.resetZoom._points and testChart.resetZoom._points[1]
+    check(rzPt ~= nil and rzPt[2] == testChart.plot,
+        "Compact chart resetZoom must anchor inside chart.plot to never overlap summary")
+    testChart:SetData({}, { emptyText = "Need 2+ AH scans" })
+    check(testChart.empty:IsShown() and testChart.empty:GetText() == "Need 2+ AH scans",
+        "Empty chart must show custom emptyText cleanly")
+    -- Theme / skin repaint via Theme.RegisterWidget
+    Theme.SetMode("light")
+    if Theme.SetSkin then Theme.SetSkin("goblin") end
+    if Theme.SetSkin then Theme.SetSkin(origSkin) end
+    Theme.SetMode(origMode)
+    testChart:Hide()
+
+    -- 12b. Header favBtn star toggle with safe Watchlist guard + gold tint sync
+    app.openDeepAnalysis({ kind = "recipe", row = flaskRow, recipe = flaskRow.recipe, itemID = 13512 }, { tab = "recipes", wasQuickLookOpen = false })
+    drain()
+    check(DA.header.favBtn ~= nil and DA.header.favBtn:IsShown(), "DA.header.favBtn must exist and be shown")
+    check(DA.header.favBtn:GetWidth() == 28 and DA.header.favBtn:GetHeight() == 28, "DA.header.favBtn must be 28x28")
+    -- Safe click when ns.Watchlist is absent
+    local origWatchlist = ns.Watchlist
+    ns.Watchlist = nil
+    DA.header.favBtn:Click("LeftButton")
+    check(DA.GetState().favWatched == false, "favBtn must not error when ns.Watchlist is nil")
+    -- Mock Watchlist locally (matching UI_Watchlist.lua IsFavorite/Toggle/RegisterListener contract) and verify toggle + theme sync
+    local watchedMap = {}
+    local wlListeners = {}
+    ns.Watchlist = {
+        Toggle = function(tgt)
+            local id = tgt and (tgt.itemID or (tgt.row and tgt.row.outputItemID)) or 0
+            watchedMap[id] = not watchedMap[id]
+            for _, fn in ipairs(wlListeners) do fn() end
+            return watchedMap[id]
+        end,
+        IsFavorite = function(tgt)
+            local id = tgt and (tgt.itemID or (tgt.row and tgt.row.outputItemID)) or 0
+            return watchedMap[id] == true
+        end,
+        RegisterListener = function(fn)
+            if type(fn) == "function" then wlListeners[#wlListeners + 1] = fn end
+        end,
+    }
+    DA.header.favBtn:Click("LeftButton")
+    check(DA.GetState().favWatched == true and DA.header.favBtn._watched == true,
+        "Clicking favBtn with ns.Watchlist must toggle watched=true")
+    if Theme.SetSkin then Theme.SetSkin("human") end
+    check(DA.header.favBtn._watched == true, "favBtn must preserve watched state across skin switch")
+    DA.header.favBtn:Click("LeftButton")
+    check(DA.GetState().favWatched == false, "Second favBtn click must toggle watched=false")
+    ns.Watchlist = origWatchlist
+    if Theme.SetSkin then Theme.SetSkin(origSkin) end
+    Theme.SetMode(origMode)
+
+    -- 12c. DA.chartsRow dual 24h & 7d charts for recipe, item, and 44px fallback collapse
+    check(DA.chartsRow ~= nil and DA.chartsRow.frame ~= nil, "DA.chartsRow must be exposed")
+    check(DA.chartsRow.chart24h == DA.chart24h and DA.chartsRow.chart7d == DA.chart7d and DA.chartsRow.baselineCard == DA.baselineCard,
+        "DA.chartsRow must expose { frame, chart24h, chart7d, baselineCard }")
+    DA.Render({ kind = "recipe", row = flaskRow, recipe = flaskRow.recipe, itemID = 13512 }, false)
+    local stRec = DA.GetState()
+    check(stRec.chartsCollapsed == false and DA.chart7d:IsShown() and not DA.baselineCard:IsShown(),
+        "Seeded recipe must show chartsRow instead of collapsed baselineCard")
+    check(stRec.charts7dPts >= 2, "Flask 7d chart must have >= 2 points, got " .. tostring(stRec.charts7dPts))
+    check(DA.chart7d._lastSeries and #DA.chart7d._lastSeries >= 2,
+        "Recipe 7d chart must plot dual Sell Price + Craft Cost series")
+
+    -- Side-by-side at 1320x730 & 900x700 (W=882 >= 860), stacked at 720x700 (W=702 < 860)
+    DA.Layout(1320, 730)
+    check(DA.chartsRow.frame:GetHeight() == 152, "chartsRow must be 152px side-by-side at 1320x730")
+    DA.Layout(900, 700)
+    check(DA.chartsRow.frame:GetHeight() == 152 and DA.leftCard:GetWidth() <= 882,
+        "900x700 must never clip horizontally (leftCard W=" .. tostring(DA.leftCard:GetWidth()) .. ")")
+    DA.Layout(720, 700)
+    check(DA.chartsRow.frame:GetHeight() == 314, "chartsRow must stack cleanly (314px) below W=860, got " .. tostring(DA.chartsRow.frame:GetHeight()))
+    DA.Layout(1320, 730)
+
+    -- 12d. Left Card econBarCard (recipe 3-bar vs item range track) + Reagent Cost Share Bars vs hidden on Item
+    local left = DA.leftCard
+    check(left.econBarCard ~= nil and left.econBarCard:IsShown(), "left.econBarCard must be shown")
+    check(left.econBarCard.craftFrame:IsShown() and not left.econBarCard.rangeFrame:IsShown(),
+        "Recipe econBarCard must display 3-bar craft waterfall")
+    check(#left.econBarCard.craftBars == 3, "econBarCard must have 3 craft bars (Craft Cost, Net AH Sale, Net Profit)")
+
+    local foundShareBar, foundPctExt = false, false
+    for _, f in ipairs(createdFrames) do
+        if f._parent == left and f:IsShown() and f._hasShareBar == true then
+            foundShareBar = true
+            if f.shareTrack and f.shareTrack:IsShown() and f.shareFill and f.shareFill:IsShown() then
+                local extTxt = plain(f.extFs and f.extFs:GetText() or "")
+                if extTxt:find("(%d+%%)") then foundPctExt = true end
+            end
+        end
+    end
+    check(foundShareBar and foundPctExt, "Recipe priced reagent rows must show Cost Share bar and (XX%) share on extFs")
+
+    -- 12e. Item view: dual item charts, econBarCard range track, and Cost Share bars explicitly HIDDEN on Used In rows
+    app.openDeepAnalysis({ kind = "item", itemID = 13468, name = "Black Lotus" })
+    drain()
+    local stItem = DA.GetState()
+    check(stItem.chartsCollapsed == false and stItem.charts24Pts >= 2 and stItem.charts7dPts >= 2,
+        "Seeded item Black Lotus must plot both 24h (" .. tostring(stItem.charts24Pts) .. ") and 7d (" .. tostring(stItem.charts7dPts) .. ") trends")
+    check(left.econBarCard.rangeFrame:IsShown() and not left.econBarCard.craftFrame:IsShown(),
+        "Item econBarCard must display Price Range Track")
+    local anyItemShareShown = false
+    for _, f in ipairs(createdFrames) do
+        if f._parent == left and f:IsShown() and f.shareTrack and f.shareTrack:IsShown() then
+            anyItemShareShown = true
+            break
+        end
+    end
+    check(not anyItemShareShown, "Item 'Used in' rows must explicitly hide Cost Share bars")
+
+    -- 12f. Fallback 44px Baseline Card when BOTH 24h and 7d have < 2 points
+    app.openDeepAnalysis({ kind = "item", itemID = 999991, name = "Unscanned Relic" })
+    drain()
+    local stEmpty = DA.GetState()
+    check(stEmpty.chartsCollapsed == true and DA.baselineCard:IsShown() and DA.chartsRow.frame:GetHeight() == 44,
+        "Item with < 2 scan points must collapse chartsRow to 44px baselineCard")
+    check(not DA.chart24h:IsShown() and not DA.chart7d:IsShown(),
+        "Collapsed chartsRow must hide both line charts cleanly")
+    local baseStrip = plain(DA.baselineCard.stripFs:GetText())
+    local baseHint = plain(DA.baselineCard.hintFs:GetText())
+    check(baseStrip:find("Vendor Floor", 1, true) ~= nil and baseStrip:find("Live AH", 1, true) ~= nil and baseStrip:find("24h Deposit", 1, true) ~= nil,
+        "Baseline card must display Vendor Floor -> Live AH -> 24h Deposit, got: " .. baseStrip)
+    check(baseHint:find("Run 2+ AH scans over time", 1, true) ~= nil,
+        "Baseline card must show clean AH scan hint without snapshot nag, got: " .. baseHint)
+
+    -- 12g. Right Column: compCard heat bar + Unscanned, ledgerCard zero-trade vs seeded trades + nil guards, acqCard pills
+    check(DA.compCard.heatBar ~= nil and #DA.compCard.heatTiers == 4, "compCard must have 4-tier Demand Heat Bar")
+    local compTxt = plain(DA.compCard.bodyFs:GetText())
+    check(compTxt:find("Seller Stats:", 1, true) ~= nil and compTxt:find("Unscanned", 1, true) ~= nil and not compTxt:find("n/a", 1, true),
+        "compCard must show 'Unscanned' instead of 'n/a' and keep 'Seller Stats:', got: " .. compTxt)
+
+    -- Ledger card with zero trades
+    check(not DA.ledgerCard.horizonFrame:IsShown() and DA.ledgerCard.emptyTradesFs:IsShown(),
+        "ledgerCard with 0 personal trades must hide Profit Horizon bars and show emptyTradesFs")
+    check(DA.ledgerCard.stockRow:IsShown() and #DA.ledgerCard.stockChips == 4,
+        "ledgerCard must always render 4 Cross-Alt Stock chips (Bags, Bank, Mail, AH)")
+    check(plain(DA.ledgerCard.bodyFs:GetText()) ~= "", "ledgerCard.bodyFs must stay populated even with 0 trades")
+
+    -- Ledger card with seeded personal trades + nil inventory/isSlowing guard
+    local origGetItemDetail = ns.Analytics and ns.Analytics.Model and ns.Analytics.Model.GetItemDetail
+    if ns.Analytics and ns.Analytics.Model then
+        ns.Analytics.Model.GetItemDetail = function()
+            return {
+                windows = {
+                    d7  = { sold = 5, bought = 2, avgSell = 685000, profit = 420000 },
+                    d30 = { sold = 18, bought = 6, avgSell = 660000, profit = 1350000 },
+                    all = { sold = 44, bought = 12, avgSell = 650000, profit = 3100000 },
+                },
+                saleRate = 0.72,
+                expSinceSale = 1,
+                canSinceSale = 2,
+                isSlowing = false,
+                inventory = { bags = 3, bank = 8, mail = 1, ah = 4, total = 16 },
+            }
+        end
+        DA.Render({ kind = "recipe", row = flaskRow, recipe = flaskRow.recipe, itemID = 13512 }, false)
+        check(DA.ledgerCard.horizonFrame:IsShown() and not DA.ledgerCard.emptyTradesFs:IsShown(),
+            "ledgerCard with trades must show 3-column Profit Horizon bars")
+        check(DA.ledgerCard.saleRateRow:IsShown(), "ledgerCard with trades must show 180d Sale-Rate ProgressBar")
+        check(plain(DA.ledgerCard.stockChips[1].lblFs:GetText()) == "Bags 3"
+            and plain(DA.ledgerCard.stockChips[2].lblFs:GetText()) == "Bank 8"
+            and plain(DA.ledgerCard.stockChips[3].lblFs:GetText()) == "Mail 1"
+            and plain(DA.ledgerCard.stockChips[4].lblFs:GetText()) == "AH 4",
+            "ledgerCard stock chips must reflect cross-alt Bags/Bank/Mail/AH counts")
+
+        -- Guard nil inventory & nil isSlowing
+        ns.Analytics.Model.GetItemDetail = function()
+            return {
+                windows = { d7 = {}, d30 = {}, all = { sold = 1, bought = 0, profit = 5000 } },
+                saleRate = nil,
+                isSlowing = nil,
+                inventory = nil,
+            }
+        end
+        DA.Render({ kind = "recipe", row = flaskRow, recipe = flaskRow.recipe, itemID = 13512 }, false)
+        check(DA.ledgerCard.horizonFrame:IsShown() and plain(DA.ledgerCard.bodyFs:GetText()) ~= "",
+            "ledgerCard must gracefully guard nil inventory, nil saleRate, and nil isSlowing")
+        ns.Analytics.Model.GetItemDetail = origGetItemDetail
+    end
+
+    -- acqCard pills shown for recipe
+    check(DA.acqCard.pillRow ~= nil and DA.acqCard.pillRow:IsShown() and DA.acqCard.pills[1].frame:IsShown(),
+        "acqCard must render structured status pills for recipes")
+    check(plain(DA.acqCard.bodyFs:GetText()):find("Source:", 1, true) ~= nil,
+        "acqCard must preserve 'Source:' line for recipes")
+
+    -- 12h. Hidden theme switch sets dirtyThemeRender instead of eagerly rendering; OnShow clears it
+    DA.frame:Hide()
+    Theme.SetMode("light")
+    check(DA.GetState().dirtyThemeRender == true,
+        "Theme switch while DeepAnalysis hidden must defer render via dirtyThemeRender=true")
+    DA.frame:Show()
+    check(DA.GetState().dirtyThemeRender == false,
+        "Showing DeepAnalysis frame must flush dirtyThemeRender cleanly")
+
+    -- Full viewport x skin sweep on new visual panels
+    for _, sz in ipairs({ { 900, 700 }, { 1320, 730 }, { 1920, 1080 } }) do
+        DA.Layout(sz[1], sz[2])
+        check(DA.chartsRow.frame:GetWidth() <= sz[1] - 18 and DA.leftCard:GetWidth() <= sz[1] - 18,
+            "All visual cards must fit within viewport at " .. sz[1] .. "x" .. sz[2])
+    end
+    for _, mode in ipairs({ "dark", "light" }) do
+        if Theme.SetSkin then Theme.SetSkin("standard") end
+        Theme.SetMode(mode)
+        check(DA.chartsRow.frame:IsShown() and DA.leftCard.econBarCard:IsShown() and DA.compCard.heatBar:IsShown(),
+            "All Feature B visual panels must repaint cleanly in standard/" .. mode)
+    end
+    for _, skin in ipairs({ "human", "night_elf", "orc", "undead", "goblin" }) do
+        if Theme.SetSkin then Theme.SetSkin(skin) end
+        check(DA.chartsRow.frame:IsShown() and DA.leftCard.econBarCard:IsShown() and DA.compCard.heatBar:IsShown(),
+            "All Feature B visual panels must repaint cleanly in skin=" .. skin)
+    end
+
+    app.setTab("dashboard")
+    drain()
+    if Theme.SetSkin then Theme.SetSkin(origSkin) end
+    Theme.SetMode(origMode)
+end
+
 -- Restore globals
 C_Timer.After = origAfter
 _G.time = origTime

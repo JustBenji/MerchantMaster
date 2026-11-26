@@ -113,6 +113,9 @@ local state = {
     statusText = "Ready",
     statusKind = "muted",
     lastCheckInboxAt = 0,
+    presetPage = 1,
+    pendingConfirm = nil,
+    bypassConfirmRecipient = nil,
 }
 
 function MH.IsActive()
@@ -133,6 +136,11 @@ function MH.GetState()
         skippedBagsFull = state.skippedBagsFull,
         statusText = state.statusText,
         lastCheckInboxAt = state.lastCheckInboxAt,
+        presetPage = state.presetPage,
+        presetsPanelShown = (MH.presetsPanel ~= nil and MH.presetsPanel.IsShown and MH.presetsPanel:IsShown()) == true,
+        inboxQuickStripShown = (MH.inboxQuickStrip ~= nil and MH.inboxQuickStrip.IsShown and MH.inboxQuickStrip:IsShown()) == true,
+        pendingConfirm = state.pendingConfirm and state.pendingConfirm.recipient or nil,
+        bypassConfirmRecipient = state.bypassConfirmRecipient,
     }
 end
 
@@ -616,6 +624,1064 @@ local function makeBarButton(parent, label, w, h, variant, onClick)
     return btn
 end
 
+-- =========================================================================
+-- Mail Recipients Presets, Quick-Pick Panels & Unsaved-Recipient Safety Net
+-- =========================================================================
+
+MH.UNSAVED_CONFIRM_POPUP = "MERCHANTMASTER_CONFIRM_UNSAVED_MAIL"
+MH.PRESET_PAGE_SIZE = 8
+
+MH.PRESET_ROLE_DEFS = {
+    { key = "bank",           label = "Bank",           shortLabel = "Bank",      icon = 133784, group = "core" },
+    { key = "auction",        label = "Auction",        shortLabel = "AH",        icon = 133785, group = "core" },
+    { key = "mainCrafter",    label = "Main Crafter",   shortLabel = "Crafter",   icon = 136241, group = "core" },
+    { key = "alchemy",        label = "Alchemy",        shortLabel = "Alch",      icon = 136240, group = "profession" },
+    { key = "blacksmithing",  label = "Blacksmithing",  shortLabel = "BS",        icon = 136241, group = "profession" },
+    { key = "enchanting",     label = "Enchanting",     shortLabel = "Ench",      icon = 136244, group = "profession" },
+    { key = "engineering",    label = "Engineering",    shortLabel = "Eng",       icon = 136243, group = "profession" },
+    { key = "leatherworking", label = "Leatherworking", shortLabel = "LW",        icon = 136247, group = "profession" },
+    { key = "tailoring",      label = "Tailoring",      shortLabel = "Tailor",    icon = 136249, group = "profession" },
+    { key = "cooking",        label = "Cooking",        shortLabel = "Cook",      icon = 133971, group = "profession" },
+    { key = "firstaid",       label = "First Aid",      shortLabel = "First Aid", icon = 135966, group = "profession" },
+}
+
+MH.PROFESSION_ROLE_KEYS = {
+    "alchemy", "blacksmithing", "enchanting", "engineering",
+    "leatherworking", "tailoring", "cooking", "firstaid",
+}
+
+local CORE_ROLE_MAP = { bank = true, auction = true, mainCrafter = true }
+local PROF_ROLE_MAP = {
+    alchemy = true, blacksmithing = true, enchanting = true, engineering = true,
+    leatherworking = true, tailoring = true, cooking = true, firstaid = true,
+}
+local DISPLAY_OPTION_KEYS = {
+    showIcon = true,
+    showName = true,
+    showRole = true,
+    warnUnsaved = true,
+}
+
+local function trimOuter(raw)
+    if hasSecret(raw) or type(raw) ~= "string" then return "" end
+    return (raw:match("^%s*(.-)%s*$")) or ""
+end
+
+local function getCurrentRealmParts()
+    local rawRealm = (_G.GetRealmName and _G.GetRealmName()) or ""
+    if hasSecret(rawRealm) or type(rawRealm) ~= "string" then
+        rawRealm = ""
+    end
+    rawRealm = trimOuter(rawRealm)
+    local compactRealm = rawRealm:gsub("%s+", "")
+    return rawRealm, compactRealm
+end
+
+-- WoW Forever surname-safe normalization:
+-- trims outer spaces only, preserves internal surname space ("First Last"),
+-- strips "-CurrentRealm" case-insensitively (both raw and whitespace-compacted realm).
+local function normalizeName(raw)
+    local trimmed = trimOuter(raw)
+    if trimmed == "" then return "" end
+    local base, suffix = trimmed:match("^(.-)%-([^%-]+)$")
+    if base and base ~= "" and suffix and suffix ~= "" then
+        local rawRealm, compactRealm = getCurrentRealmParts()
+        if rawRealm ~= "" then
+            local sufLow = string.lower(trimOuter(suffix))
+            local sufCompact = string.lower(suffix:gsub("%s+", ""))
+            if sufLow == string.lower(rawRealm)
+                or sufLow == string.lower(compactRealm)
+                or sufCompact == string.lower(compactRealm) then
+                return trimOuter(base)
+            end
+        end
+    end
+    return trimmed
+end
+
+MH.NormalizeCharacterName = normalizeName
+
+local function canonicalKey(raw)
+    local norm = normalizeName(raw)
+    if norm == "" then return "" end
+    return string.lower(norm)
+end
+
+local function computeInitials(name)
+    local norm = normalizeName(name)
+    if norm == "" then return "??" end
+    local w1, w2 = norm:match("^([^%s]+)%s+([^%s]+)")
+    if w1 and w2 then
+        return string.upper(w1:sub(1, 1) .. w2:sub(1, 1))
+    end
+    local base = norm:match("^([^%-]+)") or norm
+    if #base >= 2 then
+        return string.upper(base:sub(1, 2))
+    end
+    return string.upper(base:sub(1, 1))
+end
+
+local function resolveEconKey(econKey)
+    if not hasSecret(econKey) and type(econKey) == "string" and econKey ~= "" then
+        return econKey
+    end
+    if type(ns.CurrentEconomyInfo) == "function" then
+        local ok, info = pcall(ns.CurrentEconomyInfo)
+        if ok and type(info) == "table" and type(info.key) == "string" and info.key ~= "" then
+            return info.key
+        end
+    end
+    if type(ns.DetectActiveEconomy) == "function" then
+        local ok, econ = pcall(ns.DetectActiveEconomy)
+        if ok and not hasSecret(econ) and type(econ) == "string" and econ ~= "" then
+            return econ
+        end
+    end
+    if ns.app and type(ns.app.char) == "table" and type(ns.app.char.economy) == "string" and ns.app.char.economy ~= "" then
+        return ns.app.char.economy
+    end
+    return "Normal-Horde"
+end
+
+local function getCurrentPlayerName()
+    if type(ns.GetPlayerFullName) == "function" then
+        local ok, full = pcall(ns.GetPlayerFullName)
+        if ok and not hasSecret(full) and type(full) == "string" and trimOuter(full) ~= "" then
+            return normalizeName(full)
+        end
+    end
+    if type(_G.UnitName) == "function" then
+        local ok, uName, uSecond = pcall(_G.UnitName, "player")
+        if ok and not hasSecret(uName, uSecond) and type(uName) == "string" and trimOuter(uName) ~= "" then
+            if _G.RegionalUniqueNamesEnabled and _G.RegionalUniqueNamesEnabled()
+                and type(uSecond) == "string" and trimOuter(uSecond) ~= "" then
+                return normalizeName(uName .. " " .. uSecond)
+            end
+            return normalizeName(uName)
+        end
+    end
+    if ns.app and type(ns.app.char) == "table" and type(ns.app.char.name) == "string" and trimOuter(ns.app.char.name) ~= "" then
+        return normalizeName(ns.app.char.name)
+    end
+    return ""
+end
+
+local function ensureEconTable(byEcon, econKey)
+    local rec = byEcon[econKey]
+    if type(rec) ~= "table" then
+        rec = {}
+        byEcon[econKey] = rec
+    end
+    if type(rec.bank) ~= "string" then rec.bank = "" end
+    if type(rec.auction) ~= "string" then rec.auction = "" end
+    if type(rec.mainCrafter) ~= "string" then rec.mainCrafter = "" end
+    if type(rec.professions) ~= "table" then rec.professions = {} end
+    for _, pk in ipairs(MH.PROFESSION_ROLE_KEYS) do
+        if type(rec.professions[pk]) ~= "string" then
+            rec.professions[pk] = ""
+        end
+    end
+    return rec
+end
+
+function MH.GetMailPresetsConfig()
+    if type(_G.MerchantMasterDB) ~= "table" then
+        _G.MerchantMasterDB = {}
+    end
+    local db = _G.MerchantMasterDB
+    if type(db.mailPresets) ~= "table" then
+        db.mailPresets = {}
+    end
+    local cfg = db.mailPresets
+    if type(cfg.display) ~= "table" then
+        cfg.display = {}
+    end
+    if cfg.display.showIcon == nil then cfg.display.showIcon = true end
+    if cfg.display.showName == nil then cfg.display.showName = true end
+    if cfg.display.showRole == nil then cfg.display.showRole = true end
+    if cfg.display.warnUnsaved == nil then cfg.display.warnUnsaved = true end
+    if type(cfg.byEcon) ~= "table" then
+        cfg.byEcon = {}
+    end
+    return cfg
+end
+
+function MH.GetActiveEconPresets(econKey)
+    local cfg = MH.GetMailPresetsConfig()
+    local resolved = resolveEconKey(econKey)
+    return ensureEconTable(cfg.byEcon, resolved), resolved
+end
+
+function MH.GetDisplayOptions()
+    local cfg = MH.GetMailPresetsConfig()
+    return cfg.display
+end
+
+function MH.SetDisplayOption(key, val)
+    if not DISPLAY_OPTION_KEYS[key] then return nil end
+    local cfg = MH.GetMailPresetsConfig()
+    cfg.display[key] = (val == true)
+    MH.RefreshPresetsUI()
+    return cfg.display[key]
+end
+
+function MH.SetPresetCharacter(roleKey, charName, econKey)
+    if type(roleKey) ~= "string" then return "" end
+    local econ = MH.GetActiveEconPresets(econKey)
+    local norm = normalizeName(charName)
+    if CORE_ROLE_MAP[roleKey] then
+        econ[roleKey] = norm
+    else
+        local profKey = roleKey:match("^professions%.(.+)$") or roleKey
+        if PROF_ROLE_MAP[profKey] then
+            econ.professions[profKey] = norm
+        else
+            return ""
+        end
+    end
+    MH.RefreshPresetsUI()
+    return norm
+end
+
+function MH.BuildPresetRecipientEntries(econKey)
+    local econ = MH.GetActiveEconPresets(econKey)
+    local playerKey = canonicalKey(getCurrentPlayerName())
+    local entries = {}
+    local byKey = {}
+
+    for _, def in ipairs(MH.PRESET_ROLE_DEFS) do
+        local raw = (def.group == "core") and econ[def.key] or (econ.professions and econ.professions[def.key])
+        local norm = normalizeName(raw)
+        if norm ~= "" then
+            local key = string.lower(norm)
+            local existing = byKey[key]
+            if not existing then
+                existing = {
+                    key = key,
+                    name = norm,
+                    icon = def.icon,
+                    primaryRole = def.key,
+                    roles = { def.label },
+                    roleKeys = { def.key },
+                    isSelf = (playerKey ~= "" and key == playerKey),
+                    initials = computeInitials(norm),
+                }
+                byKey[key] = existing
+                entries[#entries + 1] = existing
+            else
+                local dup = false
+                for _, rk in ipairs(existing.roleKeys) do
+                    if rk == def.key then dup = true; break end
+                end
+                if not dup then
+                    existing.roles[#existing.roles + 1] = def.label
+                    existing.roleKeys[#existing.roleKeys + 1] = def.key
+                end
+            end
+        end
+    end
+
+    for _, e in ipairs(entries) do
+        e.allRolesText = table.concat(e.roles, ", ")
+        if #e.roles <= 2 then
+            e.roleLabel = table.concat(e.roles, " / ")
+        else
+            e.roleLabel = e.roles[1] .. " / " .. e.roles[2] .. " (+" .. tostring(#e.roles - 2) .. " more)"
+        end
+    end
+    return entries
+end
+
+function MH.IsSavedMailRecipient(name, econKey)
+    local key = canonicalKey(name)
+    if key == "" then return false, nil end
+    local entries = MH.BuildPresetRecipientEntries(econKey)
+    for _, entry in ipairs(entries) do
+        if entry.key == key then
+            return true, entry
+        end
+    end
+    return false, nil
+end
+
+function MH.GetKnownEconomyCharacters(econKey)
+    local econ, resolved = MH.GetActiveEconPresets(econKey)
+    local playerName = getCurrentPlayerName()
+    local playerKey = canonicalKey(playerName)
+    local seen = {}
+    local out = {}
+
+    local function addChar(rawName, realm)
+        local norm = normalizeName(rawName)
+        if norm == "" then return end
+        local key = string.lower(norm)
+        if seen[key] then return end
+        seen[key] = true
+        out[#out + 1] = {
+            name = norm,
+            key = key,
+            isSelf = (playerKey ~= "" and key == playerKey),
+            realm = realm,
+        }
+    end
+
+    if playerName ~= "" then
+        addChar(playerName)
+    end
+
+    local chars = type(_G.MerchantMasterDB) == "table" and _G.MerchantMasterDB.chars
+    if type(chars) == "table" then
+        local econPrefix = resolved .. "-"
+        for cKey, rec in pairs(chars) do
+            if type(rec) == "table" then
+                local recEcon = rec.economy
+                local matches = (recEcon == resolved)
+                    or (recEcon == nil and type(cKey) == "string" and cKey:sub(1, #econPrefix) == econPrefix)
+                if matches and type(rec.name) == "string" and rec.name ~= "" then
+                    addChar(rec.name, rec.realm)
+                end
+            end
+        end
+    end
+
+    for _, def in ipairs(MH.PRESET_ROLE_DEFS) do
+        local raw = (def.group == "core") and econ[def.key] or (econ.professions and econ.professions[def.key])
+        if type(raw) == "string" and raw ~= "" then
+            addChar(raw)
+        end
+    end
+
+    table.sort(out, function(a, b)
+        if a.isSelf ~= b.isSelf then return a.isSelf end
+        return a.key < b.key
+    end)
+    return out
+end
+
+function MH.HasSendMailItems()
+    local maxSlots = tonumber(_G.ATTACHMENTS_MAX_SEND) or 12
+    local getItem = _G.GetSendMailItem
+    local getLink = _G.GetSendMailItemLink
+    for slot = 1, maxSlots do
+        if type(getItem) == "function" then
+            local name, itemID, texture, count = getItem(slot)
+            if not hasSecret(name, itemID, texture, count) then
+                if (type(name) == "string" and name ~= "")
+                    or (tonumber(itemID) and tonumber(itemID) > 0)
+                    or (tonumber(count) and tonumber(count) > 0) then
+                    return true, slot
+                end
+            end
+        end
+        if type(getLink) == "function" then
+            local link = getLink(slot)
+            if not hasSecret(link) and type(link) == "string" and link ~= "" then
+                return true, slot
+            end
+        end
+    end
+    return false, nil
+end
+
+local function clearUnsavedConfirm()
+    state.pendingConfirm = nil
+    state.bypassConfirmRecipient = nil
+    if type(_G.StaticPopup_Hide) == "function" then
+        pcall(_G.StaticPopup_Hide, MH.UNSAVED_CONFIRM_POPUP)
+    end
+end
+
+local function ensureUnsavedConfirmDialog()
+    if type(_G.StaticPopupDialogs) ~= "table" then
+        _G.StaticPopupDialogs = {}
+    end
+    _G.StaticPopupDialogs[MH.UNSAVED_CONFIRM_POPUP] = {
+        text = "Are you sure you want to send items towards this character?\n\nRecipient: %s\n(Not in your saved Mail Recipients list)",
+        button1 = "I am aware",
+        button2 = "No",
+        timeout = 0,
+        whileDead = 1,
+        hideOnEscape = 1,
+        exclusive = 1,
+        OnAccept = function()
+            local pending = state.pendingConfirm
+            state.pendingConfirm = nil
+            if not pending then return end
+            local box = _G.SendMailNameEditBox
+            local curRaw = (box and box.GetText and box:GetText()) or ""
+            local curTrim = trimOuter(curRaw)
+            if curTrim == "" or canonicalKey(curTrim) ~= canonicalKey(pending.recipient) then
+                state.bypassConfirmRecipient = nil
+                return
+            end
+            if not MH.HasSendMailItems() then
+                state.bypassConfirmRecipient = nil
+                return
+            end
+            local btn = pending.button or _G.SendMailMailButton
+            local orig = (btn and btn._mmOrigOnClick) or state.sendButtonOrigOnClick
+            state.bypassConfirmRecipient = canonicalKey(curTrim)
+            if type(orig) == "function" then
+                pcall(orig, btn, "LeftButton")
+            end
+            state.bypassConfirmRecipient = nil
+        end,
+        OnCancel = function()
+            state.pendingConfirm = nil
+            state.bypassConfirmRecipient = nil
+        end,
+        OnHide = function()
+            state.pendingConfirm = nil
+            state.bypassConfirmRecipient = nil
+        end,
+    }
+end
+
+local function shouldInterceptUnsavedSend()
+    local disp = MH.GetDisplayOptions()
+    if not disp or disp.warnUnsaved ~= true then
+        return false, nil
+    end
+    if not MH.HasSendMailItems() then
+        return false, nil
+    end
+    local box = _G.SendMailNameEditBox
+    local raw = (box and box.GetText and box:GetText()) or ""
+    local trimmed = trimOuter(raw)
+    if trimmed == "" then
+        return false, nil
+    end
+    local key = canonicalKey(trimmed)
+    if state.bypassConfirmRecipient and state.bypassConfirmRecipient == key then
+        return false, nil
+    end
+    if MH.IsSavedMailRecipient(trimmed) then
+        return false, nil
+    end
+    return true, trimmed
+end
+
+local function hookBlizzardMailVisibility()
+    local function hookShowHide(frame)
+        if not frame or frame._mmPresetsVisHooked then return end
+        if type(frame.HookScript) ~= "function" then return end
+        frame._mmPresetsVisHooked = true
+        frame:HookScript("OnShow", function() MH.RefreshPresetsUI() end)
+        frame:HookScript("OnHide", function() MH.RefreshPresetsUI() end)
+    end
+    hookShowHide(_G.SendMailFrame)
+    hookShowHide(_G.InboxFrame)
+    hookShowHide(_G.OpenMailFrame)
+
+    local nameBox = _G.SendMailNameEditBox
+    if nameBox and not nameBox._mmPresetsTextHooked and type(nameBox.HookScript) == "function" then
+        nameBox._mmPresetsTextHooked = true
+        nameBox:HookScript("OnTextChanged", function()
+            clearUnsavedConfirm()
+            MH.RefreshPresetsUI()
+        end)
+    end
+
+    for _, tabName in ipairs({ "MailFrameTab1", "MailFrameTab2" }) do
+        local tabBtn = _G[tabName]
+        if tabBtn and not tabBtn._mmPresetsTabHooked and type(tabBtn.HookScript) == "function" then
+            tabBtn._mmPresetsTabHooked = true
+            tabBtn:HookScript("OnClick", function() MH.RefreshPresetsUI() end)
+        end
+    end
+end
+
+function MH.InstallSendMailGuard()
+    ensureUnsavedConfirmDialog()
+    hookBlizzardMailVisibility()
+
+    local btn = _G.SendMailMailButton
+    if btn and not btn._mmUnsavedHooked and type(btn.GetScript) == "function" and type(btn.SetScript) == "function" then
+        local origOnClick = btn:GetScript("OnClick")
+        btn._mmUnsavedHooked = true
+        btn._mmOrigOnClick = origOnClick
+        state.sendButtonOrigOnClick = origOnClick
+        btn:SetScript("OnClick", function(self, mouseBtn, down)
+            local intercept, recipient = shouldInterceptUnsavedSend()
+            if intercept then
+                state.pendingConfirm = { recipient = recipient, button = self }
+                if type(_G.StaticPopup_Show) == "function" then
+                    _G.StaticPopup_Show(MH.UNSAVED_CONFIRM_POPUP, recipient)
+                end
+                return
+            end
+            state.bypassConfirmRecipient = nil
+            if type(origOnClick) == "function" then
+                return origOnClick(self, mouseBtn, down)
+            end
+        end)
+    end
+end
+
+local function attachMailTooltip(widget, getTitle, getLines)
+    if not widget or type(widget.SetScript) ~= "function" then return end
+    local onEnter = function(self)
+        local gt = _G.GameTooltip
+        if not gt or type(gt.SetOwner) ~= "function" then return end
+        local title = type(getTitle) == "function" and getTitle(self) or getTitle
+        if not title or title == "" then return end
+        local lines = type(getLines) == "function" and getLines(self) or getLines
+        gt:SetOwner(self, "ANCHOR_RIGHT")
+        gt:AddLine(title, 1, 0.82, 0)
+        for _, ln in ipairs(lines or {}) do
+            gt:AddLine(tostring(ln), 0.9, 0.92, 0.96, true)
+        end
+        gt:Show()
+    end
+    local onLeave = function()
+        if type(_G.GameTooltip_Hide) == "function" then
+            _G.GameTooltip_Hide()
+        elseif _G.GameTooltip and type(_G.GameTooltip.Hide) == "function" then
+            _G.GameTooltip:Hide()
+        end
+    end
+    if type(widget.HookScript) == "function" then
+        widget:HookScript("OnEnter", onEnter)
+        widget:HookScript("OnLeave", onLeave)
+    else
+        widget:SetScript("OnEnter", onEnter)
+        widget:SetScript("OnLeave", onLeave)
+    end
+end
+
+local function applyPresetRecipient(charName, focusSubject)
+    clearUnsavedConfirm()
+    local nameBox = _G.SendMailNameEditBox
+    if nameBox and type(nameBox.SetText) == "function" then
+        nameBox:SetText(charName or "")
+    end
+    if type(_G.SendMailFrame_CanSend) == "function" then
+        pcall(_G.SendMailFrame_CanSend)
+    end
+    if focusSubject then
+        local subj = _G.SendMailSubjectEditBox
+        if subj and type(subj.SetFocus) == "function" then
+            pcall(subj.SetFocus, subj)
+        end
+    end
+    MH.RefreshPresetsUI()
+end
+
+local function openMailSettingsTab()
+    if ns.app and type(ns.app.togglePanel) == "function" then
+        ns.app.togglePanel("console_mail")
+    elseif ns.UIConsole and type(ns.UIConsole.Show) == "function" then
+        ns.UIConsole.Show("console_mail")
+    end
+end
+
+local function safeShow(w)
+    if w and type(w.Show) == "function" then w:Show() end
+end
+
+local function safeHide(w)
+    if w and type(w.Hide) == "function" then w:Hide() end
+end
+
+local function paintSurfaceFallback(surf)
+    if not surf then return end
+    local p = getPalette()
+    if type(surf.UpdateTheme) == "function" then
+        surf:UpdateTheme()
+        return
+    end
+    if surf.SetFill and p.cardBg then
+        surf:SetFill(p.cardBg[1], p.cardBg[2], p.cardBg[3], p.cardBg[4] or 0.96)
+    end
+    if surf.SetBorder and p.borderStrong then
+        surf:SetBorder(p.borderStrong[1], p.borderStrong[2], p.borderStrong[3], p.borderStrong[4] or 0.22)
+    end
+    if surf.SetColors and p.cardBg and p.borderStrong then
+        surf:SetColors(p.cardBg, p.borderStrong)
+    end
+end
+
+local function createPresetsPanel(mf)
+    local panel = _G.CreateFrame("Frame", "MerchantMasterMailPresetsPanel", mf)
+    panel:SetWidth(202)
+    panel:SetHeight(120)
+    panel:SetPoint("TOPLEFT", mf, "TOPRIGHT", 4, 0)
+    panel:Hide()
+
+    local theme = ns.Theme
+    if theme and type(theme.NineApple) == "function" then
+        panel._bgSurf = theme.NineApple(panel, "glass_r12", "cardBg", "borderStrong", { noSpecular = true })
+    end
+
+    local titleFs = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    titleFs:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -9)
+    titleFs:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -32, -9)
+    if titleFs.SetJustifyH then titleFs:SetJustifyH("LEFT") end
+    if theme and type(theme.ApplyFont) == "function" then
+        theme.ApplyFont(titleFs, 12, "semibold")
+    end
+    titleFs:SetText("Mail Recipients")
+    panel.titleFs = titleFs
+
+    local gearBtn
+    if theme and type(theme.CreatePlateButton) == "function" then
+        gearBtn = theme.CreatePlateButton(panel, "", 20, 20, {
+            icon = (theme.ASSETS and theme.ASSETS.icon_settings) or nil,
+            iconSize = 12,
+            variant = "ghost",
+            pill = true,
+        })
+        if not (theme.ASSETS and theme.ASSETS.icon_settings) and gearBtn.fs then
+            gearBtn.fs:SetText("*")
+        end
+    else
+        gearBtn = makeBarButton(panel, "Cfg", 28, 20, "secondary", openMailSettingsTab)
+    end
+    gearBtn:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -8, -6)
+    gearBtn:SetScript("OnClick", openMailSettingsTab)
+    attachMailTooltip(gearBtn, "Mail Recipients & Safety", {
+        "Open Console -> Mail to edit saved recipients, display options, and the unsaved-recipient popup.",
+    })
+    panel.settingsBtn = gearBtn
+
+    local statusPill
+    if theme and type(theme.CreateBadgePill) == "function" then
+        statusPill = theme.CreateBadgePill(panel, "Pick a saved recipient", "neutral", { height = 20, fontSize = 10, padX = 10, minWidth = 182 })
+        statusPill.frame:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -28)
+        statusPill.frame:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -10, -28)
+    end
+    panel.statusPill = statusPill
+
+    local statusFs = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statusFs:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -30)
+    statusFs:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -10, -30)
+    statusFs:SetHeight(16)
+    if statusFs.SetJustifyH then statusFs:SetJustifyH("LEFT") end
+    if statusFs.SetWordWrap then statusFs:SetWordWrap(false) end
+    if theme and type(theme.ApplyFont) == "function" then
+        theme.ApplyFont(statusFs, 10, "semibold")
+    end
+    if statusPill then safeHide(statusFs) end
+    panel.statusFs = statusFs
+
+    panel.buttons = {}
+    for i = 1, MH.PRESET_PAGE_SIZE do
+        local b = _G.CreateFrame("Button", nil, panel)
+        b:SetHeight(32)
+        b:SetPoint("TOPLEFT", panel, "TOPLEFT", 8, -(52 + (i - 1) * 35))
+        b:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -8, -(52 + (i - 1) * 35))
+        if theme and type(theme.NineApple) == "function" then
+            b._bgSurf = theme.NineApple(b, "glass_r8", "cardAltBg", "border", { noSpecular = true })
+        end
+        local bg = b:CreateTexture(nil, "BACKGROUND", nil, 1)
+        if bg.SetAllPoints then bg:SetAllPoints(b) else bg:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0) end
+        bg:SetColorTexture(0, 0, 0, 0)
+        b.bg = bg
+
+        local iconTex = b:CreateTexture(nil, "ARTWORK")
+        iconTex:SetSize(18, 18)
+        iconTex:SetPoint("LEFT", b, "LEFT", 7, 0)
+        iconTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        b.iconTex = iconTex
+
+        local nameFs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        if nameFs.SetJustifyH then nameFs:SetJustifyH("LEFT") end
+        if nameFs.SetWordWrap then nameFs:SetWordWrap(false) end
+        if theme and type(theme.ApplyFont) == "function" then
+            theme.ApplyFont(nameFs, 11, "semibold")
+        end
+        b.nameFs = nameFs
+
+        local roleFs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        if roleFs.SetJustifyH then roleFs:SetJustifyH("LEFT") end
+        if roleFs.SetWordWrap then roleFs:SetWordWrap(false) end
+        if theme and type(theme.ApplyFont) == "function" then
+            theme.ApplyFont(roleFs, 10, "regular")
+        end
+        b.roleFs = roleFs
+
+        local initFs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        initFs:SetPoint("CENTER", b, "CENTER", 0, 0)
+        if initFs.SetJustifyH then initFs:SetJustifyH("CENTER") end
+        if theme and type(theme.ApplyFont) == "function" then
+            theme.ApplyFont(initFs, 12, "semibold")
+        end
+        safeHide(initFs)
+        b.initFs = initFs
+
+        local selfTag = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        selfTag:SetPoint("RIGHT", b, "RIGHT", -7, 0)
+        if selfTag.SetJustifyH then selfTag:SetJustifyH("RIGHT") end
+        if theme and type(theme.ApplyFont) == "function" then
+            theme.ApplyFont(selfTag, 10, "regular")
+        end
+        selfTag:SetText("You")
+        safeHide(selfTag)
+        b.selfTag = selfTag
+
+        b:SetScript("OnClick", function(self)
+            if self._entry and self._entry.name then
+                applyPresetRecipient(self._entry.name, false)
+            end
+        end)
+        attachMailTooltip(b,
+            function(self) return self._entry and self._entry.name or "" end,
+            function(self)
+                local e = self._entry
+                if not e then return {} end
+                local lines = { "Roles: " .. tostring(e.allRolesText or e.roleLabel or "") }
+                if e.isSelf then
+                    lines[#lines + 1] = "Current character (You)"
+                else
+                    lines[#lines + 1] = "Click to fill Send Mail recipient."
+                end
+                return lines
+            end)
+        b:Hide()
+        panel.buttons[i] = b
+    end
+
+    local prevBtn = makeBarButton(panel, "<", 26, 20, "secondary", function()
+        state.presetPage = math.max(1, (state.presetPage or 1) - 1)
+        MH.RefreshPresetsUI()
+    end)
+    prevBtn:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 8, 8)
+    prevBtn:Hide()
+    panel.prevBtn = prevBtn
+
+    local nextBtn = makeBarButton(panel, ">", 26, 20, "secondary", function()
+        state.presetPage = (state.presetPage or 1) + 1
+        MH.RefreshPresetsUI()
+    end)
+    nextBtn:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -8, 8)
+    nextBtn:Hide()
+    panel.nextBtn = nextBtn
+
+    local pageFs = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    pageFs:SetPoint("CENTER", panel, "BOTTOM", 0, 18)
+    if pageFs.SetJustifyH then pageFs:SetJustifyH("CENTER") end
+    if theme and type(theme.ApplyFont) == "function" then
+        theme.ApplyFont(pageFs, 10, "regular")
+    end
+    safeHide(pageFs)
+    panel.pageFs = pageFs
+
+    local function paintPanel()
+        paintSurfaceFallback(panel._bgSurf)
+        local p = getPalette()
+        if titleFs.SetTextColor and p.text then
+            titleFs:SetTextColor(p.text[1], p.text[2], p.text[3], p.text[4] or 1)
+        end
+        if pageFs.SetTextColor and p.textMuted then
+            pageFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3], p.textMuted[4] or 1)
+        end
+        MH.RefreshPresetsUI()
+    end
+    if theme and type(theme.RegisterWidget) == "function" then
+        theme.RegisterWidget(panel, paintPanel)
+    end
+    return panel
+end
+
+local function createInboxQuickStrip(inboxFrame)
+    local strip = _G.CreateFrame("Frame", "MerchantMasterInboxQuickStrip", inboxFrame)
+    strip:SetHeight(24)
+    strip:SetWidth(30)
+    strip:SetPoint("TOPRIGHT", inboxFrame, "TOPRIGHT", -14, -26)
+    strip:Hide()
+
+    local theme = ns.Theme
+    if theme and type(theme.NineApple) == "function" then
+        strip._bgSurf = theme.NineApple(strip, "pill", "cardBg", "borderStrong", { noSpecular = true })
+    end
+
+    strip.buttons = {}
+    for i = 1, 6 do
+        local b = _G.CreateFrame("Button", nil, strip)
+        b:SetSize(18, 18)
+        b:SetPoint("LEFT", strip, "LEFT", 5 + (i - 1) * 21, 0)
+        local tex = b:CreateTexture(nil, "ARTWORK")
+        if tex.SetAllPoints then tex:SetAllPoints(b) else tex:SetSize(18, 18); tex:SetPoint("CENTER", 0, 0) end
+        tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        b.iconTex = tex
+        b:SetScript("OnClick", function(self)
+            local e = self._entry
+            if not e then return end
+            local tab2 = _G.MailFrameTab2
+            if tab2 and type(tab2.Click) == "function" then
+                pcall(tab2.Click, tab2)
+            elseif type(_G.MailFrameTab_OnClick) == "function" then
+                pcall(_G.MailFrameTab_OnClick, tab2, 2)
+            end
+            applyPresetRecipient(e.name, true)
+        end)
+        attachMailTooltip(b,
+            function(self) return self._entry and self._entry.name or "" end,
+            function(self)
+                local e = self._entry
+                if not e then return {} end
+                return {
+                    "Roles: " .. tostring(e.allRolesText or e.roleLabel or ""),
+                    "Click to switch to Send Mail and fill this recipient.",
+                }
+            end)
+        b:Hide()
+        strip.buttons[i] = b
+    end
+
+    local function paintStrip()
+        paintSurfaceFallback(strip._bgSurf)
+    end
+    if theme and type(theme.RegisterWidget) == "function" then
+        theme.RegisterWidget(strip, paintStrip)
+    end
+    return strip
+end
+
+function MH.MountPresetPanels()
+    if _G.InCombatLockdown and _G.InCombatLockdown() then
+        state.pendingMount = true
+        return false, "combat"
+    end
+    if type(_G.CreateFrame) ~= "function" then
+        return false, "no_create_frame"
+    end
+    local mf = _G.MailFrame
+    if mf and not MH.presetsPanel then
+        MH.presetsPanel = createPresetsPanel(mf)
+    end
+    local inbox = _G.InboxFrame
+    if inbox and not MH.inboxQuickStrip then
+        MH.inboxQuickStrip = createInboxQuickStrip(inbox)
+    end
+    hookBlizzardMailVisibility()
+    return true
+end
+
+function MH.RefreshPresetsUI()
+    local entries = MH.BuildPresetRecipientEntries()
+    local disp = MH.GetDisplayOptions()
+    local pal = getPalette()
+    local openMailShown = (_G.OpenMailFrame and _G.OpenMailFrame.IsShown and _G.OpenMailFrame:IsShown()) == true
+    local sendMailShown = (_G.SendMailFrame and _G.SendMailFrame.IsShown and _G.SendMailFrame:IsShown()) == true
+    local inboxShown = (_G.InboxFrame and _G.InboxFrame.IsShown and _G.InboxFrame:IsShown()) == true
+
+    local rawRecipient = (_G.SendMailNameEditBox and _G.SendMailNameEditBox.GetText and _G.SendMailNameEditBox:GetText()) or ""
+    local curTrim = trimOuter(rawRecipient)
+    local curKey = canonicalKey(curTrim)
+
+    -- 1. Send Mail Preset Panel
+    local panel = MH.presetsPanel
+    if panel then
+        local showPanel = sendMailShown and (not openMailShown) and (#entries > 0)
+        if not showPanel then
+            panel:Hide()
+        else
+            panel:Show()
+            -- Status pill
+            local isSaved, savedEntry = MH.IsSavedMailRecipient(curTrim)
+            local statusText, statusVariant, statusHex
+            if curTrim == "" then
+                statusText = "Pick a saved recipient"
+                statusVariant = "neutral"
+                statusHex = "hexMuted"
+            elseif isSaved and savedEntry then
+                statusText = "Saved: " .. tostring(savedEntry.roleLabel or savedEntry.name)
+                statusVariant = "green"
+                statusHex = "hexPositive"
+            else
+                statusText = "Unsaved recipient"
+                statusVariant = "orange"
+                statusHex = "hexWarning"
+            end
+            if panel.statusPill and panel.statusPill.SetVariant then
+                panel.statusPill:SetVariant(statusVariant, statusText)
+                if panel.statusPill.frame and panel.statusPill.frame.SetWidth then
+                    panel.statusPill.frame:SetWidth(182)
+                end
+            end
+            if panel.statusFs and panel.statusFs.SetText then
+                panel.statusFs:SetText(palHex(statusHex, "98989d") .. statusText .. "|r")
+            end
+
+            -- Pagination
+            local total = #entries
+            local pageSize = MH.PRESET_PAGE_SIZE
+            local totalPages = math.max(1, math.ceil(total / pageSize))
+            state.presetPage = math.max(1, math.min(totalPages, tonumber(state.presetPage) or 1))
+            local startIdx = (state.presetPage - 1) * pageSize + 1
+            local visibleCount = 0
+
+            local showIcon = disp.showIcon == true
+            local showName = disp.showName == true
+            local showRole = disp.showRole == true
+            local initialsOnly = (not showIcon) and (not showName) and (not showRole)
+
+            for i = 1, pageSize do
+                local btn = panel.buttons[i]
+                local entry = entries[startIdx + i - 1]
+                btn._entry = entry
+                if entry then
+                    visibleCount = visibleCount + 1
+                    btn:Show()
+                    local isActive = (curKey ~= "" and curKey == entry.key)
+                    if btn._bgSurf and btn._bgSurf.UpdateTheme then
+                        btn._bgSurf:UpdateTheme()
+                    end
+                    if btn.bg and btn.bg.SetColorTexture then
+                        if isActive then
+                            local ab = pal.accentBlue or { 0.2, 0.58, 1.0, 1.0 }
+                            btn.bg:SetColorTexture(ab[1], ab[2], ab[3], 0.24)
+                        elseif entry.isSelf then
+                            btn.bg:SetColorTexture(0.5, 0.5, 0.5, 0.08)
+                        else
+                            btn.bg:SetColorTexture(0, 0, 0, 0)
+                        end
+                    end
+
+                    local rightPad = entry.isSelf and -34 or -8
+                    if btn.selfTag then
+                        if entry.isSelf and not initialsOnly then
+                            safeShow(btn.selfTag)
+                            if btn.selfTag.SetTextColor and pal.textMuted then
+                                btn.selfTag:SetTextColor(pal.textMuted[1], pal.textMuted[2], pal.textMuted[3], 0.85)
+                            end
+                        else
+                            safeHide(btn.selfTag)
+                        end
+                    end
+
+                    if initialsOnly then
+                        safeHide(btn.iconTex)
+                        safeHide(btn.nameFs)
+                        safeHide(btn.roleFs)
+                        safeShow(btn.initFs)
+                        btn.initFs:SetText(entry.initials or "??")
+                        if btn.initFs.SetTextColor then
+                            local tc = entry.isSelf and (pal.textMuted or { 0.65, 0.65, 0.68, 1 }) or (pal.text or { 1, 1, 1, 1 })
+                            btn.initFs:SetTextColor(tc[1], tc[2], tc[3], entry.isSelf and 0.7 or (tc[4] or 1))
+                        end
+                    else
+                        safeHide(btn.initFs)
+                        local textLeft = 8
+                        if showIcon then
+                            safeShow(btn.iconTex)
+                            btn.iconTex:SetTexture(entry.icon)
+                            if btn.iconTex.SetAlpha then
+                                btn.iconTex:SetAlpha(entry.isSelf and 0.65 or 1.0)
+                            end
+                            textLeft = 30
+                        else
+                            safeHide(btn.iconTex)
+                        end
+
+                        if showName then
+                            safeShow(btn.nameFs)
+                            if btn.nameFs.ClearAllPoints then btn.nameFs:ClearAllPoints() end
+                            if showRole then
+                                btn.nameFs:SetPoint("TOPLEFT", btn, "TOPLEFT", textLeft, -4)
+                                btn.nameFs:SetPoint("TOPRIGHT", btn, "TOPRIGHT", rightPad, -4)
+                            else
+                                btn.nameFs:SetPoint("LEFT", btn, "LEFT", textLeft, 0)
+                                btn.nameFs:SetPoint("RIGHT", btn, "RIGHT", rightPad, 0)
+                            end
+                            btn.nameFs:SetText(entry.name)
+                            if btn.nameFs.SetTextColor then
+                                local tc = entry.isSelf and (pal.textMuted or { 0.68, 0.68, 0.70, 1 }) or (pal.text or { 1, 1, 1, 1 })
+                                btn.nameFs:SetTextColor(tc[1], tc[2], tc[3], tc[4] or 1)
+                            end
+                        else
+                            safeHide(btn.nameFs)
+                        end
+
+                        if showRole then
+                            safeShow(btn.roleFs)
+                            if btn.roleFs.ClearAllPoints then btn.roleFs:ClearAllPoints() end
+                            if showName then
+                                btn.roleFs:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", textLeft, 4)
+                                btn.roleFs:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", rightPad, 4)
+                            else
+                                btn.roleFs:SetPoint("LEFT", btn, "LEFT", textLeft, 0)
+                                btn.roleFs:SetPoint("RIGHT", btn, "RIGHT", rightPad, 0)
+                            end
+                            btn.roleFs:SetText(entry.roleLabel)
+                            if btn.roleFs.SetTextColor then
+                                local rc = pal.textMuted or pal.textSecondary or { 0.7, 0.7, 0.72, 1 }
+                                btn.roleFs:SetTextColor(rc[1], rc[2], rc[3], rc[4] or 1)
+                            end
+                        else
+                            safeHide(btn.roleFs)
+                        end
+                    end
+                else
+                    btn:Hide()
+                end
+            end
+
+            local hasPager = totalPages > 1
+            if panel.prevBtn then
+                if hasPager then
+                    panel.prevBtn:Show()
+                    if panel.prevBtn.SetEnabled then panel.prevBtn:SetEnabled(state.presetPage > 1) end
+                else
+                    panel.prevBtn:Hide()
+                end
+            end
+            if panel.nextBtn then
+                if hasPager then
+                    panel.nextBtn:Show()
+                    if panel.nextBtn.SetEnabled then panel.nextBtn:SetEnabled(state.presetPage < totalPages) end
+                else
+                    panel.nextBtn:Hide()
+                end
+            end
+            if panel.pageFs then
+                if hasPager then
+                    safeShow(panel.pageFs)
+                    panel.pageFs:SetText(string.format("%d / %d", state.presetPage, totalPages))
+                else
+                    safeHide(panel.pageFs)
+                end
+            end
+
+            local footerH = hasPager and 32 or 8
+            panel:SetHeight(52 + visibleCount * 35 + footerH)
+        end
+    end
+
+    -- 2. Compact Inbox Icon Shortcut Strip (omits isSelf)
+    local strip = MH.inboxQuickStrip
+    if strip then
+        local nonSelf = {}
+        for _, e in ipairs(entries) do
+            if not e.isSelf then
+                nonSelf[#nonSelf + 1] = e
+            end
+        end
+        local showStrip = inboxShown and (not openMailShown) and (#nonSelf > 0)
+        if not showStrip then
+            strip:Hide()
+        else
+            local count = math.min(#strip.buttons, #nonSelf)
+            for i = 1, #strip.buttons do
+                local btn = strip.buttons[i]
+                local entry = nonSelf[i]
+                btn._entry = entry
+                if entry and i <= count then
+                    btn.iconTex:SetTexture(entry.icon)
+                    btn:Show()
+                else
+                    btn:Hide()
+                end
+            end
+            strip:SetWidth(8 + count * 21)
+            strip:Show()
+        end
+    end
+
+    return entries, disp
+end
+
 function MH.MountOnMailFrame()
     if _G.InCombatLockdown and _G.InCombatLockdown() then
         state.pendingMount = true
@@ -626,7 +1692,10 @@ function MH.MountOnMailFrame()
         return false, "no_mail_frame"
     end
     if MH.bar then
+        MH.MountPresetPanels()
+        MH.InstallSendMailGuard()
         MH.UpdateUI()
+        MH.RefreshPresetsUI()
         return true, MH.bar
     end
 
@@ -636,24 +1705,12 @@ function MH.MountOnMailFrame()
     bar:SetPoint("TOPRIGHT", mf, "BOTTOMRIGHT", 0, -4)
 
     local theme = ns.Theme
-    local pal = getPalette()
     if theme and type(theme.NineApple) == "function" then
-        bar._bgSurf = theme.NineApple(bar, "glass_r12", pal.cardBg, pal.borderStrong, { noSpecular = true })
+        bar._bgSurf = theme.NineApple(bar, "glass_r12", "cardBg", "borderStrong", { noSpecular = true })
     end
 
     local function paintBar()
-        local p = getPalette()
-        if bar._bgSurf then
-            if bar._bgSurf.SetFill and p.cardBg then
-                bar._bgSurf:SetFill(p.cardBg[1], p.cardBg[2], p.cardBg[3], p.cardBg[4] or 0.96)
-            end
-            if bar._bgSurf.SetBorder and p.borderStrong then
-                bar._bgSurf:SetBorder(p.borderStrong[1], p.borderStrong[2], p.borderStrong[3], p.borderStrong[4] or 0.22)
-            end
-            if bar._bgSurf.SetColors and p.cardBg and p.borderStrong then
-                bar._bgSurf:SetColors(p.cardBg, p.borderStrong)
-            end
-        end
+        paintSurfaceFallback(bar._bgSurf)
         MH.UpdateUI()
     end
 
@@ -720,6 +1777,9 @@ function MH.MountOnMailFrame()
 
     MH.bar = bar
     paintBar()
+    MH.MountPresetPanels()
+    MH.InstallSendMailGuard()
+    MH.RefreshPresetsUI()
     return true, bar
 end
 
@@ -741,11 +1801,18 @@ function MH.OnEvent(self, event, arg1, arg2)
         state.mailOpen = true
         MH.MountOnMailFrame()
         MH.UpdateUI()
+        MH.RefreshPresetsUI()
     elseif event == "MAIL_CLOSED" then
         state.mailOpen = false
+        clearUnsavedConfirm()
         if state.active then
             MH.Stop("mail_closed")
         end
+        if MH.presetsPanel and MH.presetsPanel.Hide then MH.presetsPanel:Hide() end
+        if MH.inboxQuickStrip and MH.inboxQuickStrip.Hide then MH.inboxQuickStrip:Hide() end
+    elseif event == "MAIL_SEND_INFO_UPDATE" or event == "MAIL_FAILED" or event == "MAIL_SEND_SUCCESS" then
+        clearUnsavedConfirm()
+        MH.RefreshPresetsUI()
     elseif event == "MAIL_INBOX_UPDATE" then
         if state.active and state.waitingServer then
             state.waitingServer = false
@@ -760,6 +1827,7 @@ function MH.OnEvent(self, event, arg1, arg2)
         else
             MH.UpdateUI()
         end
+        MH.RefreshPresetsUI()
     elseif event == "ADDON_ACTION_BLOCKED" then
         if state.active and isMailActionBlocked(arg1, arg2) then
             state.clickStepper = true
@@ -781,7 +1849,11 @@ if not MH.frame and type(_G.CreateFrame) == "function" then
     local f = _G.CreateFrame("Frame")
     MH.frame = f
     f:SetScript("OnEvent", MH.OnEvent)
-    for _, ev in ipairs({ "MAIL_SHOW", "MAIL_CLOSED", "MAIL_INBOX_UPDATE", "ADDON_ACTION_BLOCKED", "PLAYER_REGEN_ENABLED" }) do
+    for _, ev in ipairs({
+        "MAIL_SHOW", "MAIL_CLOSED", "MAIL_INBOX_UPDATE",
+        "MAIL_SEND_INFO_UPDATE", "MAIL_FAILED", "MAIL_SEND_SUCCESS",
+        "ADDON_ACTION_BLOCKED", "PLAYER_REGEN_ENABLED",
+    }) do
         pcall(f.RegisterEvent, f, ev)
     end
 end

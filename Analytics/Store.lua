@@ -111,7 +111,7 @@ function Store.Init()
     if (tonumber(DB.schema) or 0)>1 then Store.readOnly = true; return DB end
     DB.schema = 1
     DB.subSchema=2
-    for _, k in ipairs({ "days", "roll", "loot", "basis", "lots", "ret", "pouches", "snaps", "wealth", "seenMail", "stats", "seed", "probe", "dayStats", "itemStats", "craftYieldStats", "guildSnaps", "warbankSnaps", "archivedRoll", "archivedLoot", "archivedDays", "basisEvents" }) do ensure(DB, k) end
+    for _, k in ipairs({ "days", "roll", "loot", "basis", "lots", "ret", "pouches", "snaps", "intradaySnaps", "wealth", "seenMail", "stats", "seed", "probe", "dayStats", "itemStats", "craftYieldStats", "guildSnaps", "warbankSnaps", "archivedRoll", "archivedLoot", "archivedDays", "basisEvents" }) do ensure(DB, k) end
     DB.itemMeta=DB.itemStats
     for _, k in ipairs({ "firstLive", "errors", "disabled", "recon", "lastStanding", "chars", "zones", "tsmSyncedSales", "importedOrigins" }) do ensure(DB.stats, k) end
     DB.stats.favorCostSum = DB.stats.favorCostSum or 0; DB.stats.favorGainSum = DB.stats.favorGainSum or 0
@@ -904,6 +904,38 @@ function Store.IterDays(fromDay,toDay,fn,opts)
         if fn(day,rows)==false then break end
     end
 end
+local INTRADAY_RETENTION_DAYS = 7
+
+local function latestSnapUpTo(snapsByDay, maxDay)
+    if type(snapsByDay) ~= "table" then return nil end
+    local bestDay, bestSnap = nil, nil
+    for dKey, dSnap in pairs(snapsByDay) do
+        if type(dKey) == "string" and dKey <= maxDay and type(dSnap) == "table" then
+            if not bestDay or dKey > bestDay then
+                bestDay, bestSnap = dKey, dSnap
+            end
+        end
+    end
+    return bestSnap
+end
+
+local function pruneIntradaySnaps(intraday)
+    if type(intraday) ~= "table" then return end
+    local dayKeys = {}
+    for dKey in pairs(intraday) do
+        if type(dKey) == "string" then dayKeys[#dayKeys + 1] = dKey end
+    end
+    if #dayKeys <= INTRADAY_RETENTION_DAYS then return end
+    table.sort(dayKeys)
+    for i = 1, #dayKeys - INTRADAY_RETENTION_DAYS do
+        intraday[dayKeys[i]] = nil
+    end
+end
+
+function Store.IntradaySnaps()
+    return DB and DB.intradaySnaps or {}
+end
+
 function Store.SaveSnapshot(char,day,snap,detail)
     if not writable() then return end
     ensure(DB.snaps,char)[day]={
@@ -912,6 +944,40 @@ function Store.SaveSnapshot(char,day,snap,detail)
         econ=snap.econ,goldOnly=snap.goldOnly or nil,
     }
     if detail then ensure(DB,"wealth")[char]=detail end
+    local snapTime = tonumber(snap.time or snap.at) or Store.Now()
+    local hr = tonumber(fmtDate("%H", snapTime)) or 0
+    if hr < 0 then hr = 0 elseif hr > 23 then hr = 23 end
+    local hourKey = string.format("%02d", hr)
+    local intraday = ensure(DB, "intradaySnaps")
+    local dayRec = ensure(intraday, day)
+    local pts = ensure(dayRec, "points")
+    local chars = {}
+    for oc, ocSnaps in pairs(DB.snaps or {}) do
+        if oc == char then
+            chars[oc] = {
+                gold = snap.gold or 0,
+                items = snap.items or 0,
+                listed = snap.listed or 0,
+                econ = snap.econ or Store.DeriveEcon(oc),
+            }
+        else
+            local carried = latestSnapUpTo(ocSnaps, day)
+            if carried then
+                chars[oc] = {
+                    gold = carried.gold or 0,
+                    items = carried.items or 0,
+                    listed = carried.listed or 0,
+                    econ = carried.econ or Store.DeriveEcon(oc),
+                }
+            end
+        end
+    end
+    pts[hourKey] = {
+        time = floor(snapTime / 3600) * 3600,
+        hour = hr,
+        chars = chars,
+    }
+    pruneIntradaySnaps(intraday)
     changed(nil,"snapshot")
 end
 function Store.InitRecon(char,currentGold)
@@ -948,6 +1014,18 @@ function Store.EstimateBytes()
         for ck,counters in pairs(chars) do n=n+#tostring(ck)+16; for k in pairs(counters) do n=n+#k+16 end end
     end
     for _,snaps in pairs(DB.snaps or {}) do for _ in pairs(snaps) do n=n+112 end end
+    for day,dayRec in pairs(DB.intradaySnaps or {}) do
+        n=n+#tostring(day)+24
+        local pts=type(dayRec)=="table" and dayRec.points
+        if type(pts)=="table" then
+            for _,pt in pairs(pts) do
+                n=n+48
+                if type(pt)=="table" and type(pt.chars)=="table" then
+                    for ck in pairs(pt.chars) do n=n+#tostring(ck)+80 end
+                end
+            end
+        end
+    end
     for _,w in pairs(DB.wealth or {}) do
         n=n+128
         for _,list in pairs(w.cats or {}) do n=n+(#list)*88 end
@@ -1540,7 +1618,7 @@ local function applyCharKeyMigration(migrationMap, oldKeyList, hostChars)
         if copyLiveStateKey(DB.ret, oldKey, newKey, true) then changedAny = true end
         if copyLiveStateKey(DB.pouches, oldKey, newKey, true) then changedAny = true end
 
-        -- 2. Historical snaps: copy missing days only, delete oldKey
+        -- 2. Historical snaps & intradaySnaps: copy missing days/chars only, delete oldKey
         if type(DB.snaps) == "table" and type(DB.snaps[oldKey]) == "table" then
             local dstSnaps = ensure(DB.snaps, newKey)
             for day, snap in pairs(DB.snaps[oldKey]) do
@@ -1548,6 +1626,23 @@ local function applyCharKeyMigration(migrationMap, oldKeyList, hostChars)
             end
             DB.snaps[oldKey] = nil
             changedAny = true
+        end
+        if type(DB.intradaySnaps) == "table" then
+            for _, dayRec in pairs(DB.intradaySnaps) do
+                local pts = type(dayRec) == "table" and dayRec.points
+                if type(pts) == "table" then
+                    for _, pt in pairs(pts) do
+                        local ptChars = type(pt) == "table" and pt.chars
+                        if type(ptChars) == "table" and ptChars[oldKey] ~= nil then
+                            if ptChars[newKey] == nil then
+                                ptChars[newKey] = ptChars[oldKey]
+                            end
+                            ptChars[oldKey] = nil
+                            changedAny = true
+                        end
+                    end
+                end
+            end
         end
 
         -- 3. Historical roll & archivedRoll
@@ -1767,6 +1862,16 @@ function Store.MigrateForeverSurnames(hostChars, activeKey)
 
     addKeysFrom(DB.wealth)
     addKeysFrom(DB.snaps)
+    if type(DB.intradaySnaps) == "table" then
+        for _, dayRec in pairs(DB.intradaySnaps) do
+            local pts = type(dayRec) == "table" and dayRec.points
+            if type(pts) == "table" then
+                for _, pt in pairs(pts) do
+                    if type(pt) == "table" then addKeysFrom(pt.chars) end
+                end
+            end
+        end
+    end
     addKeysFrom(DB.inventory)
     addKeysFrom(DB.lots)
     addKeysFrom(DB.ret)

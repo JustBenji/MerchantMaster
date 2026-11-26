@@ -1,6 +1,6 @@
 ## Interface: 16001
 ## Title: MerchantMaster
-## Notes: Unified profit dashboard, crafting economics, live AH pricing, ledger, and profession optimizer for WoW Forever
+## Notes: Market data analyzer for Waylaid Crates, Reputation Writs, Recipes, Items, and deep Auction House analytics, with built-in Disenchant, Crafter, Mail, Sell, and Buy AH helpers.
 ## Author: JustBenji
 ## Version: @project-version@
 ## X-License: All Rights Reserved
@@ -40,6 +40,7 @@ RecipeStats.lua
 SuperListModel.lua
 
 UI_SuperList.lua
+UI_Watchlist.lua
 UI_DisenchantHelper.lua
 UI_TrainerStats.lua
 SniperEngine.lua
@@ -47,4 +48,5 @@ UI_Sniper.lua
 MailHelper.lua
 ConsoleEngine.lua
 UI_Console.lua
+UI_DashboardBrief.lua
 UI_AHSellTab.lua
