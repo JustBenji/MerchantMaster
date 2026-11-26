@@ -1,0 +1,110 @@
+name: Test, Hygiene & Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+jobs:
+  test-and-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Lua 5.1
+        run: sudo apt-get update && sudo apt-get install -y lua5.1
+
+      - name: Run full verification suite
+        env:
+          MM_PRIVATE_DENYLIST: ${{ secrets.MM_PRIVATE_DENYLIST }}
+        run: python tools/run_all_checks.py -j 4
+
+      - name: Verify Lua glyph allowlist
+        run: python tools/check_glyphs.py
+
+      - name: Run repository hygiene gate
+        env:
+          MM_PRIVATE_DENYLIST: ${{ secrets.MM_PRIVATE_DENYLIST }}
+        run: python tools/build_release_zip.py repo-hygiene
+
+  package-and-release:
+    needs: test-and-hygiene
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout full history for tag resolution
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Package addon dry-run (BigWigsMods/packager)
+        id: package_dryrun
+        uses: BigWigsMods/packager@01e8631a69c69d7654c788d152630d5fed9e3812
+        with:
+          args: -d
+
+      - name: Generate and verify release.json and zip before publishing
+        env:
+          MM_PRIVATE_DENYLIST: ${{ secrets.MM_PRIVATE_DENYLIST }}
+        run: |
+          shopt -s nullglob
+          zips=(.release/MerchantMaster-*.zip)
+          if [ "${#zips[@]}" -ne 1 ]; then
+            echo "Expected exactly 1 packaged zip in .release, found ${#zips[@]}" >&2
+            exit 1
+          fi
+          ZIP="${zips[0]}"
+          test -n "$ZIP"
+          VER_ARGS=()
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VER_ARGS=(--version "${GITHUB_REF_NAME}")
+          fi
+          python tools/build_release_zip.py emit-release-json --zip "$ZIP" --out ".release/release.json" "${VER_ARGS[@]}"
+          python tools/build_release_zip.py zip-verify --zip "$ZIP" --require-release-json ".release/release.json"
+
+      - name: Upload dry-run archive artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: merchantmaster-dryrun-zip
+          path: |
+            .release/MerchantMaster-*.zip
+            .release/release.json
+
+      - name: Publish verified GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          shopt -s nullglob
+          zips=(.release/MerchantMaster-*.zip)
+          if [ "${#zips[@]}" -ne 1 ] || [ ! -f ".release/release.json" ]; then
+            echo "Verified release assets missing in .release" >&2
+            exit 1
+          fi
+          ZIP="${zips[0]}"
+          PRERELEASE_ARGS=()
+          if [[ "$TAG" == *-* ]]; then
+            PRERELEASE_ARGS=(--prerelease)
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" ".release/release.json" --clobber
+            gh release edit "$TAG" --title "$TAG" --notes-file CHANGELOG.md --draft=false "${PRERELEASE_ARGS[@]}"
+          else
+            gh release create "$TAG" "$ZIP" ".release/release.json" --draft --title "$TAG" --notes-file CHANGELOG.md "${PRERELEASE_ARGS[@]}"
+            gh release edit "$TAG" --draft=false
+          fi

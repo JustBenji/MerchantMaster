@@ -1,0 +1,50 @@
+## Interface: 16001
+## Title: MerchantMaster
+## Notes: Unified profit dashboard, crafting economics, live AH pricing, ledger, and profession optimizer for WoW Forever
+## Author: JustBenji
+## Version: @project-version@
+## X-License: All Rights Reserved
+## X-Website: https://github.com/JustBenji/MerchantMaster
+## IconTexture: Interface\AddOns\MerchantMaster\Textures\MerchantMasterLogo
+## SavedVariables: MerchantMasterDB, MerchantMasterLedgerDB
+
+Libs\LibStub.lua
+Libs\CallbackHandler-1.0.lua
+Libs\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0.lua
+Data_CratesAndWrits.lua
+Data_Recipes.lua
+Data_DisenchantMeta.lua
+Disenchant.lua
+Pricing.lua
+Calculators.lua
+Professor_Engine.lua
+UI_Theme.lua
+UI_Window.lua
+UI_AHRefresh.lua
+SellerStats.lua
+MarketScan.lua
+TrainerServices.lua
+MerchantMaster.lua
+UI_Professor.lua
+
+Analytics\Store.lua
+Analytics\Transfer.lua
+Analytics\Model.lua
+Analytics\Chart.lua
+Analytics\Inventory.lua
+Analytics\Capture.lua
+Analytics\UI.lua
+Analytics\Tooltips.lua
+RecipeStats.lua
+SuperListModel.lua
+
+UI_SuperList.lua
+UI_DisenchantHelper.lua
+UI_TrainerStats.lua
+SniperEngine.lua
+UI_Sniper.lua
+MailHelper.lua
+ConsoleEngine.lua
+UI_Console.lua
+UI_AHSellTab.lua

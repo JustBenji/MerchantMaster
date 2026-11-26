@@ -1,0 +1,14 @@
+tools/scene_dumps/
+tools/dist/
+tests/offline_sv/
+tests/logs/
+.release/
+.private_denylist.txt
+.env*
+AGENTS.md
+*.bak
+*.orig
+*.log
+*.tsv
+__pycache__/
+*.pyc

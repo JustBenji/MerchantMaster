@@ -1,0 +1,46 @@
+name: Feature Request
+description: Suggest an improvement or new capability for MerchantMaster (WoW Forever 16001)
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: checkboxes
+    id: client_check
+    attributes:
+      label: Client Target
+      options:
+        - label: This request is for World of Warcraft Forever (Interface 16001).
+          required: true
+
+  - type: input
+    id: addon_version
+    attributes:
+      label: MerchantMaster Version
+      placeholder: e.g. v3.3.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem or Workflow Goal
+      description: Describe what workflow feels slow, missing, or unclear today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Improvement
+      description: Describe the feature, column, filter, or behavior you would like to see.
+    validations:
+      required: true
+
+  - type: textarea
+    id: debug_bundle
+    attributes:
+      label: Optional Redacted Debug Bundle
+      description: |
+        If helpful, open `/mm console` -> **Perf & Debug** -> keep **Redact Names** checked -> click **Generate Debug Bundle** and paste here.
+      render: text
+    validations:
+      required: false

@@ -1,0 +1,44 @@
+Copyright (c) 2026 JustBenji. All Rights Reserved.
+
+PROPRIETARY SOURCE-AVAILABLE LICENSE (BLIZZARD UI ADD-ON POLICY COMPLIANT)
+
+Permission is granted to any World of Warcraft player to download, inspect, and
+execute unmodified copies of MerchantMaster (including its plain-text Lua source
+files, data tables, and original art assets) strictly for personal, non-commercial
+gameplay use within World of Warcraft.
+
+Consistent with Blizzard Entertainment's World of Warcraft UI Add-On Development
+Policy:
+1. All Lua code distributed by the author is provided in un-obfuscated,
+   human-readable plain text and may be read and verified by end users.
+2. MerchantMaster is free to download and use; no fee, paywall, donation gate,
+   or subscription may be charged for access to the addon or any copy of it.
+3. No advertisements or commercial solicitations are permitted in the addon.
+
+All other rights are strictly reserved by the copyright holder (JustBenji).
+Without prior written permission from the copyright holder, you may NOT:
+- Redistribute, re-upload, mirror, or publish copies or modified builds of
+  MerchantMaster (in whole or in part) on any addon manager, website, archive,
+  or repository, including public forks that distribute releases or assets.
+- Sell, sublicense, bundle commercially, or distribute derivative works based on
+  MerchantMaster's source code, data tables, or original textures/artwork.
+
+THIRD-PARTY COMPONENTS AND CARVE-OUTS
+
+This All Rights Reserved license applies solely to original MerchantMaster code,
+data tables, and original artwork created by JustBenji. It does not restrict or
+alter the licenses of third-party components bundled in this repository:
+- Third-party Lua libraries under `Libs/` remain governed by their respective
+  open-source licenses and Public Domain dedications, reproduced in full in
+  `THIRD_PARTY_LICENSES.md`.
+- The bundled `Inter` typeface files (`Assets/fonts/Inter-Regular.ttf` and
+  `Assets/fonts/Inter-SemiBold.ttf`) remain licensed under the SIL Open Font
+  License, Version 1.1 (`Assets/fonts/OFL.txt`).
+
+DISCLAIMER OF WARRANTY
+
+THIS ADDON IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHOR OR COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY
+ARISING FROM THE USE OF THIS ADDON.

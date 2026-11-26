@@ -1,0 +1,4936 @@
+local S = ((debug and debug.getinfo(1, "S").source:sub(2):match("^(.*[/\\])")) or "./")
+local ns, frames = dofile(S .. "host_fixture.lua")
+
+local n = 0
+local function check(ok, msg)
+	n = n + 1
+	if not ok then
+		error("FAIL [" .. n .. "]: " .. tostring(msg), 2)
+	end
+end
+
+local app = ns.app
+local cb = app.cartBuyer
+local modal = app.ui.cartBuyerModal
+check(cb ~= nil, "app.cartBuyer engine exposed")
+check(modal ~= nil, "app.ui.cartBuyerModal floating window exposed")
+check(app.isBuiltInAHBuyerEnabled == nil, "legacy app.isBuiltInAHBuyerEnabled removed")
+check(app.setBuiltInAHBuyer == nil, "legacy app.setBuiltInAHBuyer removed")
+check(app.multiSearchAuctionator == nil, "legacy app.multiSearchAuctionator removed")
+check(app.sendShoppingRowsToAuctionator == nil, "legacy app.sendShoppingRowsToAuctionator removed")
+check(type(app.multiSearchBuyer) == "function", "app.multiSearchBuyer defined")
+check(type(app.sendShoppingRowsToBuyer) == "function", "app.sendShoppingRowsToBuyer defined")
+check(type(app.openCartBuyer) == "function", "app.openCartBuyer defined")
+
+-- 1. Standalone Built-in AH Buyer is the sole native path even if Auctionator global exists
+local origAuctionator = _G.Auctionator
+local atrCalled = 0
+_G.Auctionator = { API = { v1 = { MultiSearchAdvanced = function() atrCalled = atrCalled + 1 end } } }
+check(app.ui.shopPanel.buyerModeBtn == nil, "Legacy Buyer mode toggle button removed from Shopping panel")
+check(app.ui.shopPanel.buyAllBtn:GetText() == "Send to Auction House", "Standalone CTA shows Send to Auction House")
+local dashAucLabel = (app.ui.dashAucBtn._mmLabel and app.ui.dashAucBtn._mmLabel:GetText()) or app.ui.dashAucBtn:GetText()
+check(dashAucLabel == "Buy on AH", "Dashboard CTA shows Buy on AH")
+
+-- Track Blizzard searchAH calls and ensure protected purchase APIs are NEVER called by addon code
+_G.AuctionHouseFrame:Show()
+local protectedCalled = false
+local mockLiveCommodity = {
+	[2770] = { { unitPrice = 1500, quantity = 50 } }, -- 15s live vs 1s cart target (+1400%!)
+	[2771] = { { unitPrice = 90, quantity = 50 } },   -- 90c live vs 100c cart target (OK)
+}
+_G.C_AuctionHouse = {
+	StartCommoditiesPurchase = function() protectedCalled = true end,
+	ConfirmCommoditiesPurchase = function() protectedCalled = true end,
+	PlaceBid = function() protectedCalled = true end,
+	GetNumCommoditySearchResults = function(itemID)
+		return mockLiveCommodity[itemID] and #mockLiveCommodity[itemID] or 0
+	end,
+	GetCommoditySearchResultInfo = function(itemID, idx)
+		return mockLiveCommodity[itemID] and mockLiveCommodity[itemID][idx] or nil
+	end,
+}
+
+local ahSearches = {}
+local origSearchAH = app.searchAH
+app.searchAH = function(name, qty, itemID)
+	ahSearches[#ahSearches + 1] = { name = name, qty = qty, itemID = itemID }
+	return true
+end
+
+-- Also make C_Timer.After immediate for deterministic auto-advance check
+local origAfter = _G.C_Timer and _G.C_Timer.After
+if _G.C_Timer then
+	_G.C_Timer.After = function(_, fn) fn() end
+end
+
+-- 3. Send shopping rows -> opens sidecar, deduplicates Copper Ore (5 + 3 = 8), opens item 1 in Blizzard native AH
+atrCalled = 0
+local opened = app.sendShoppingRowsToBuyer({
+	{ name = "Copper Ore", itemID = 2770, qty = 5, ahUnitPrice = 100 },
+	{ name = "Copper Ore", itemID = 2770, qty = 3, ahUnitPrice = 100 },
+	{ name = "Tin Ore", itemID = 2771, qty = 5, ahUnitPrice = 100 },
+	{ name = "Rare Recipe", itemID = 19019, qty = 1, ahUnitPrice = 25000 },
+	{ name = "Crafted Bar", itemID = 2840, qty = 2, makeMyself = true },
+	{ name = "Vendor Flux", itemID = 2880, qty = 3, isVendor = true },
+}, "Shopping List")
+_G.Auctionator = origAuctionator
+
+check(opened == true, "sendShoppingRowsToBuyer returns true in standalone built-in mode")
+check(atrCalled == 0, "Standalone built-in mode never invokes Auctionator")
+check(modal:IsShown(), "Built-in AH Cart sidecar opens")
+check(protectedCalled == false, "Zero protected purchase APIs called by addon code")
+
+local st = cb.GetState()
+check(#st.items == 3, "Cart loaded 3 deduplicated AH items, got " .. #st.items)
+check(st.items[1].needed == 8 and st.items[1].itemID == 2770, "Duplicate Copper Ore merged to qty 8")
+check(#ahSearches == 1 and ahSearches[1].itemID == 2770 and ahSearches[1].qty == 8,
+	"Item 1 opened directly in Blizzard native AH with qty 8 pre-filled")
+check(st.items[1].status == "active", "Item 1 marked active (In AH)")
+check(st.items[1].targetUnit == 100, "Item 1 preserves shopping cart target price (100c = 1s)")
+
+-- 3b. Blizzard live AH results arrive at 15s (1500c) vs 1s (100c) cart price -> flags +1400% PRICE JUMP!
+ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 2770)
+check(st.items[1].liveUnit == 1500, "Item 1 captures live AH unit price (1500c = 15s)")
+check(st.items[1].priceDeltaPct == 1400 and st.items[1].priceAlert == "high",
+	"1s -> 15s jump triggers high price alert (+1400%)")
+check(st.noticeKind == "danger", "Price jump sets danger notice banner")
+
+-- 4. User buys in Blizzard's native AH: ConfirmCommoditiesPurchase hook + COMMODITY_PURCHASE_SUCCEEDED
+-- Partial buy (3 of 8) keeps item 1 active with remaining=5 and reloads AH qty to 5
+cb.OnCommodityPurchaseConfirmed(2770, 3)
+ns.MarketScan.HandleEvent("COMMODITY_PURCHASE_SUCCEEDED")
+check(st.items[1].bought == 3 and st.items[1].remaining == 5 and st.items[1].status == "active",
+	"Partial native purchase updates bought=3 remaining=5")
+check(#ahSearches == 2 and ahSearches[2].itemID == 2770 and ahSearches[2].qty == 5,
+	"Partial native purchase reloads Blizzard AH with remaining qty 5")
+
+-- Remaining buy (5 of 8) marks item 1 done and auto-opens item 2 (Tin Ore, qty 5) in Blizzard AH!
+cb.OnCommodityPurchaseConfirmed(2770, 5)
+ns.MarketScan.HandleEvent("COMMODITY_PURCHASE_SUCCEEDED")
+check(st.items[1].bought == 8 and st.items[1].remaining == 0 and st.items[1].status == "done",
+	"Completed native purchase marks item 1 done")
+check(st.activeIndex == 2 and st.items[2].status == "active", "Auto-advanced to item 2 (Tin Ore)")
+check(#ahSearches == 3 and ahSearches[3].itemID == 2771 and ahSearches[3].qty == 5,
+	"Auto-opened item 2 (Tin Ore, qty 5) in Blizzard native AH")
+ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 2771)
+check(st.items[2].liveUnit == 90 and st.items[2].priceAlert == "ok" and st.noticeKind == "positive",
+	"Live price at/below cart target (90c <= 100c) marks priceAlert=ok")
+
+-- 5. MarkBought on item 2 marks it done and auto-opens item 3 (Rare Recipe, qty 1)
+cb.MarkBought()
+check(st.items[2].status == "done" and st.items[2].remaining == 0, "MarkBought completes item 2")
+check(st.activeIndex == 3 and st.items[3].status == "active", "MarkBought auto-advances to item 3")
+check(#ahSearches == 4 and ahSearches[4].itemID == 19019 and ahSearches[4].qty == 1,
+	"Auto-opened item 3 (Rare Recipe, qty 1) in Blizzard native AH")
+check(protectedCalled == false, "Protected purchase APIs still never called directly by addon")
+
+-- 6. Legacy Switch to Auctionator button is completely removed from Cart sidecar
+check(modal.modeBtn == nil, "Legacy Switch to Auctionator button removed from Cart sidecar")
+modal:Hide()
+
+-- Helper to dispatch WoW events through all registered frames
+local function fireEvent(ev, ...)
+	for _, f in ipairs(frames) do
+		if f._events and f._events[ev] and f._scripts and f._scripts.OnEvent then
+			f._scripts.OnEvent(f, ev, ...)
+		end
+	end
+end
+
+-- 7. Provenance threading, multi-recipe merging, main panel minimize/restore, waiting state & Buying For slide-out
+MerchantMasterDB.ahBuyerExtended = false
+local mainPanel = app.panel
+local shopModal = app.ui.shopModal
+check(mainPanel ~= nil and shopModal ~= nil, "Main panel and shopModal exposed")
+
+-- Show both main panel and shopping cart modal, then close AH to test AH Closed Waiting state
+mainPanel:Show()
+shopModal:Show()
+_G.AuctionHouseFrame:Hide()
+ahSearches = {}
+
+local provOpened = app.sendShoppingRowsToBuyer({
+	{
+		name = "Small Flame Sac",
+		itemID = 4402,
+		qty = 22,
+		ahUnitPrice = 1450,
+		isSubRow = true,
+		parentSubName = "Fire Oil",
+		categoryName = "Fire Protection Potion",
+		sourceKind = "leveling",
+		sourceLabel = "Leveling #12",
+	},
+	{
+		name = "Dreamfoil",
+		itemID = 13463,
+		qty = 6,
+		ahUnitPrice = 8200,
+		categoryName = "Elixir of the Mongoose",
+		sourceKind = "craft_order",
+		sourceLabel = "Daily Craft",
+	},
+	{
+		name = "Dreamfoil",
+		itemID = 13463,
+		qty = 4,
+		ahUnitPrice = 8200,
+		categoryName = "Elixir of the Mongoose",
+		sourceKind = "craft_order",
+		sourceLabel = "Daily Craft",
+	},
+	{
+		name = "Dreamfoil",
+		itemID = 13463,
+		qty = 2,
+		ahUnitPrice = 8200,
+		categoryName = "Greater Fire Protection Potion",
+		sourceKind = "craft_order",
+		sourceLabel = "Craft Order",
+	},
+}, "Shopping List")
+
+check(provOpened == true, "enterAHBuyingMode succeeds when AH is closed")
+check(app._ahBuyingMode == true, "app._ahBuyingMode flag active")
+check(modal:IsShown(), "AH Trade Strip opens when AH is closed")
+check(not mainPanel:IsShown(), "enterAHBuyingMode hides giant main panel cleanly")
+check(not shopModal:IsShown(), "enterAHBuyingMode hides shopping cart modal cleanly")
+
+-- Provenance verification
+local pst = cb.GetState()
+check(#pst.items == 2, "Loaded 2 deduplicated AH items with provenance")
+check(pst.items[1].itemID == 4402 and pst.items[1].needed == 22, "Item 1 is 22x Small Flame Sac")
+check(pst.items[1].provenance and #pst.items[1].provenance == 1, "Small Flame Sac has 1 provenance chain")
+check(pst.items[1].provenance[1].subCraftName == "Fire Oil", "Sub-craft Fire Oil preserved")
+check(pst.items[1].provenance[1].targetName == "Fire Protection Potion", "Target Fire Protection Potion preserved")
+check(pst.items[1].provenance[1].sourceLabel == "Leveling #12", "Leveling #12 source label preserved")
+
+check(pst.items[2].itemID == 13463 and pst.items[2].needed == 12, "Shared Dreamfoil summed to 12")
+check(pst.items[2].provenance and #pst.items[2].provenance == 2, "Dreamfoil merged duplicate Mongoose rows into 2 distinct destinations")
+check(pst.items[2].provenance[1].targetName == "Elixir of the Mongoose" and pst.items[2].provenance[1].qty == 10,
+	"Duplicate Dreamfoil -> Mongoose entries merged (6 + 4 = 10)")
+check(pst.items[2].provenance[2].targetName == "Greater Fire Protection Potion" and pst.items[2].provenance[2].qty == 2,
+	"Second Dreamfoil destination preserved (2x Greater Fire Protection Potion)")
+
+local dests = cb.GetAllDestinations()
+check(#dests == 3, "GetAllDestinations returns 3 unique destination goals, got " .. #dests)
+
+-- Strict AH Closed Waiting state checks (NO Open AH button, NO subtext, ONLY exact text!)
+check(pst.waitingForAH == true, "CartBuyer tracks waitingForAH = true while AH closed")
+check(modal.waitingBanner and modal.waitingBanner:IsShown(), "Waiting banner shown while AH is closed")
+check(modal.waitingFs and modal.waitingFs:GetText() == "Please open Auction House to start.",
+	"Waiting banner text is strictly 'Please open Auction House to start.'")
+check(modal.spotlightCard and not modal.spotlightCard:IsShown(),
+	"Spotlight card (with Open in AH button) is completely hidden while AH is closed")
+check(modal.rows[1]:IsShown() and modal.rows[2]:IsShown(), "Item cards remain visible while waiting for AH")
+check(#ahSearches == 0, "No Blizzard AH search fired while AH is closed")
+
+-- Buying For slide-out toggle works even while waiting
+check(math.floor(modal:GetWidth() + 0.5) == 396, "Compact AH Trade Strip width is 396")
+check(modal.treePane and not modal.treePane:IsShown(), "Craft Tree slide-out pane hidden when compact")
+modal.extendBtn:Click("LeftButton")
+check(math.floor(modal:GetWidth() + 0.5) == 706, "Extended Buying For widens AH Trade Strip to 706")
+check(MerchantMasterDB.ahBuyerExtended == true, "Buying For extended state persisted to SavedVariables")
+check(modal.treePane:IsShown(), "Craft Tree slide-out pane visible when Buying For is toggled ON")
+check(modal.treeChainNodes[1]:IsShown() and modal.treeChainNodes[2]:IsShown() and modal.treeChainNodes[3]:IsShown(),
+	"3-step sub-craft chain (Small Flame Sac -> Fire Oil -> Fire Protection Potion) rendered in Craft Tree")
+check(modal.treeChainNodes[2].textFs:GetText():find("Fire Oil", 1, true) ~= nil, "Chain node 2 mentions Fire Oil sub-craft")
+check(modal.treeDestRows[1]:IsShown() and modal.treeDestRows[2]:IsShown() and modal.treeDestRows[3]:IsShown(),
+	"All 3 Cart Destinations populated in right pane")
+
+-- AUCTION_HOUSE_SHOW while waiting: hides waitingBanner, shows spotlightCard, auto-loads item #1, keeps main panel hidden!
+_G.AuctionHouseFrame:Show()
+fireEvent("AUCTION_HOUSE_SHOW")
+check(not modal.waitingBanner:IsShown(), "AUCTION_HOUSE_SHOW hides waiting banner")
+check(modal.spotlightCard:IsShown(), "AUCTION_HOUSE_SHOW reveals Active Deal Spotlight card")
+check(pst.waitingForAH == false, "waitingForAH cleared on AUCTION_HOUSE_SHOW")
+check(not mainPanel:IsShown(), "AUCTION_HOUSE_SHOW keeps giant main panel hidden while in AH Buying Mode")
+check(#ahSearches == 1 and ahSearches[1].itemID == 4402 and ahSearches[1].qty == 22,
+	"AUCTION_HOUSE_SHOW auto-loads item #1 (22x Small Flame Sac) in Blizzard AH")
+
+-- AUCTION_HOUSE_CLOSED returns modal cleanly to Waiting state when items remain unbought
+_G.AuctionHouseFrame:Hide()
+fireEvent("AUCTION_HOUSE_CLOSED")
+check(modal:IsShown(), "AH Trade Strip stays visible when AH closes mid-queue")
+check(modal.waitingBanner:IsShown(), "Waiting banner returns on AUCTION_HOUSE_CLOSED")
+check(not modal.spotlightCard:IsShown(), "Spotlight card hides again on AUCTION_HOUSE_CLOSED")
+check(modal.waitingFs:GetText() == "Please open Auction House to start.", "Exact waiting text preserved after AH closes")
+
+-- Collapse Buying For back to compact 396
+modal.extendBtn:Click("LeftButton")
+check(math.floor(modal:GetWidth() + 0.5) == 396, "Toggling Buying For OFF collapses width back to 396")
+check(not modal.treePane:IsShown(), "Craft Tree pane hidden after collapse")
+
+-- Restore Full button exits AH Buying Mode and restores main MerchantMaster panel
+modal.restoreBtn:Click("LeftButton")
+check(app._ahBuyingMode == false, "Restore Full clears app._ahBuyingMode")
+check(not modal:IsShown(), "Restore Full hides AH Trade Strip")
+check(mainPanel:IsShown(), "Restore Full restores full MerchantMaster window")
+
+-- 8. V3 Owner Upgrades: Overview stats (qty+price), Expected/Live/Diff Spotlight, centered Open in AH,
+--    Auctionator hidden, NO "For ..." row hints, NO "Crafting Order" dest pills, selectable destination filter,
+--    and genuine scrolling + visible scrollbars on BOTH Buying List and All Cart Destinations!
+_G.AuctionHouseFrame:Show()
+MerchantMasterDB.ahBuyerExtended = true
+local v3Rows = {}
+for idx = 1, 10 do
+	local destName = "Craft Goal " .. tostring(idx <= 8 and idx or (idx - 2))
+	v3Rows[#v3Rows + 1] = {
+		name = "Reagent " .. tostring(idx),
+		itemID = 50000 + idx,
+		qty = 5,
+		ahUnitPrice = 1000, -- 10s expected each
+		categoryName = destName,
+		sourceKind = "craft_order",
+		sourceLabel = "Crafting Order",
+	}
+end
+mockLiveCommodity[50001] = { { unitPrice = 800, quantity = 50 } }  -- -20% cheaper (-2s)
+mockLiveCommodity[50002] = { { unitPrice = 1000, quantity = 50 } } -- exact match (0c / 0%)
+mockLiveCommodity[50003] = { { unitPrice = 1300, quantity = 50 } } -- +30% jump (+3s)
+
+ahSearches = {}
+local v3Ok = app.sendShoppingRowsToBuyer(v3Rows, "Shopping List")
+check(v3Ok == true, "V3 10-item / 8-destination cart loaded")
+
+-- 8a. Auctionator button completely removed from AH Trade Strip
+check(modal.modeBtn == nil, "Auctionator button is removed from AH Trade Strip")
+
+-- 8b. Centered Open in AH button (no off-center left dot!)
+check(modal.buyBtn.dot == nil, "Open in AH has no off-center left dot")
+check(modal.buyBtn:GetText() == "Open in AH", "Open in AH label preserved")
+
+local function stripColors(s)
+	return tostring(s or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+end
+
+-- 8c. Bigger Spotlight with Expected / Live AH / Difference + zero clutter
+ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 50001)
+local v3st = cb.GetState()
+check(v3st.items[1].priceDiffCopper == -200 and v3st.items[1].priceDiffPct == -20,
+	"Cheaper live AH stores signed priceDiffCopper=-200 and priceDiffPct=-20")
+check(modal.metricsBox and modal.metricsBox:IsShown(), "Expected / Live AH / Difference metrics box shown in Spotlight")
+check(stripColors(modal.spotExpectedFs:GetText()):find("10s", 1, true) ~= nil, "Spotlight Expected shows 10s, got: " .. stripColors(modal.spotExpectedFs:GetText()))
+check(stripColors(modal.spotLiveFs:GetText()):find("8s", 1, true) ~= nil, "Spotlight Live AH shows 8s, got: " .. stripColors(modal.spotLiveFs:GetText()))
+check(stripColors(modal.spotDiffFs:GetText()):find("-20%", 1, true) ~= nil, "Spotlight Difference shows negative -20% savings")
+check(modal.noticeFs:IsShown() and modal.noticeBar and modal.noticeBar:IsShown(), "Live notice pill bar shown when notice text is active")
+
+-- Exact match check on item 2
+cb.SelectItem(2)
+ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 50002)
+check(v3st.items[2].priceDiffCopper == 0 and v3st.items[2].priceDiffPct == 0, "Exact match diff is 0c / 0%")
+check(modal.spotDiffFs:GetText():find("0%", 1, true) ~= nil, "Spotlight Difference shows 0c (0%) on exact match")
+
+-- Pricier check on item 3
+cb.SelectItem(3)
+ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 50003)
+check(v3st.items[3].priceDiffCopper == 300 and v3st.items[3].priceDiffPct == 30, "Pricier live AH stores +300c / +30%")
+check(modal.spotDiffFs:GetText():find("+30%", 1, true) ~= nil, "Spotlight Difference shows +30% warning")
+
+-- 8d. Overview stats track Bought & To Buy in BOTH price and quantities
+cb.MarkBought(1) -- 5 units at 800c live = 4000c spent
+local ov = cb.GetOverviewStats()
+check(ov.totalItems == 10 and ov.boughtItems == 1 and ov.remainingItems == 9, "Overview item counts: 1/10 bought, 9 remaining")
+check(ov.totalUnits == 50 and ov.boughtUnits == 5 and ov.remainingUnits == 45, "Overview unit counts: 5/50 qty bought, 45 remaining")
+check(ov.spentCopper == 4000, "Overview spentCopper tracks exact 4000c (40s) spent")
+check(ov.totalEstCopper == 50000, "Overview totalEstCopper is 50000c (5g)")
+check(modal.summaryFs:GetText():find("Bought:", 1, true) ~= nil and modal.summaryFs:GetText():find("5/50 qty", 1, true) ~= nil,
+	"Ribbon line 1 displays Bought items, qty, and spent price")
+check(modal.toBuySummaryFs:GetText():find("To Buy:", 1, true) ~= nil and modal.toBuySummaryFs:GetText():find("45 qty", 1, true) ~= nil,
+	"Ribbon line 2 displays To Buy items, qty, and remaining/total price")
+
+-- 8e. Buying List rows have NO "For ..." subtitle & visible scrollbar when > 8 items
+check(not modal.rows[1].cells.hint:IsShown(), "Buying List rows hide 'For ...' subtitle")
+check(modal.listScrollTrack:IsShown(), "Buying List scrollbar visible for 10 items (> 8 visible)")
+local firstIdxBefore = modal.rows[1]._itemIndex
+modal.SetListScrollOffset(2)
+check(modal.GetListScrollOffset() == 2 and modal.rows[1]._itemIndex == firstIdxBefore + 2,
+	"Buying List scrolls cleanly via offset")
+modal.SetListScrollOffset(0)
+
+-- 8f. All Cart Destinations: NO "Crafting Order" pills, visible scrollbar when > 5 goals, and clickable filtering!
+local allDests = cb.GetAllDestinations()
+check(#allDests == 8, "GetAllDestinations returns all 8 destinations (no cap), got " .. #allDests)
+check(modal.treeDestRows[1].tagPill == nil, "All Cart Destinations have NO 'Crafting Order' source pills")
+check(modal.treeDestRows[1].progFs:GetText():find("1/1", 1, true) ~= nil, "Destination 1 shows clean bought progress 1/1")
+check(modal.destScrollTrack:IsShown(), "All Cart Destinations scrollbar visible for 8 goals (> 5 visible)")
+local firstDestBefore = modal.treeDestRows[1]._destKey
+modal.SetDestScrollOffset(2)
+check(modal.GetDestScrollOffset() == 2 and modal.treeDestRows[1]._destKey ~= firstDestBefore,
+	"All Cart Destinations scrolls cleanly via offset")
+modal.SetDestScrollOffset(0)
+
+-- Click Craft Goal 7 (which has 2 reagents: Reagent 7 and Reagent 9)
+modal.SetDestScrollOffset(3) -- brings Craft Goal 7 into visible slots (goals 4,5,6,7,8 -> slot 4)
+local clickedGoal7 = false
+for _, dr in ipairs(modal.treeDestRows) do
+	if dr:IsShown() and dr._destKey == "Craft Goal 7" then
+		dr:Click("LeftButton")
+		clickedGoal7 = true
+		break
+	end
+end
+check(clickedGoal7 == true, "Found and clicked Craft Goal 7 in scrolled Destinations list")
+check(cb.GetDestinationFilter() == "Craft Goal 7", "Clicking destination activates destination filter")
+check(modal.filterBar:IsShown() and modal.filterFs:GetText():find("Craft Goal 7", 1, true) ~= nil,
+	"Active destination filter bar shown above Buying List")
+local visFiltered = cb.GetVisibleItems()
+check(#visFiltered == 2 and visFiltered[1].item.itemID == 50007 and visFiltered[2].item.itemID == 50009,
+	"Buying List filtered strictly to Craft Goal 7's 2 reagents")
+check(modal.rows[1]:IsShown() and modal.rows[2]:IsShown() and not modal.rows[3]:IsShown(),
+	"Only 2 filtered rows rendered in Buying List")
+
+-- Click Clear button to restore all items
+modal.filterClearBtn:Click("LeftButton")
+check(cb.GetDestinationFilter() == nil, "Clear button removes destination filter")
+check(not modal.filterBar:IsShown(), "Filter bar hides after clearing filter")
+check(#cb.GetVisibleItems() == 10, "All 10 items restored after clearing destination filter")
+
+-- Clicking same destination twice toggles filter ON then OFF
+modal.SetDestScrollOffset(0)
+modal.treeDestRows[2]:Click("LeftButton")
+check(cb.GetDestinationFilter() == "Craft Goal 2", "Click 1 selects Craft Goal 2 filter")
+modal.treeDestRows[2]:Click("LeftButton")
+check(cb.GetDestinationFilter() == nil, "Click 2 on active destination toggles filter back to All")
+
+-- 9. Compact Proposal B: Buy-Cap Thermometer Price Gauge + OVER! row badge
+check(modal.capGauge and not modal.capGauge:IsShown(), "Non-cap cart hides thermometer capGauge")
+check(modal.spotlightCard:GetHeight() == 156, "Non-cap cart keeps 156px Spotlight height, got " .. tostring(modal.spotlightCard:GetHeight()))
+
+app.exitAHBuyingMode(false)
+
+local capRows = {
+	{
+		name = "Heavy Blasting Powder",
+		qty = 20,
+		itemID = 50101,
+		ahUnitPrice = 310,
+		maxBuyUnit = 395,
+		breakEvenUnit = 436,
+		categoryName = "Heavy Dynamite",
+		targetName = "Heavy Dynamite",
+		targetItemID = 4378,
+		sourceKind = "craft_order",
+		sourceLabel = "Crafting Order",
+	},
+	{
+		name = "Solid Stone",
+		qty = 40,
+		itemID = 50102,
+		ahUnitPrice = 350,
+		maxBuyUnit = 395,
+		breakEvenUnit = 436,
+		categoryName = "Solid Dynamite",
+		targetName = "Solid Dynamite",
+		targetItemID = 10507,
+		sourceKind = "craft_order",
+		sourceLabel = "Crafting Order",
+	},
+}
+mockLiveCommodity[50101] = { { unitPrice = 310, quantity = 40 } } -- safe (85c under 395c cap)
+mockLiveCommodity[50102] = { { unitPrice = 420, quantity = 40 } } -- over cap (+25c over 395c cap)
+
+local capOk = app.sendShoppingRowsToBuyer(capRows, "Vendor Crafter Plan")
+check(capOk == true, "Capped cart loaded into AH Trade Strip")
+check(modal.capGauge and modal.capGauge:IsShown(), "Capped cart reveals thermometer capGauge when AH open")
+check(modal.spotlightCard:GetHeight() == 182, "Capped cart expands Spotlight height to 182px, got " .. tostring(modal.spotlightCard:GetHeight()))
+check(not modal.capLivePin:IsShown(), "Live AH needle hidden before commodity scan returns")
+check(stripColors(modal.capLeftFs:GetText()):find("MAX BUY", 1, true) ~= nil,
+	"Cap gauge left label shows MAX BUY threshold, got: " .. stripColors(modal.capLeftFs:GetText()))
+
+-- Item 1 live scan below cap: safe green margin + needle < 80%
+ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 50101)
+check(modal.capLivePin:IsShown(), "Safe item reveals live AH needle on thermometer")
+check(type(modal.capGauge._liveFrac) == "number" and modal.capGauge._liveFrac < 0.80,
+	"Safe item positions live AH needle left of 80% cap tick, got " .. tostring(modal.capGauge._liveFrac))
+local capSafeRight = stripColors(modal.capRightFs:GetText())
+check(capSafeRight:find("85c", 1, true) ~= nil and capSafeRight:find("left", 1, true) ~= nil,
+	"Safe item right label shows 85c left headroom, got: " .. capSafeRight)
+
+-- Item 2 live scan above cap: STOP warning + needle > 80% + OVER! row pill
+cb.SelectItem(2)
+ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 50102)
+check(modal.capLivePin:IsShown(), "Over-cap item reveals live AH needle on thermometer")
+check(type(modal.capGauge._liveFrac) == "number" and modal.capGauge._liveFrac > 0.80,
+	"Over-cap item positions live AH needle right of 80% cap tick, got " .. tostring(modal.capGauge._liveFrac))
+local capOverRight = stripColors(modal.capRightFs:GetText())
+check(capOverRight:find("STOP", 1, true) ~= nil and capOverRight:find("25c", 1, true) ~= nil,
+	"Over-cap item right label shows STOP +25c over, got: " .. capOverRight)
+check(stripColors(modal.rows[2].statusPill.fs:GetText()) == "OVER!",
+	"Over-cap Buying List row pill shows OVER!, got: " .. stripColors(modal.rows[2].statusPill.fs:GetText()))
+
+-- Repaint across Goblin skin, Standard Dark, and Standard Light without errors
+if ns.Theme and ns.Theme.SetSkin and ns.Theme.SetMode then
+	ns.Theme.SetSkin("goblin")
+	modal.Render()
+	check(modal.capGauge:IsShown() and stripColors(modal.rows[2].statusPill.fs:GetText()) == "OVER!",
+		"Goblin skin repaints thermometer gauge and OVER! badge cleanly")
+	ns.Theme.SetSkin("standard")
+	ns.Theme.SetMode("dark")
+	modal.Render()
+	check(modal.capGauge:IsShown(), "Standard Dark repaints thermometer gauge cleanly")
+	ns.Theme.SetMode("light")
+	modal.Render()
+	check(modal.capGauge:IsShown() and stripColors(modal.rows[2].statusPill.fs:GetText()) == "OVER!",
+		"Standard Light repaints thermometer gauge and OVER! badge cleanly")
+	ns.Theme.SetMode("dark")
+	modal.Render()
+end
+
+app.exitAHBuyingMode(false)
+
+-- Restore mocks from V1-V3 AH Buyer suite
+app.searchAH = origSearchAH
+if _G.C_Timer and origAfter then _G.C_Timer.After = origAfter end
+
+---------------------------------------------------------------------------------------------------
+-- 10. 4-Stage OrderFlow Engine Suite (AH -> Vendor -> Collect Owned -> Crafting Task List)
+---------------------------------------------------------------------------------------------------
+local of = app.orderFlow
+check(of ~= nil and of == ns.MarketScan.OrderFlow, "app.orderFlow / ns.MarketScan.OrderFlow exposed")
+
+-- Track CastSpellByName to guarantee zero-taint compliance (must NEVER be invoked)
+local origCastSpellByName = _G.CastSpellByName
+local castSpellCalled = false
+_G.CastSpellByName = function() castSpellCalled = true end
+
+-- Save globals we mock for Stages 2-4
+local origCContainer = _G.C_Container
+local origGetMerchantNumItems = _G.GetMerchantNumItems
+local origGetMerchantItemID = _G.GetMerchantItemID
+local origGetMerchantItemInfo = _G.GetMerchantItemInfo
+local origGetMerchantItemMaxStack = _G.GetMerchantItemMaxStack
+local origBuyMerchantItem = _G.BuyMerchantItem
+local origGetMoney = _G.GetMoney
+local origMerchantFrame = _G.MerchantFrame
+local origBankFrame = _G.BankFrame
+local origMailFrame = _G.MailFrame
+local origTradeSkillFrame = _G.TradeSkillFrame
+local origCraftFrame = _G.CraftFrame
+local origProfessionsFrame = _G.ProfessionsFrame
+local origCTradeSkillUI = _G.C_TradeSkillUI
+local origGetInboxNumItems = _G.GetInboxNumItems
+local origGetInboxHeaderInfo = _G.GetInboxHeaderInfo
+local origGetInboxItem = _G.GetInboxItem
+local origGetInboxItemLink = _G.GetInboxItemLink
+local origTakeInboxItem = _G.TakeInboxItem
+local origClearCursor = _G.ClearCursor
+local origGetTradeSkillLine = _G.GetTradeSkillLine
+local origGetNumTradeSkills = _G.GetNumTradeSkills
+local origGetTradeSkillInfo = _G.GetTradeSkillInfo
+local origGetTradeSkillRecipeLink = _G.GetTradeSkillRecipeLink
+local origSelectTradeSkill = _G.SelectTradeSkill
+local origTradeSkillFrameSetSel = _G.TradeSkillFrame_SetSelection
+local origDoTradeSkill = _G.DoTradeSkill
+local origGetCraftDisplaySkillLine = _G.GetCraftDisplaySkillLine
+local origGetNumCrafts = _G.GetNumCrafts
+local origGetCraftInfo = _G.GetCraftInfo
+local origGetCraftRecipeLink = _G.GetCraftRecipeLink
+local origSelectCraft = _G.SelectCraft
+local origCraftFrameSetSel = _G.CraftFrame_SetSelection
+local origDoCraft = _G.DoCraft
+local origIsForeignTS = ns.IsForeignTradeSkill
+local origGetBagCountByID = app.getBagCountByID
+
+-- Reusable live bag + bank + container mock
+local mockBags = { [0] = {}, [1] = {} }
+local mockBank = { [-1] = {}, [5] = {} }
+local mockBagMaxSlots = { [0] = 4, [1] = 4 }
+local mockBankMaxSlots = { [-1] = 6, [5] = 4 }
+local bankUseCalls, bankSplitCalls, bankPickupCalls, cursorClears = {}, {}, {}, 0
+
+local function setBagItem(bag, slot, itemID, qty)
+	if itemID and qty and qty > 0 then
+		mockBags[bag][slot] = { itemID = itemID, stackCount = qty, isLocked = false }
+	else
+		mockBags[bag][slot] = nil
+	end
+end
+
+local function setBankItem(bag, slot, itemID, qty, locked)
+	if itemID and qty and qty > 0 then
+		mockBank[bag][slot] = { itemID = itemID, stackCount = qty, isLocked = locked == true }
+	else
+		mockBank[bag][slot] = nil
+	end
+end
+
+local function getMockBagQty(itemID)
+	local sum = 0
+	for b = 0, 1 do
+		for s = 1, mockBagMaxSlots[b] do
+			local it = mockBags[b][s]
+			if it and it.itemID == itemID then sum = sum + it.stackCount end
+		end
+	end
+	return sum
+end
+
+local function addMockBagQty(itemID, delta)
+	if delta <= 0 then return end
+	for b = 0, 1 do
+		for s = 1, mockBagMaxSlots[b] do
+			local it = mockBags[b][s]
+			if it and it.itemID == itemID then
+				it.stackCount = it.stackCount + delta
+				return
+			end
+		end
+	end
+	for b = 0, 1 do
+		for s = 1, mockBagMaxSlots[b] do
+			if not mockBags[b][s] then
+				mockBags[b][s] = { itemID = itemID, stackCount = delta, isLocked = false }
+				return
+			end
+		end
+	end
+end
+
+app.getBagCountByID = nil -- exercise live C_Container bag scanner directly
+_G.C_Container = {
+	GetContainerNumSlots = function(b)
+		if mockBags[b] then return mockBagMaxSlots[b] or 0 end
+		if mockBank[b] then return mockBankMaxSlots[b] or 0 end
+		return 0
+	end,
+	GetContainerItemInfo = function(b, s)
+		if mockBags[b] then return mockBags[b][s] end
+		if mockBank[b] then return mockBank[b][s] end
+		return nil
+	end,
+	GetContainerNumFreeSlots = function(b)
+		if not mockBags[b] then return 0, 0 end
+		local free = 0
+		for s = 1, mockBagMaxSlots[b] do
+			if not mockBags[b][s] then free = free + 1 end
+		end
+		return free, 0
+	end,
+	UseContainerItem = function(b, s)
+		bankUseCalls[#bankUseCalls + 1] = { bag = b, slot = s }
+		local entry = mockBank[b] and mockBank[b][s]
+		if entry then
+			addMockBagQty(entry.itemID, entry.stackCount)
+			mockBank[b][s] = nil
+		end
+	end,
+	SplitContainerItem = function(b, s, qty)
+		bankSplitCalls[#bankSplitCalls + 1] = { bag = b, slot = s, qty = qty }
+		local entry = mockBank[b] and mockBank[b][s]
+		if entry and entry.stackCount >= qty then
+			entry.stackCount = entry.stackCount - qty
+			if entry.stackCount <= 0 then mockBank[b][s] = nil end
+			_G._mmSplitPayload = { itemID = entry.itemID, stackCount = qty }
+		end
+	end,
+	PickupContainerItem = function(b, s)
+		bankPickupCalls[#bankPickupCalls + 1] = { bag = b, slot = s }
+		if _G._mmSplitPayload and mockBags[b] and not mockBags[b][s] then
+			mockBags[b][s] = { itemID = _G._mmSplitPayload.itemID, stackCount = _G._mmSplitPayload.stackCount, isLocked = false }
+			_G._mmSplitPayload = nil
+		end
+	end,
+}
+_G.ClearCursor = function() cursorClears = cursorClears + 1 end
+
+-- Mock frames for Vendor / Bank / Mail / TradeSkill / Craft / Professions
+local function makeSimpleFrame(name)
+	local f = { _name = name, _shown = false }
+	function f:Show() self._shown = true end
+	function f:Hide() self._shown = false end
+	function f:IsShown() return self._shown end
+	return f
+end
+_G.MerchantFrame = makeSimpleFrame("MerchantFrame")
+_G.BankFrame = makeSimpleFrame("BankFrame")
+_G.MailFrame = makeSimpleFrame("MailFrame")
+_G.TradeSkillFrame = makeSimpleFrame("TradeSkillFrame")
+_G.CraftFrame = makeSimpleFrame("CraftFrame")
+_G.ProfessionsFrame = makeSimpleFrame("ProfessionsFrame")
+_G.AuctionHouseFrame:Hide()
+
+-- 9a. Unified 4-stage extraction from mixed hierarchical shopping rows
+--     Includes: 2-level nested Sub-Craft (Depth 2 -> Depth 1 -> Main Order),
+--               split row (ownedUsed > 0 AND qty > 0), vendor items, AH items,
+--               and a second Main Order for cross-stage destination filtering.
+setBagItem(0, 1, 70001, 4) -- 4x Owned Herb already in bags
+local mixedRows = {
+	-- Main Order 1: Greater Fire Elixir (Alchemy, spell 90010, Depth 0)
+	{
+		isMainRow = true, indent = 0, mainGroupKey = "grp:fire",
+		name = "Greater Fire Elixir", itemID = 70100, spellID = 90010, prof = "alchemy",
+		qty = 2, sourceKind = "craft_order", sourceLabel = "Craft Order",
+		reagents = { { itemID = 70090, qty = 1 }, { itemID = 70010, qty = 5 } },
+	},
+	-- Depth 1 Sub-Craft: Refined Fire Oil (Alchemy, spell 90005)
+	{
+		isMainRow = false, indent = 1, mainGroupKey = "grp:fire", isSubBranchRoot = true, subGroupKey = "grp:fire:sub:1",
+		name = "Refined Fire Oil", itemID = 70090, spellID = 90005, craftProf = "alchemy",
+		qty = 2, makeMyself = true, categoryName = "Greater Fire Elixir",
+		sourceKind = "craft_order", sourceLabel = "Craft Order",
+		reagents = { { itemID = 70080, qty = 2 }, { itemID = 70001, qty = 5 } },
+	},
+	-- Depth 2 Sub-Craft: Smelted Ember Core (Mining, spell 90001, deepest!)
+	{
+		isMainRow = false, indent = 2, mainGroupKey = "grp:fire", isSubRow = true, parentSubName = "Refined Fire Oil",
+		name = "Smelted Ember Core", itemID = 70080, spellID = 90001, craftProf = "mining",
+		qty = 4, makeMyself = true, categoryName = "Greater Fire Elixir",
+		sourceKind = "craft_order", sourceLabel = "Craft Order",
+		reagents = { { itemID = 70002, qty = 1 } },
+	},
+	-- AH Leaf under Depth 2 Sub-Craft: Raw Ember Ore (item 70002)
+	{
+		isMainRow = false, indent = 3, mainGroupKey = "grp:fire", isSubRow = true, parentSubName = "Smelted Ember Core",
+		name = "Raw Ember Ore", itemID = 70002, qty = 4, ahUnitPrice = 250,
+		categoryName = "Greater Fire Elixir", sourceKind = "craft_order", sourceLabel = "Craft Order",
+	},
+	-- Split Row: Owned Herb (item 70001) -> 10 ownedUsed (4 bags + 3 bank + 2 mail + 1 alt) AND 6 AH qty!
+	{
+		isMainRow = false, indent = 2, mainGroupKey = "grp:fire", isSubRow = true, parentSubName = "Refined Fire Oil",
+		name = "Sunfire Herb", itemID = 70001, qty = 6, ownedUsed = 10, ahUnitPrice = 500,
+		categoryName = "Greater Fire Elixir", sourceKind = "craft_order", sourceLabel = "Craft Order",
+	},
+	-- Vendor Leaf 1: Crystal Vial (item 70010, qty 45 -> tests maxStack=20 chunking!)
+	{
+		isMainRow = false, indent = 1, mainGroupKey = "grp:fire",
+		name = "Crystal Vial", itemID = 70010, qty = 45, isVendor = true, vendorUnitPrice = 50,
+		categoryName = "Greater Fire Elixir", sourceKind = "craft_order", sourceLabel = "Craft Order",
+	},
+	-- Main Order 2: Enchant Bracer - Firepower (Enchanting, spell 90020, CraftFrame!)
+	{
+		isMainRow = true, indent = 0, mainGroupKey = "grp:ench",
+		name = "Enchant Bracer - Firepower", itemID = nil, spellID = 90020, prof = "enchanting",
+		qty = 1, sourceKind = "craft_order", sourceLabel = "Craft Order",
+		reagents = { { itemID = 70011, qty = 7 }, { itemID = 70003, qty = 2 } },
+	},
+	-- Vendor Leaf 2: Pack Vial (item 70011, qty 7, vendor sells stackCount=5)
+	{
+		isMainRow = false, indent = 1, mainGroupKey = "grp:ench",
+		name = "Enchanting Flux", itemID = 70011, qty = 7, isVendor = true, vendorUnitPrice = 100,
+		categoryName = "Enchant Bracer - Firepower", sourceKind = "craft_order", sourceLabel = "Craft Order",
+	},
+	-- Vendor Leaf 3: Token Item (extended cost - skipped by BuyAll)
+	{
+		isMainRow = false, indent = 1, mainGroupKey = "grp:ench",
+		name = "Token Reagent", itemID = 70012, qty = 2, isVendor = true, vendorUnitPrice = 100,
+		categoryName = "Enchant Bracer - Firepower", sourceKind = "craft_order", sourceLabel = "Craft Order",
+	},
+	-- Vendor Leaf 4: Sold-Out Limited Item (numAvailable=0 - skipped by BuyAll)
+	{
+		isMainRow = false, indent = 1, mainGroupKey = "grp:ench",
+		name = "Limited Pattern", itemID = 70013, qty = 1, isVendor = true, vendorUnitPrice = 500,
+		categoryName = "Enchant Bracer - Firepower", sourceKind = "craft_order", sourceLabel = "Craft Order",
+	},
+	-- AH Leaf under Main Order 2: Arcane Dust (item 70003)
+	{
+		isMainRow = false, indent = 1, mainGroupKey = "grp:ench",
+		name = "Arcane Dust", itemID = 70003, qty = 2, ahUnitPrice = 300,
+		categoryName = "Enchant Bracer - Firepower", sourceKind = "craft_order", sourceLabel = "Craft Order",
+	},
+}
+
+local counts = of.LoadFromShoppingRows(mixedRows, {
+	title = "4-Stage Test Cart",
+	ownershipProvider = function(itemID)
+		if itemID == 70001 then
+			return {
+				bags = 4,
+				bank = 3,
+				mail = 2,
+				alts = { { name = "Bankalt", location = "Bank", qty = 5 } },
+			}
+		end
+		return { bags = getMockBagQty(itemID), bank = 0, mail = 0, alts = {} }
+	end,
+})
+
+check(counts.ah == 3, "Stage 1 extracted 3 AH items (including split row qty=6), got " .. tostring(counts.ah))
+check(counts.vendor == 4, "Stage 2 extracted 4 Vendor items, got " .. tostring(counts.vendor))
+check(counts.collect == 4, "Stage 3 split 10x Sunfire Herb across 4 buckets (bags/bank/mail/alt), got " .. tostring(counts.collect))
+check(counts.craft == 4, "Stage 4 extracted 4 Craft tasks (2 sub-crafts + 2 main orders), got " .. tostring(counts.craft))
+
+local ofState = of.GetState()
+check(of.GetActiveStage() == "ah", "Initial activeStage is ah when AH items present")
+local pipe = of.GetPipelineSummary()
+check(#pipe == 4 and pipe[1].key == "ah" and pipe[2].key == "collect" and pipe[3].key == "vendor" and pipe[4].key == "craft",
+	"GetPipelineSummary returns all 4 Task Strip stages in canonical order (1. AH -> 2. Collect -> 3. Vendor -> 4. Craft)")
+check(pipe[1].total == 3 and pipe[2].total == 4 and pipe[3].total == 4 and pipe[4].total == 4 and of.HasSellItems(),
+	"Pipeline summary stage totals match extracted counts (and main output queued in MM Sell)")
+
+-- 9b. Stage 3 Vendor Flow: NPC_PINS hint, merchant scan, maxStack chunking, BuyAll guards, BAG_UPDATE_DELAYED
+check(of.GetNextIncompleteStage("ah") == "collect" and of.GetNextIncompleteStage("collect") == "vendor"
+	and of.GetNextIncompleteStage("vendor") == "craft",
+	"Canonical pipeline order is 1. AH -> 2. Collect -> 3. Vendor -> 4. Craft")
+local pinHint, pinNpcID = of.LookupVendorHint(6270, "Alliance")
+check(pinHint == "Trade Goods Vendor" and pinNpcID == nil,
+	"LookupVendorHint falls back cleanly to Trade Goods Vendor when NPC_PINS is absent, got " .. tostring(pinHint))
+local fallbackHint = of.LookupVendorHint(70010, "Horde")
+check(fallbackHint == "Trade Goods Vendor", "LookupVendorHint falls back to Trade Goods Vendor")
+
+of.SetActiveStage("vendor")
+check(of.GetActiveStage() == "vendor", "SetActiveStage switches to vendor")
+check(of.GetWaitingMessage("vendor") == "Please open a Vendor to start.", "Closed vendor waiting message exact")
+local okClosedBuy, errClosedBuy = of.BuyVendorItem(1)
+check(okClosedBuy == false and errClosedBuy == "vendor_closed", "BuyVendorItem refuses when vendor is closed")
+
+local merchantBuyCalls = {}
+local mockMerchantStock = {
+	{ itemID = 70010, name = "Crystal Vial",    price = 50,  stackCount = 1, numAvailable = -1, maxStack = 20, hasExtendedCost = false },
+	{ itemID = 70011, name = "Enchanting Flux", price = 500, stackCount = 5, numAvailable = -1, maxStack = 20, hasExtendedCost = false },
+	{ itemID = 70012, name = "Token Reagent",   price = 0,   stackCount = 1, numAvailable = -1, maxStack = 20, hasExtendedCost = true  },
+	{ itemID = 70013, name = "Limited Pattern", price = 500, stackCount = 1, numAvailable = 0,  maxStack = 1,  hasExtendedCost = false },
+}
+_G.GetMerchantNumItems = function() return #mockMerchantStock end
+_G.GetMerchantItemID = function(slot) return mockMerchantStock[slot] and mockMerchantStock[slot].itemID end
+_G.GetMerchantItemInfo = function(slot)
+	local s = mockMerchantStock[slot]
+	if not s then return nil end
+	return s.name, 134400, s.price, s.stackCount, s.numAvailable, true, true, s.hasExtendedCost
+end
+_G.GetMerchantItemMaxStack = function(slot) return mockMerchantStock[slot] and mockMerchantStock[slot].maxStack or 20 end
+_G.GetMoney = function() return 500000 end
+_G.BuyMerchantItem = function(slot, qty)
+	merchantBuyCalls[#merchantBuyCalls + 1] = { slot = slot, qty = qty }
+	local s = mockMerchantStock[slot]
+	if s then
+		addMockBagQty(s.itemID, qty)
+	end
+end
+
+_G.MerchantFrame:Show()
+of.OnMerchantShow()
+check(of.GetWaitingMessage("vendor") == nil, "Open vendor clears waiting message")
+local vItems = ofState.stages.vendor.items
+check(vItems[1].inStockHere == true and vItems[1].merchantSlot == 1 and vItems[1].maxStack == 20 and vItems[1].status == "in_stock",
+	"MERCHANT_SHOW matches Crystal Vial slot 1 in stock")
+check(vItems[2].inStockHere == true and vItems[2].stackCount == 5 and vItems[2].liveUnit == 100,
+	"MERCHANT_SHOW computes liveUnit = price/stackCount (500/5 = 100c)")
+check(vItems[3].hasExtendedCost == true and vItems[4].numAvailable == 0,
+	"MERCHANT_SHOW captures hasExtendedCost and numAvailable=0 flags")
+
+-- Single click BuyVendorItem on Crystal Vial (needed=45, maxStack=20) -> buys first 20-stack chunk
+local okBuy1 = of.BuyVendorItem(1)
+check(okBuy1 == true and #merchantBuyCalls == 1 and merchantBuyCalls[1].slot == 1 and merchantBuyCalls[1].qty == 20,
+	"BuyVendorItem chunks 45 needed by maxStack=20 -> BuyMerchantItem(1, 20)")
+of.OnBagUpdateDelayed()
+check(vItems[1].bought == 20 and vItems[1].remaining == 25 and ofState.stages.vendor.spentCopper == 1000,
+	"BAG_UPDATE_DELAYED reconciles first 20 Crystal Vials (bought=20, remaining=25, spent=1000c)")
+
+-- BuyAllAtCurrentVendor finishes remaining 25 Crystal Vials (20 + 5) AND 7 Enchanting Flux (2 packs of 5),
+-- while skipping Token Reagent (hasExtendedCost) and Limited Pattern (numAvailable == 0)!
+merchantBuyCalls = {}
+local bulkCount = of.BuyAllAtCurrentVendor()
+check(bulkCount == 2, "BuyAllAtCurrentVendor bought 2 valid items and skipped extended-cost + sold-out, got " .. tostring(bulkCount))
+check(#merchantBuyCalls == 3
+	and merchantBuyCalls[1].slot == 1 and merchantBuyCalls[1].qty == 20
+	and merchantBuyCalls[2].slot == 1 and merchantBuyCalls[2].qty == 5
+	and merchantBuyCalls[3].slot == 2 and merchantBuyCalls[3].qty == 10,
+	"BuyAllAtCurrentVendor chunked 25 -> (20, 5) and 7-pack5 -> (10 units)")
+of.OnBagUpdateDelayed()
+check(vItems[1].status == "done" and vItems[1].remaining == 0, "Crystal Vial completed via BAG_UPDATE_DELAYED")
+check(vItems[2].status == "done" and vItems[2].remaining == 0, "Enchanting Flux completed via BAG_UPDATE_DELAYED")
+check(vItems[3].remaining == 2 and vItems[4].remaining == 1, "Skipped extended-cost and sold-out items untouched")
+
+-- Refusing direct BuyVendorItem on extended cost & sold out, then skipping them to finish Stage 2
+local okExt, errExt = of.BuyVendorItem(3)
+check(okExt == false and errExt == "extended_cost", "BuyVendorItem blocks hasExtendedCost item")
+local okSold, errSold = of.BuyVendorItem(4)
+check(okSold == false and errSold == "sold_out", "BuyVendorItem blocks numAvailable==0 sold-out item")
+of.SkipVendorItem(3)
+of.SkipVendorItem(4)
+local vStatsDone = of.GetStageStats("vendor")
+check(vStatsDone.complete == true and vStatsDone.remaining == 0, "Stage 3 Vendor complete after buying/skipping")
+check(ofState.stageCompletePrompt and ofState.stageCompletePrompt.nextStage == "craft"
+	and ofState.stageCompletePrompt.label == "Next: 4. Craft ->",
+	"Vendor completion surfaces 'Next: 4. Craft ->' prompt while Craft pending")
+
+_G.MerchantFrame:Hide()
+of.OnMerchantClosed()
+check(ofState.env.atVendor == false and vItems[3].inStockHere == false, "MERCHANT_CLOSED clears atVendor and liveVendorSlots")
+
+-- 9c. Stage 2 Collect Owned Flow: Bags -> Mail -> Bank -> Alt, dynamic waiting plaques, Bank full+partial split, Mail + COD guard, Alt non-blocking
+of.SetActiveStage("collect")
+check(of.GetActiveStage() == "collect", "SetActiveStage moves to Stage 2 Collect")
+
+local cItems = ofState.stages.collect.items
+local bySrc = {}
+for idx, it in ipairs(cItems) do bySrc[it.source] = { idx = idx, item = it } end
+check(bySrc.bags and bySrc.bags.item.status == "done" and bySrc.bags.item.needed == 4 and bySrc.bags.item.remaining == 0,
+	"In Bags bucket auto-marked done (4/4)")
+check(bySrc.mail and bySrc.mail.item.needed == 2 and bySrc.mail.item.remaining == 2 and bySrc.mail.item.status == "pending",
+	"In Mail bucket pending (2) before Bank")
+check(bySrc.bank and bySrc.bank.item.needed == 3 and bySrc.bank.item.remaining == 3 and bySrc.bank.item.status == "pending",
+	"In Bank bucket pending (3)")
+check(bySrc.mail.item._order < bySrc.bank.item._order and bySrc.mail.idx < bySrc.bank.idx,
+	"Mail bucket allocated and ordered strictly before Bank bucket (Inventory > Mail > Bank)")
+check(bySrc.alt and bySrc.alt.item.status == "alt_info" and bySrc.alt.item.altLabel == "On Alt: Bankalt (Bank 5x)",
+	"On Alt bucket passive alt_info with exact label including alt count, got: " .. tostring(bySrc.alt and bySrc.alt.item.altLabel))
+check(of.GetCollectWaitingMessage() == "Please open Mailbox or Bank to start.",
+	"Both Mail and Bank pending -> 'Please open Mailbox or Bank to start.'")
+
+-- Open Bank with a stack of 10 Sunfire Herb in BANK_CONTAINER (-1) slot 1 (needs 3 -> partial SplitContainerItem!)
+setBankItem(-1, 1, 70001, 10, false)
+_G.BankFrame:Show()
+of.OnBankShow()
+check(of.GetCollectWaitingMessage() == nil, "Opening Bank clears Collect waiting message")
+-- Re-index after sort
+bySrc = {}
+for idx, it in ipairs(ofState.stages.collect.items) do bySrc[it.source] = { idx = idx, item = it } end
+check(bySrc.bank.item.availableHere == 10 and bySrc.bank.item.status == "ready",
+	"BANKFRAME_OPENED scans BANK_CONTAINER(-1) and marks bank item ready (10 available)")
+
+-- Test bags-full guard on partial split
+for b = 0, 1 do
+	for s = 1, mockBagMaxSlots[b] do
+		if not mockBags[b][s] then setBagItem(b, s, 99999, 1) end
+	end
+end
+local okFull, errFull = of.WithdrawFromBank(bySrc.bank.idx)
+check(okFull == false and errFull == "bags_full" and ofState.notice == "Bags full - free 1 slot to split stack.",
+	"Partial bank split guards against full bags cleanly")
+
+-- Free 1 bag slot -> partial stack split uses ClearCursor + SplitContainerItem + PickupContainerItem!
+setBagItem(1, 4, nil, nil)
+bankSplitCalls, bankPickupCalls, cursorClears = {}, {}, 0
+local okSplit = of.WithdrawFromBank(bySrc.bank.idx)
+check(okSplit == true and cursorClears == 1 and #bankSplitCalls == 1 and bankSplitCalls[1].qty == 3 and #bankPickupCalls == 1,
+	"Partial bank withdrawal calls ClearCursor + SplitContainerItem(3) + PickupContainerItem")
+of.OnBagUpdateDelayed()
+check(bySrc.bank.item.collected == 3 and bySrc.bank.item.remaining == 0 and bySrc.bank.item.status == "done",
+	"BAG_UPDATE_DELAYED completes bank withdrawal (3/3)")
+for b = 0, 1 do
+	for s = 1, mockBagMaxSlots[b] do
+		if mockBags[b][s] and mockBags[b][s].itemID == 99999 then setBagItem(b, s, nil, nil) end
+	end
+end
+
+-- Test full-stack UseContainerItem path on a dedicated bank item
+of.OnBankClosed()
+_G.BankFrame:Hide()
+check(of.GetCollectWaitingMessage() == "Please open Mailbox to start.",
+	"After Bank done with Mail pending -> 'Please open Mailbox to start.'")
+
+-- Open Mailbox: mail #1 is COD (codAmount = 5000 -> MUST BE SKIPPED!), mail #2 is safe (2x item 70001)
+local mailTakeCalls = {}
+local mockInbox = {
+	{ sender = "Scammer", subject = "COD Trap", cod = 5000, hasItem = 1, attach = { [1] = { name = "Sunfire Herb", itemID = 70001, count = 2 } } },
+	{ sender = "Auction", subject = "Won",      cod = 0,    hasItem = 1, attach = { [1] = { name = "Sunfire Herb", itemID = 70001, count = 2 } } },
+}
+_G.GetInboxNumItems = function() return #mockInbox end
+_G.GetInboxHeaderInfo = function(idx)
+	local m = mockInbox[idx]
+	if not m then return nil end
+	return nil, nil, m.sender, m.subject, 0, m.cod, 30, m.hasItem
+end
+_G.GetInboxItem = function(mailIdx, attachIdx)
+	local m = mockInbox[mailIdx]
+	local a = m and m.attach and m.attach[attachIdx]
+	if not a then return nil end
+	return a.name, a.itemID, 134400, a.count, 1, true
+end
+_G.GetInboxItemLink = function(mailIdx, attachIdx)
+	local m = mockInbox[mailIdx]
+	local a = m and m.attach and m.attach[attachIdx]
+	if not a then return nil end
+	return "|cffffffff|Hitem:" .. tostring(a.itemID) .. "::::::::60:::::|h[" .. a.name .. "]|h|r"
+end
+_G.TakeInboxItem = function(mailIdx, attachIdx)
+	mailTakeCalls[#mailTakeCalls + 1] = { mailIdx = mailIdx, attachIdx = attachIdx }
+	local m = mockInbox[mailIdx]
+	local a = m and m.attach and m.attach[attachIdx]
+	if a then
+		addMockBagQty(a.itemID, a.count)
+		m.attach[attachIdx] = nil
+	end
+end
+
+_G.MailFrame:Show()
+of.OnMailShow()
+bySrc = {}
+for idx, it in ipairs(ofState.stages.collect.items) do bySrc[it.source] = { idx = idx, item = it } end
+check(bySrc.mail.item.availableHere == 2 and bySrc.mail.item.status == "ready",
+	"MAIL_SHOW ignores COD mail #1 and finds 2x Sunfire Herb in safe mail #2")
+local okMail = of.CollectFromMail(bySrc.mail.idx)
+check(okMail == true and #mailTakeCalls == 1 and mailTakeCalls[1].mailIdx == 2 and mailTakeCalls[1].attachIdx == 1,
+	"CollectFromMail invokes TakeInboxItem strictly on non-COD mail #2 (never COD mail #1)")
+of.OnBagUpdateDelayed()
+check(bySrc.mail.item.collected == 2 and bySrc.mail.item.remaining == 0 and bySrc.mail.item.status == "done",
+	"BAG_UPDATE_DELAYED completes mail collection (2/2)")
+
+-- Verify On Alt item keeps Stage 2 complete=false until resolved, while actionableRemaining == 0
+local cStatsDone = of.GetStageStats("collect")
+check(cStatsDone.actionableRemaining == 0 and cStatsDone.complete == false and cStatsDone.altCount == 1,
+	"Stage 2 Collect keeps complete=false while On Alt items remain (altCount=1, actionableRemaining=0)")
+check(ofState.stageCompletePrompt == nil,
+	"Stage 2 does not prematurely prompt completion while On Alt items are still outstanding")
+
+_G.MailFrame:Hide()
+of.OnMailClosed()
+
+-- 9d. Stage 4 Crafting Task List: Bottom-up topo sort, TradeSkillFrame + CraftFrame + C_TradeSkillUI,
+--     foreign-skill guard, bag readiness, UNIT_SPELLCAST_SUCCEEDED auto-progress & auto-advance
+local advCraft = of.AdvanceToNextStage()
+check(advCraft == "craft" and of.GetActiveStage() == "craft", "AdvanceToNextStage moves collect -> craft")
+
+local tasks = ofState.stages.craft.tasks
+check(#tasks == 4, "Stage 4 has 4 sorted craft tasks")
+-- Strict bottom-up topological order:
+-- 1) Depth 2 SUB-CRAFT: Smelted Ember Core (mining, spell 90001)
+-- 2) Depth 1 SUB-CRAFT: Refined Fire Oil (alchemy, spell 90005)
+-- 3) Depth 0 MAIN ORDER: Greater Fire Elixir (alchemy, spell 90010) OR Enchant Bracer (enchanting, spell 90020)
+check(tasks[1].spellID == 90001 and tasks[1].isSubCraft == true and tasks[1].depth == 2 and tasks[1].profBadge == "MINE",
+	"Task 1 is deepest Depth-2 SUB-CRAFT Smelted Ember Core (MINE)")
+check(tasks[2].spellID == 90005 and tasks[2].isSubCraft == true and tasks[2].depth == 1 and tasks[2].profBadge == "ALCH",
+	"Task 2 is Depth-1 SUB-CRAFT Refined Fire Oil (ALCH)")
+-- Greater Fire Elixir must strictly follow Refined Fire Oil
+local fireElixirIdx, enchBracerIdx = nil, nil
+for i, t in ipairs(tasks) do
+	if t.spellID == 90010 then fireElixirIdx = i end
+	if t.spellID == 90020 then enchBracerIdx = i end
+end
+check(fireElixirIdx and fireElixirIdx > 2 and tasks[fireElixirIdx].tier == "main_order",
+	"Main Order Greater Fire Elixir sorted strictly after its sub-crafts")
+check(enchBracerIdx and enchBracerIdx > 2 and tasks[enchBracerIdx].profBadge == "ENCH",
+	"Main Order Enchant Bracer sorted after sub-crafts with ENCH badge")
+
+-- Closed profession waiting message & zero CastSpellByName calls
+check(of.GetWaitingMessage("craft") == "Please open Mining to start.",
+	"Closed profession shows 'Please open Mining to start.'")
+local okClosedCraft, errClosedCraft = of.CraftActiveTask(1)
+check(okClosedCraft == false and errClosedCraft == "wrong_profession" and castSpellCalled == false,
+	"CraftActiveTask refuses when profession closed and never calls CastSpellByName")
+
+-- Classic TradeSkillFrame: Smelting -> mining, foreign-skill guard, SelectTradeSkill + DoTradeSkill
+local tsSelCalls, tsDoCalls = {}, {}
+local mockTSSkillLine = "Smelting"
+local mockTSList = {
+	{ name = "Smelting", sType = "header" },
+	{ name = "Smelted Ember Core", sType = "optimal", spellID = 90001 },
+	{ name = "Refined Fire Oil", sType = "optimal", spellID = 90005 },
+	{ name = "Greater Fire Elixir", sType = "optimal", spellID = 90010 },
+}
+_G.C_TradeSkillUI = { GetBaseProfessionInfo = function() return nil end, GetRecipeInfo = function() return nil end }
+_G.GetTradeSkillLine = function() return mockTSSkillLine, 300, 300 end
+_G.GetNumTradeSkills = function() return #mockTSList end
+_G.GetTradeSkillInfo = function(i) local r = mockTSList[i]; return r and r.name, r and r.sType end
+_G.GetTradeSkillRecipeLink = function(i)
+	local r = mockTSList[i]
+	return r and r.spellID and ("|cffffd000|Henchant:" .. tostring(r.spellID) .. "|h[" .. r.name .. "]|h|r") or nil
+end
+_G.SelectTradeSkill = function(i) tsSelCalls[#tsSelCalls + 1] = i end
+_G.TradeSkillFrame_SetSelection = function(i) tsSelCalls[#tsSelCalls + 1] = "set:" .. tostring(i) end
+_G.DoTradeSkill = function(i, qty) tsDoCalls[#tsDoCalls + 1] = { index = i, qty = qty } end
+
+-- Foreign TradeSkill rejection
+ns.IsForeignTradeSkill = function() return true end
+_G.TradeSkillFrame:Show()
+check(of.GetOpenProfession() == nil, "GetOpenProfession rejects foreign/linked trade skill window")
+ns.IsForeignTradeSkill = function() return false end
+
+of.OnTradeSkillShow()
+local openPK, openPF = of.GetOpenProfession()
+check(openPK == "mining" and openPF == "TradeSkillFrame", "Smelting maps to mining on TradeSkillFrame")
+check(of.GetWaitingMessage("craft") == nil, "Matching profession clears waiting message")
+
+-- Missing reagents check before putting Raw Ember Ore (70002) in bags
+local r0 = of.ComputeTaskReadiness(tasks[1])
+check(r0.matsReadyCount == 0 and r0.canCraftNow == 0, "Zero Raw Ember Ore in bags -> canCraftNow = 0")
+local okNoMats, errNoMats = of.CraftActiveTask(1)
+check(okNoMats == false and errNoMats == "missing_reagents", "CraftActiveTask refuses when reagents missing")
+
+-- Put 4x Raw Ember Ore (70002) into bags -> readiness jumps to 4/4!
+setBagItem(0, 2, 70002, 4)
+of.OnBagUpdateDelayed()
+local r1 = of.ComputeTaskReadiness(tasks[1])
+check(r1.matsReadyCount == 1 and r1.totalReagents == 1 and r1.canCraftNow == 4,
+	"Live bag readiness updates to matsReady=1/1, canCraftNow=4")
+
+tsSelCalls, tsDoCalls = {}, {}
+local okTSCraft = of.CraftActiveTask(1)
+check(okTSCraft == true and #tsDoCalls == 1 and tsDoCalls[1].index == 2 and tsDoCalls[1].qty == 4,
+	"CraftActiveTask executes SelectTradeSkill + DoTradeSkill(2, 4)")
+check(tsSelCalls[1] == 2 and tsSelCalls[2] == "set:2", "TradeSkillFrame selection synced before DoTradeSkill")
+
+-- Non-player UNIT_SPELLCAST_SUCCEEDED ignored; 4 player casts complete Task 1 and advance to Task 2
+check(of.OnSpellcastSucceeded("party1", 90001) == false, "Non-player UNIT_SPELLCAST_SUCCEEDED ignored")
+check(of.OnSpellcastSucceeded("player", 90001) == true and tasks[1].completedCrafts == 1 and tasks[1].remainingCrafts == 3,
+	"Player spellcast #1 decrements remainingCrafts to 3")
+of.OnSpellcastSucceeded("player", 90001)
+of.OnSpellcastSucceeded("player", 90001)
+of.OnSpellcastSucceeded("player", 90001)
+check(tasks[1].status == "done" and tasks[1].remainingCrafts == 0 and ofState.stages.craft.activeIndex == 2,
+	"4th spellcast marks Task 1 done and auto-advances activeIndex to Task 2 (Refined Fire Oil)")
+
+-- Switch to Modern ProfessionsFrame + C_TradeSkillUI for Alchemy (Tasks 2 -> 3)
+_G.TradeSkillFrame:Hide()
+_G.ProfessionsFrame:Show()
+local modernOpenCalls, modernSelectCalls, modernCraftCalls = {}, {}, {}
+_G.ProfessionsFrame.CraftingPage = {
+	RecipeList = {
+		SelectRecipe = function(_, info, skipScroll)
+			modernSelectCalls[#modernSelectCalls + 1] = { recipeID = info and info.recipeID, skipScroll = skipScroll }
+		end,
+	},
+}
+_G.C_TradeSkillUI = {
+	GetBaseProfessionInfo = function() return { professionID = 171, professionName = "Alchemy" } end,
+	GetRecipeInfo = function(spID)
+		if spID == 90005 or spID == 90010 then return { recipeID = spID, learned = true } end
+		return nil
+	end,
+	OpenRecipe = function(spID) modernOpenCalls[#modernOpenCalls + 1] = spID end,
+	CraftRecipe = function(spID, qty) modernCraftCalls[#modernCraftCalls + 1] = { spellID = spID, qty = qty } end,
+}
+-- Provide 4x Smelted Ember Core (70080) + 10x Sunfire Herb (70001) in bags for 2x Refined Fire Oil
+setBagItem(0, 3, 70080, 4)
+setBagItem(0, 1, 70001, 10)
+of.OnTradeSkillShow()
+local modPK, modPF = of.GetOpenProfession()
+check(modPK == "alchemy" and modPF == "ProfessionsFrame", "C_TradeSkillUI detects Alchemy on ProfessionsFrame")
+check(#modernOpenCalls == 0, "OnTradeSkillShow NEVER calls hardware-protected C_TradeSkillUI.OpenRecipe (zero Forever 16001 taint)")
+check(modernSelectCalls[#modernSelectCalls] and modernSelectCalls[#modernSelectCalls].recipeID == 90005,
+	"Opening Alchemy auto-selects unblocked task Refined Fire Oil (90005) via unprotected RecipeList:SelectRecipe")
+
+local okModCraft = of.CraftActiveTask(2)
+check(okModCraft == true and #modernCraftCalls == 1 and modernCraftCalls[1].spellID == 90005 and modernCraftCalls[1].qty == 2,
+	"Modern ProfessionsFrame calls C_TradeSkillUI.CraftRecipe(90005, 2)")
+
+-- Finish Refined Fire Oil (2 casts) -> auto-advances to same-profession Greater Fire Elixir (90010) via unprotected SelectRecipe!
+modernOpenCalls, modernSelectCalls = {}, {}
+of.OnSpellcastSucceeded("player", 90005)
+of.OnSpellcastSucceeded("player", 90005)
+check(tasks[2].status == "done" and ofState.stages.craft.activeIndex == fireElixirIdx,
+	"Completing Refined Fire Oil auto-advances to same-profession Greater Fire Elixir")
+check(#modernOpenCalls == 0, "OnSpellcastSucceeded NEVER calls hardware-protected C_TradeSkillUI.OpenRecipe")
+check(modernSelectCalls[1] and modernSelectCalls[1].recipeID == 90010,
+	"Auto-advance auto-highlights next same-profession recipe (90010) via unprotected RecipeList:SelectRecipe")
+
+-- Verify hardware-click fallback when CraftingPage.RecipeList.SelectRecipe is unavailable
+local savedCP = _G.ProfessionsFrame.CraftingPage
+_G.ProfessionsFrame.CraftingPage = nil
+modernOpenCalls = {}
+of.SelectCraftRecipe(fireElixirIdx, false)
+check(#modernOpenCalls == 0, "SelectCraftRecipe(idx, false) refuses to call OpenRecipe even without RecipeList")
+of.SelectCraftRecipe(fireElixirIdx, true)
+check(modernOpenCalls[1] == 90010, "SelectCraftRecipe(idx, true) falls back to OpenRecipe during hardware clicks")
+_G.ProfessionsFrame.CraftingPage = savedCP
+
+of.MarkCraftDone(fireElixirIdx)
+check(tasks[fireElixirIdx].status == "done", "MarkCraftDone completes Greater Fire Elixir")
+
+-- Classic CraftFrame for Enchanting (Enchant Bracer - Firepower, spell 90020)
+_G.ProfessionsFrame:Hide()
+_G.CraftFrame:Show()
+local craftSelCalls, craftDoCalls = {}, {}
+_G.GetCraftDisplaySkillLine = function() return "Enchanting", 300, 300 end
+_G.GetNumCrafts = function() return 1 end
+_G.GetCraftInfo = function(i) if i == 1 then return "Enchant Bracer - Firepower", nil, "optimal" end end
+_G.GetCraftRecipeLink = function(i)
+	if i == 1 then return "|cffffd000|Henchant:90020|h[Enchant Bracer - Firepower]|h|r" end
+end
+_G.SelectCraft = function(i) craftSelCalls[#craftSelCalls + 1] = i end
+_G.CraftFrame_SetSelection = function(i) craftSelCalls[#craftSelCalls + 1] = "set:" .. tostring(i) end
+_G.DoCraft = function(i) craftDoCalls[#craftDoCalls + 1] = i end
+
+-- Provide reagents for Enchant Bracer (7x 70011 + 2x 70003)
+setBagItem(0, 4, 70011, 7)
+setBagItem(1, 1, 70003, 2)
+of.OnCraftShow()
+local crPK, crPF = of.GetOpenProfession()
+check(crPK == "enchanting" and crPF == "CraftFrame", "CraftFrame detects Enchanting")
+local okEnchCraft = of.CraftActiveTask(enchBracerIdx)
+check(okEnchCraft == true and #craftDoCalls == 1 and craftDoCalls[1] == 1,
+	"CraftActiveTask on CraftFrame executes SelectCraft + DoCraft(1)")
+of.OnSpellcastSucceeded("player", 90020)
+check(tasks[enchBracerIdx].status == "done" and of.GetStageStats("craft").complete == true,
+	"Enchanting spellcast completes final Stage 4 task")
+check(castSpellCalled == false, "Zero CastSpellByName calls across entire 4-stage crafting workflow")
+
+-- 9e. Cross-Stage Destination Filter & Full-Stack Bank Withdrawal + Auto-Skip Empty Stage Check
+local crossDests = of.GetAllDestinations()
+check(#crossDests == 2, "GetAllDestinations aggregates 2 goals across all 4 stages, got " .. tostring(#crossDests))
+of.SetDestinationFilter("Enchant Bracer - Firepower")
+check(#of.GetVisibleStageEntries("ah") == 1 and of.GetVisibleStageEntries("ah")[1].item.itemID == 70003,
+	"Destination filter scopes Stage 1 AH strictly to Enchant Bracer reagents")
+check(#of.GetVisibleStageEntries("vendor") == 3,
+	"Destination filter scopes Stage 2 Vendor strictly to Enchant Bracer vendor items")
+check(#of.GetVisibleStageEntries("collect") == 0,
+	"Destination filter scopes Stage 3 Collect strictly to Enchant Bracer owned items (0)")
+check(#of.GetVisibleStageEntries("craft") == 1 and of.GetVisibleStageEntries("craft")[1].item.spellID == 90020,
+	"Destination filter scopes Stage 4 Craft strictly to Enchant Bracer craft task")
+of.SetDestinationFilter("Enchant Bracer - Firepower") -- toggle off
+check(of.GetDestinationFilter() == nil and #of.GetVisibleStageEntries("craft") == 4,
+	"Toggling active destination clears cross-stage filter")
+
+-- Full-stack Bank UseContainerItem + Auto-skip empty Stage 2 (Vendor) check
+mockBags = { [0] = {}, [1] = {} }
+mockBank = { [-1] = {}, [5] = {} }
+setBankItem(5, 2, 70055, 5, false) -- exact 5 needed -> UseContainerItem(5, 2)
+local skipCounts = of.LoadFromShoppingRows({
+	{ name = "AH Only Mat", itemID = 70050, qty = 2, ahUnitPrice = 100, categoryName = "Goal X" },
+	{ name = "Bank Exact Mat", itemID = 70055, qty = 0, ownedUsed = 5, categoryName = "Goal X" },
+}, {
+	title = "Auto-Skip Test",
+	ownershipProvider = function(id)
+		if id == 70055 then return { bags = 0, bank = 5, mail = 0, alts = {} } end
+		return { bags = 0, bank = 0, mail = 0, alts = {} }
+	end,
+})
+check(skipCounts.ah == 1 and skipCounts.vendor == 0 and skipCounts.collect == 1 and skipCounts.craft == 0,
+	"Loaded AH + Collect with empty Vendor & Craft stages")
+check(of.GetNextIncompleteStage("ah") == "collect",
+	"GetNextIncompleteStage auto-skips empty Stage 2 (vendor) -> Stage 3 (collect)")
+cb.MarkBought(1)
+check(ofState.stageCompletePrompt and ofState.stageCompletePrompt.nextStage == "collect",
+	"Completing Stage 1 auto-prompts Stage 3 Collect when Stage 2 Vendor is empty")
+of.AdvanceToNextStage()
+bankUseCalls = {}
+_G.BankFrame:Show()
+of.OnBankShow()
+local okFullWithdraw = of.WithdrawFromBank(1)
+check(okFullWithdraw == true and #bankUseCalls == 1 and bankUseCalls[1].bag == 5 and bankUseCalls[1].slot == 2,
+	"Full-stack bank withdrawal (count <= remaining) invokes UseContainerItem(5, 2)")
+of.OnBagUpdateDelayed()
+check(ofState.stages.collect.items[1].status == "done" and of.GetNextIncompleteStage("collect") == nil,
+	"All non-empty stages complete -> GetNextIncompleteStage returns nil")
+
+-- Restore all mocked globals cleanly
+_G.CastSpellByName = origCastSpellByName
+_G.C_Container = origCContainer
+_G.GetMerchantNumItems = origGetMerchantNumItems
+_G.GetMerchantItemID = origGetMerchantItemID
+_G.GetMerchantItemInfo = origGetMerchantItemInfo
+_G.GetMerchantItemMaxStack = origGetMerchantItemMaxStack
+_G.BuyMerchantItem = origBuyMerchantItem
+_G.GetMoney = origGetMoney
+_G.MerchantFrame = origMerchantFrame
+_G.BankFrame = origBankFrame
+_G.MailFrame = origMailFrame
+_G.TradeSkillFrame = origTradeSkillFrame
+_G.CraftFrame = origCraftFrame
+_G.ProfessionsFrame = origProfessionsFrame
+_G.C_TradeSkillUI = origCTradeSkillUI
+_G.GetInboxNumItems = origGetInboxNumItems
+_G.GetInboxHeaderInfo = origGetInboxHeaderInfo
+_G.GetInboxItem = origGetInboxItem
+_G.GetInboxItemLink = origGetInboxItemLink
+_G.TakeInboxItem = origTakeInboxItem
+_G.ClearCursor = origClearCursor
+_G.GetTradeSkillLine = origGetTradeSkillLine
+_G.GetNumTradeSkills = origGetNumTradeSkills
+_G.GetTradeSkillInfo = origGetTradeSkillInfo
+_G.GetTradeSkillRecipeLink = origGetTradeSkillRecipeLink
+_G.SelectTradeSkill = origSelectTradeSkill
+_G.TradeSkillFrame_SetSelection = origTradeSkillFrameSetSel
+_G.DoTradeSkill = origDoTradeSkill
+_G.GetCraftDisplaySkillLine = origGetCraftDisplaySkillLine
+_G.GetNumCrafts = origGetNumCrafts
+_G.GetCraftInfo = origGetCraftInfo
+_G.GetCraftRecipeLink = origGetCraftRecipeLink
+_G.SelectCraft = origSelectCraft
+_G.CraftFrame_SetSelection = origCraftFrameSetSel
+_G.DoCraft = origDoCraft
+ns.IsForeignTradeSkill = origIsForeignTS
+app.getBagCountByID = origGetBagCountByID
+
+---------------------------------------------------------------------------------------------------
+-- 11. 4-Stage UI Shell, Stage Switching, Auto-Docking & WoW Event Integration Suite
+---------------------------------------------------------------------------------------------------
+;(function()
+	check(type(app.enterOrderFlowMode) == "function", "app.enterOrderFlowMode exposed")
+	check(type(app.getItemOwnershipBreakdown) == "function", "app.getItemOwnershipBreakdown exposed")
+	check(modal.stageBar ~= nil, "cartBuyerModal.stageBar exposed")
+	check(modal.stageBtns and modal.stageBtns.ah and modal.stageBtns.vendor and modal.stageBtns.collect and modal.stageBtns.craft,
+		"cartBuyerModal.stageBtns exposes all 4 stage buttons")
+	check(modal.nextStageBtn ~= nil and modal.extraBtn ~= nil, "cartBuyerModal exposes nextStageBtn and extraBtn")
+	check(math.floor(modal:GetHeight() + 0.5) == 684, "4-stage Baron Trade Strip height is 684, got " .. tostring(modal:GetHeight()))
+
+	-- Test app.getItemOwnershipBreakdown returns structured bags/bank/mail/alts table
+	app.char = app.char or {}
+	app.char.bank = app.char.bank or {}
+	app.char.mail = app.char.mail or {}
+	local origBankVal = app.char.bank["Small Flame Sac"]
+	local origMailVal = app.char.mail["Small Flame Sac"]
+	app.char.bank["Small Flame Sac"] = 4
+	app.char.mail["Small Flame Sac"] = 2
+	local ob = app.getItemOwnershipBreakdown(4402, "Small Flame Sac")
+	check(type(ob) == "table" and ob.bank == 4 and ob.mail == 2 and type(ob.alts) == "table",
+		"getItemOwnershipBreakdown reads bank/mail/alts breakdown")
+	app.char.bank["Small Flame Sac"] = origBankVal
+	app.char.mail["Small Flame Sac"] = origMailVal
+
+	-- Setup deterministic mock frames & APIs for UI + WoW Event integration tests
+	local sMF = _G.MerchantFrame
+	local sBF = _G.BankFrame
+	local sMLF = _G.MailFrame
+	local sTSF = _G.TradeSkillFrame
+	local sCF = _G.CraftFrame
+	local sPF = _G.ProfessionsFrame
+	local sGetMNum, sGetMID, sGetMInfo, sGetMMax, sBuyM = _G.GetMerchantNumItems, _G.GetMerchantItemID, _G.GetMerchantItemInfo, _G.GetMerchantItemMaxStack, _G.BuyMerchantItem
+	local sCCont, sGetInNum, sGetInHdr, sGetInItem, sGetInLink, sTakeIn = _G.C_Container, _G.GetInboxNumItems, _G.GetInboxHeaderInfo, _G.GetInboxItem, _G.GetInboxItemLink, _G.TakeInboxItem
+	local sGetTSL, sGetNTS, sGetTSI, sGetTSLink, sSelTS, sDoTS = _G.GetTradeSkillLine, _G.GetNumTradeSkills, _G.GetTradeSkillInfo, _G.GetTradeSkillRecipeLink, _G.SelectTradeSkill, _G.DoTradeSkill
+	local sGetBag = app.getBagCountByID
+	local sIsForeign = ns.IsForeignTradeSkill
+	local sCTrade = _G.C_TradeSkillUI
+
+	local uiMF = CreateFrame("Frame", "UIMockMerchant", UIParent); uiMF:SetSize(400, 480); uiMF:Hide()
+	local uiBF = CreateFrame("Frame", "UIMockBank", UIParent); uiBF:SetSize(400, 480); uiBF:Hide()
+	local uiMLF = CreateFrame("Frame", "UIMockMail", UIParent); uiMLF:SetSize(400, 480); uiMLF:Hide()
+	local uiTSF = CreateFrame("Frame", "UIMockTS", UIParent); uiTSF:SetSize(420, 480); uiTSF:Hide()
+	_G.MerchantFrame = uiMF
+	_G.BankFrame = uiBF
+	_G.MailFrame = uiMLF
+	_G.TradeSkillFrame = uiTSF
+	_G.CraftFrame = nil
+	_G.ProfessionsFrame = nil
+	_G.C_TradeSkillUI = nil
+	ns.IsForeignTradeSkill = function() return false end
+
+	local uiBags = { [71001] = 10, [71002] = 0, [71003] = 0, [71004] = 0, [71005] = 0 }
+	app.getBagCountByID = function(id) return uiBags[id] or 0 end
+
+	local uiMerchantBuyCalls = {}
+	_G.GetMerchantNumItems = function() return 1 end
+	_G.GetMerchantItemID = function(s) return (s == 1) and 71002 or nil end
+	_G.GetMerchantItemInfo = function(s)
+		if s == 1 then return "UI Crystal Vial", nil, 500, 1, -1, true, false, false end
+	end
+	_G.GetMerchantItemMaxStack = function() return 20 end
+	_G.BuyMerchantItem = function(slot, qty)
+		uiMerchantBuyCalls[#uiMerchantBuyCalls + 1] = { slot = slot, qty = qty }
+		uiBags[71002] = (uiBags[71002] or 0) + qty
+	end
+
+	local uiBankUseCalls = {}
+	_G.C_Container = {
+		GetContainerNumSlots = function(b) return (b == -1) and 2 or 4 end,
+		GetContainerItemInfo = function(b, s)
+			if b == -1 and s == 1 and uiBags[71003] == 0 then
+				return { itemID = 71003, stackCount = 3, isLocked = false }
+			end
+			return nil
+		end,
+		GetContainerItemID = function(b, s)
+			if b == -1 and s == 1 and uiBags[71003] == 0 then return 71003 end
+			return nil
+		end,
+		GetContainerNumFreeSlots = function() return 4, 0 end,
+		UseContainerItem = function(b, s)
+			uiBankUseCalls[#uiBankUseCalls + 1] = { bag = b, slot = s }
+			uiBags[71003] = 3
+		end,
+	}
+
+	local uiMailTakeCalls = {}
+	_G.GetInboxNumItems = function() return 1, 1 end
+	_G.GetInboxHeaderInfo = function(i)
+		if i == 1 then return nil, nil, "Bankalt", "Mats", 0, 0, 10, 1 end
+	end
+	_G.GetInboxItem = function(m, a)
+		if m == 1 and a == 1 and uiBags[71004] == 0 then return "UI Mail Herb", 71004, nil, 4 end
+	end
+	_G.GetInboxItemLink = function(m, a)
+		if m == 1 and a == 1 and uiBags[71004] == 0 then return "|cffffffff|Hitem:71004::::::::60:::::::|h[UI Mail Herb]|h|r" end
+	end
+	_G.TakeInboxItem = function(m, a)
+		uiMailTakeCalls[#uiMailTakeCalls + 1] = { mail = m, attach = a }
+		uiBags[71004] = 4
+	end
+
+	local uiCraftCalls = {}
+	_G.GetTradeSkillLine = function() return "Alchemy", 300, 300 end
+	_G.GetNumTradeSkills = function() return 2 end
+	_G.GetTradeSkillInfo = function(i)
+		if i == 1 then return "UI Fire Oil", "optimal"
+		elseif i == 2 then return "UI Fire Pot", "optimal" end
+	end
+	_G.GetTradeSkillRecipeLink = function(i)
+		if i == 1 then return "|cffffd000|Henchant:91001|h[UI Fire Oil]|h|r"
+		elseif i == 2 then return "|cffffd000|Henchant:91002|h[UI Fire Pot]|h|r" end
+	end
+	_G.SelectTradeSkill = function() end
+	_G.DoTradeSkill = function(idx, qty)
+		uiCraftCalls[#uiCraftCalls + 1] = { idx = idx, qty = qty }
+	end
+
+	_G.AuctionHouseFrame:Hide()
+	MerchantMasterDB.ahBuyerExtended = false
+
+	-- Load 4-stage pipeline through OrderFlow and enterOrderFlowMode
+	local countsUI = of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "u1", name = "UI Fire Pot", itemID = 71010, spellID = 91002, prof = "alchemy", qty = 2, sourceKind = "craft_order", sourceLabel = "Crafting Order",
+			reagents = { { itemID = 71005, name = "UI Fire Oil", qty = 1 }, { itemID = 71002, name = "UI Crystal Vial", qty = 1 } } },
+		{ indent = 1, mainGroupKey = "u1", isSubBranchRoot = true, subGroupKey = "us1", name = "UI Fire Oil", itemID = 71005, spellID = 91001, prof = "alchemy", craftProf = "alchemy", qty = 2, makeMyself = true, categoryName = "UI Fire Pot",
+			reagents = { { itemID = 71001, name = "UI Snapper", qty = 2 } } },
+		{ indent = 2, isSubRow = true, mainGroupKey = "u1", subGroupKey = "us1", parentSubName = "UI Fire Oil", name = "UI Snapper", itemID = 71001, qty = 4, ahUnitPrice = 200, categoryName = "UI Fire Pot" },
+		{ indent = 1, mainGroupKey = "u1", name = "UI Crystal Vial", itemID = 71002, qty = 2, isVendor = true, vendorUnitPrice = 500, categoryName = "UI Fire Pot" },
+		{ indent = 1, mainGroupKey = "u1", name = "UI Bank Sac", itemID = 71003, qty = 0, ownedUsed = 3, categoryName = "UI Fire Pot" },
+		{ indent = 1, mainGroupKey = "u1", name = "UI Mail Herb", itemID = 71004, qty = 0, ownedUsed = 4, categoryName = "UI Fire Pot" },
+	}, {
+		title = "UI 4-Stage Test",
+		ownershipProvider = function(id)
+			if id == 71003 then return { bags = 0, bank = 3, mail = 0, alts = {} } end
+			if id == 71004 then return { bags = 0, bank = 0, mail = 4, alts = {} } end
+			return { bags = uiBags[id] or 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	check(countsUI.ah == 1 and countsUI.collect == 2 and countsUI.vendor == 1 and countsUI.craft == 2,
+		"UI test loaded all 4 stages (1 AH, 2 Collect, 1 Vendor, 2 Craft)")
+	app.enterOrderFlowMode("ah")
+	check(modal:IsShown() and modal.titleFs:GetText() == "AH TRADE STRIP", "Stage 1 opens with AH TRADE STRIP title")
+
+	-- Complete Stage 1 -> Next Stage emerald CTA appears and advances to Stage 2 Collect
+	cb.MarkBought(1)
+	check(modal.nextStageBtn:IsShown() and modal.nextStageBtn:GetText():find("2. Collect", 1, true) ~= nil,
+		"Stage 1 completion shows emerald Next: 2. Collect -> button")
+	modal.nextStageBtn:Click("LeftButton")
+	check(of.GetActiveStage() == "collect" and modal.titleFs:GetText() == "COLLECT OWNED STRIP", "Stage 2 Collect active")
+	check(modal.waitingBanner:IsShown() and modal.waitingFs:GetText() == "Please open Mailbox or Bank to start.",
+		"Stage 2 waiting plaque dynamically requests Mailbox or Bank")
+	check(not modal.openProfBtn:IsShown(), "Secure openProfBtn stays hidden on Collect stage")
+
+	-- MAIL_SHOW -> docks beside MailFrame, takes mail via UI click + BAG_UPDATE_DELAYED
+	uiMLF:Show()
+	fireEvent("MAIL_SHOW")
+	local _, dockRelM = modal:GetPoint(1)
+	check(dockRelM == uiMLF, "MAIL_SHOW auto-docks strip beside MailFrame")
+	check(modal.spotlightCard:IsShown() and modal.buyBtn:GetText() == "Collect from Mail",
+		"Stage 2 Mail open shows Collect from Mail button")
+	modal.buyBtn:Click("LeftButton")
+	check(#uiMailTakeCalls == 1, "Stage 2 UI click executes TakeInboxItem")
+	fireEvent("BAG_UPDATE_DELAYED")
+	uiMLF:Hide()
+	fireEvent("MAIL_CLOSED")
+	check(modal.waitingBanner:IsShown() and modal.waitingFs:GetText() == "Please open Bank to start.",
+		"After Mail done, waiting plaque narrows strictly to 'Please open Bank to start.'")
+
+	-- BANKFRAME_OPENED -> docks beside BankFrame, withdraws via UI click + BAG_UPDATE_DELAYED -> Next: 3. Vendor ->
+	uiBF:Show()
+	fireEvent("BANKFRAME_OPENED")
+	local _, dockRelB = modal:GetPoint(1)
+	check(dockRelB == uiBF, "BANKFRAME_OPENED auto-docks strip beside BankFrame")
+	check(modal.spotlightCard:IsShown() and modal.buyBtn:GetText() == "Withdraw from Bank",
+		"Stage 2 Bank open shows Withdraw from Bank button")
+	modal.buyBtn:Click("LeftButton")
+	check(#uiBankUseCalls == 1, "Stage 2 UI click executes Bank withdrawal")
+	fireEvent("BAG_UPDATE_DELAYED")
+	uiBF:Hide()
+	fireEvent("BANKFRAME_CLOSED")
+	check(of.GetStageStats("collect").complete == true, "Stage 2 Collect completes after Mail & Bank collected")
+	check(modal.nextStageBtn:IsShown() and modal.nextStageBtn:GetText():find("3. Vendor", 1, true) ~= nil,
+		"Stage 2 Collect completion prompts Next: 3. Vendor ->")
+
+	-- Advance to Stage 3 Vendor: MERCHANT_SHOW docks beside MerchantFrame, buys via click + BAG_UPDATE_DELAYED
+	modal.nextStageBtn:Click("LeftButton")
+	check(of.GetActiveStage() == "vendor", "Clicking nextStageBtn advances cleanly to Stage 3 Vendor")
+	check(modal.titleFs:GetText() == "VENDOR ORDER STRIP", "Stage 3 updates header to VENDOR ORDER STRIP")
+	check(modal.waitingBanner:IsShown() and modal.waitingFs:GetText() == "Please open a Vendor to start.",
+		"Stage 3 closed vendor displays strict waiting plaque")
+	check(not modal.spotlightCard:IsShown(), "Stage 3 closed vendor hides Spotlight")
+
+	uiMF:Show()
+	fireEvent("MERCHANT_SHOW")
+	local _, dockRelV = modal:GetPoint(1)
+	check(dockRelV == uiMF, "MERCHANT_SHOW auto-docks strip beside MerchantFrame")
+	check(not modal.waitingBanner:IsShown() and modal.spotlightCard:IsShown(), "MERCHANT_SHOW reveals Stage 3 Spotlight")
+	check(modal.buyBtn:GetText() == "Buy from Vendor" and modal.buyBtn:IsEnabled(), "Stage 3 primary CTA is Buy from Vendor")
+	modal.buyBtn:Click("LeftButton")
+	check(#uiMerchantBuyCalls == 1 and uiMerchantBuyCalls[1].qty == 2, "Stage 3 UI click executes BuyMerchantItem(1, 2)")
+	fireEvent("BAG_UPDATE_DELAYED")
+	check(of.GetStageStats("vendor").complete == true, "BAG_UPDATE_DELAYED completes Stage 3 Vendor")
+	check(modal.nextStageBtn:IsShown() and modal.nextStageBtn:GetText():find("4. Craft", 1, true) ~= nil,
+		"Stage 3 Vendor completion prompts Next: 4. Craft ->")
+	uiMF:Hide()
+	fireEvent("MERCHANT_CLOSED")
+
+	-- Switch to Stage 4 Craft via nextStageBtn -> Clickable 'Click to open Alchemy' SecureActionButton
+	modal.stageBtns.craft:Click("LeftButton")
+	check(of.GetActiveStage() == "craft" and modal.titleFs:GetText() == "CRAFTING TASK STRIP",
+		"Stage 4 button switches to CRAFTING TASK STRIP")
+	check(modal.waitingBanner:IsShown() and modal.waitingFs:GetText() == "Click to open Alchemy",
+		"Stage 4 closed profession displays clickable 'Click to open Alchemy' waiting plaque, got " .. tostring(modal.waitingFs:GetText()))
+	check(modal.openProfBtn:IsShown() and modal.openProfBtn:GetAttribute("type") == "spell"
+		and modal.openProfBtn:GetAttribute("spell") == "Alchemy",
+		"Secure openProfBtn configures type='spell', spell='Alchemy'")
+
+	-- TRADE_SKILL_SHOW -> docks beside TradeSkillFrame, hides openProfBtn, shows SUB-CRAFT + ALCH + Craft 2x + Extended Reagents Drawer
+	uiTSF:Show()
+	fireEvent("TRADE_SKILL_SHOW")
+	local _, dockRelT = modal:GetPoint(1)
+	check(dockRelT == uiTSF, "TRADE_SKILL_SHOW auto-docks strip beside TradeSkillFrame")
+	check(not modal.waitingBanner:IsShown() and not modal.openProfBtn:IsShown() and modal.spotlightCard:IsShown(),
+		"TRADE_SKILL_SHOW hides waiting plaque/openProfBtn and reveals Stage 4 Spotlight")
+	check(modal.spotTierPill:IsShown() and stripColors(modal.spotTierPill.fs:GetText()) == "SUB-CRAFT",
+		"Stage 4 active sub-craft shows SUB-CRAFT badge pill")
+	check(modal.spotProfPill:IsShown() and stripColors(modal.spotProfPill.fs:GetText()) == "ALCH",
+		"Stage 4 active task shows ALCH profession badge pill")
+	check(modal.buyBtn:GetText() == "Craft 2x" and modal.buyBtn:IsEnabled(), "Stage 4 primary CTA shows Craft 2x")
+
+	-- Open Extended Drawer on Stage 4 -> shows CURRENT TASK REAGENTS with In Bags stock
+	local compactBtnW = modal.stageBtns.craft:GetWidth()
+	local compactTotalStageW = modal.stageBtns.ah:GetWidth() + modal.stageBtns.collect:GetWidth() + modal.stageBtns.vendor:GetWidth() + compactBtnW + 12
+	check(compactTotalStageW <= 396 - 24, "Compact stageBar 4 pills fit cleanly inside 396px frame, got totalW=" .. tostring(compactTotalStageW))
+	modal.SetExtended(true)
+	local extBtnW = modal.stageBtns.craft:GetWidth()
+	check(extBtnW > compactBtnW + 50, "Expanding 396->706 immediately widens stageBtns.craft (" .. tostring(compactBtnW) .. " -> " .. tostring(extBtnW) .. ")")
+	check(modal.treePane:IsShown() and modal.treeChainNodes[1]:IsShown(), "Stage 4 extended drawer shows reagent card")
+	check(stripColors(modal.treeChainNodes[1].subFs:GetText()):find("In Bags: 10 / 4", 1, true) ~= nil,
+		"Stage 4 reagent card displays live bag stock (In Bags: 10 / 4)")
+	modal.SetExtended(false)
+	local reCompactBtnW = modal.stageBtns.craft:GetWidth()
+	local reCompactTotalW = modal.stageBtns.ah:GetWidth() + modal.stageBtns.collect:GetWidth() + modal.stageBtns.vendor:GetWidth() + reCompactBtnW + 12
+	check(reCompactTotalW <= 396 - 24 and reCompactBtnW == compactBtnW,
+		"Collapsing 706->396 immediately shrinks stageBtns back inside 396px frame (no overflow), got " .. tostring(reCompactTotalW))
+	modal.SetExtended(true)
+
+	-- Click Craft 2x and fire UNIT_SPELLCAST_SUCCEEDED twice -> completes sub-craft & advances to Main Order!
+	modal.buyBtn:Click("LeftButton")
+	check(#uiCraftCalls == 1 and uiCraftCalls[1].idx == 1 and uiCraftCalls[1].qty == 2,
+		"Stage 4 UI Craft click invokes DoTradeSkill(1, 2)")
+	fireEvent("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-u1", 91001)
+	fireEvent("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-u2", 91001)
+	local crStUI = of.GetState().stages.craft
+	check(crStUI.tasks[1].status == "done" and crStUI.activeIndex == 2,
+		"UNIT_SPELLCAST_SUCCEEDED completes sub-craft and auto-advances to Main Order task")
+	check(stripColors(modal.spotTierPill.fs:GetText()) == "MAIN ORDER",
+		"Main Order task displays gold MAIN ORDER badge pill")
+
+	-- TRADE_SKILL_CLOSE returns clickable waiting plaque cleanly when craft tasks remain
+	uiTSF:Hide()
+	fireEvent("TRADE_SKILL_CLOSE")
+	check(modal.waitingBanner:IsShown() and modal.waitingFs:GetText() == "Click to open Alchemy"
+		and modal.openProfBtn:IsShown() and modal.openProfBtn:GetAttribute("spell") == "Alchemy",
+		"TRADE_SKILL_CLOSE returns Stage 4 to clickable 'Click to open Alchemy' plaque")
+
+	-- Cleanup
+	modal.SetExtended(false)
+	app.exitAHBuyingMode(false)
+	_G.MerchantFrame, _G.BankFrame, _G.MailFrame, _G.TradeSkillFrame, _G.CraftFrame, _G.ProfessionsFrame = sMF, sBF, sMLF, sTSF, sCF, sPF
+	_G.GetMerchantNumItems, _G.GetMerchantItemID, _G.GetMerchantItemInfo, _G.GetMerchantItemMaxStack, _G.BuyMerchantItem = sGetMNum, sGetMID, sGetMInfo, sGetMMax, sBuyM
+	_G.C_Container, _G.GetInboxNumItems, _G.GetInboxHeaderInfo, _G.GetInboxItem, _G.GetInboxItemLink, _G.TakeInboxItem = sCCont, sGetInNum, sGetInHdr, sGetInItem, sGetInLink, sTakeIn
+	_G.GetTradeSkillLine, _G.GetNumTradeSkills, _G.GetTradeSkillInfo, _G.GetTradeSkillRecipeLink, _G.SelectTradeSkill, _G.DoTradeSkill = sGetTSL, sGetNTS, sGetTSI, sGetTSLink, sSelTS, sDoTS
+	app.getBagCountByID = sGetBag
+	ns.IsForeignTradeSkill = sIsForeign
+	_G.C_TradeSkillUI = sCTrade
+end)()
+
+---------------------------------------------------------------------------------------------------
+-- 12. Total-Time Craft Loading Bar, Forever 16001 ReagentBag, Collect Priority & Clickable Prof
+---------------------------------------------------------------------------------------------------
+;(function()
+	check(modal.craftTimerBar ~= nil and modal.craftTimerFs ~= nil and modal.craftTimerFill ~= nil,
+		"Exposes craftTimerBar, craftTimerFs, and craftTimerFill on cartBuyerModal")
+	check(modal.craftFooter == nil and modal.autoCraftBtn == nil and modal.autoCraftConfirmModal == nil,
+		"Auto Craft footer, button, and confirmation modal removed cleanly")
+	check(_G.MerchantMasterAutoCraftBtn == nil and of.StartAutoCraft == nil and of.ContinueAutoCraft == nil,
+		"Auto Craft global API and Start/ContinueAutoCraft functions removed cleanly")
+	check(modal.openProfBtn ~= nil and _G.MerchantMasterOpenProfBtn == modal.openProfBtn,
+		"Exposes SecureActionButtonTemplate MerchantMasterOpenProfBtn on modal")
+
+	local sTSF = _G.TradeSkillFrame
+	local sCF = _G.CraftFrame
+	local sPF = _G.ProfessionsFrame
+	local sCTrade = _G.C_TradeSkillUI
+	local sCSpell = _G.C_Spell
+	local sUnitCast = _G.UnitCastingInfo
+	local sGetTime = _G.GetTime
+	local sGetTSL, sGetNTS, sGetTSI, sGetTSLink, sSelTS, sDoTS = _G.GetTradeSkillLine, _G.GetNumTradeSkills, _G.GetTradeSkillInfo, _G.GetTradeSkillRecipeLink, _G.SelectTradeSkill, _G.DoTradeSkill
+	local sGetBag = app.getBagCountByID
+	local sIsForeign = ns.IsForeignTradeSkill
+	local sCCont = _G.C_Container
+	local sEnum = _G.Enum
+	local sNumBags = _G.NUM_BAG_SLOTS
+	local sNumTotalBags = _G.NUM_TOTAL_EQUIPPED_BAG_SLOTS
+
+	local simNow = 1000
+	_G.GetTime = function() return simNow end
+
+	local wTSF = CreateFrame("Frame", "Wave3MockTS", UIParent); wTSF:SetSize(420, 480); wTSF:Hide()
+	_G.TradeSkillFrame = wTSF
+	_G.CraftFrame = nil
+	_G.ProfessionsFrame = nil
+	_G.C_TradeSkillUI = nil
+	ns.IsForeignTradeSkill = function() return false end
+
+	local wBags = { [6359] = 10, [3371] = 10, [6371] = 0, [4402] = 6, [3372] = 6 }
+	app.getBagCountByID = function(id) return wBags[id] or 0 end
+
+	local tsScanCount = 0
+	local wCraftCalls = {}
+	local wSelectedIdx = nil
+	_G.GetTradeSkillLine = function() return "Alchemy", 300, 300 end
+	_G.GetNumTradeSkills = function()
+		tsScanCount = tsScanCount + 1
+		return 2
+	end
+	_G.GetTradeSkillInfo = function(i)
+		if i == 1 then return "Fire Oil", "optimal"
+		elseif i == 2 then return "Fire Protection Potion", "optimal" end
+	end
+	_G.GetTradeSkillRecipeLink = function(i)
+		if i == 1 then return "|cffffd000|Henchant:7837|h[Fire Oil]|h|r"
+		elseif i == 2 then return "|cffffd000|Henchant:7257|h[Fire Protection Potion]|h|r" end
+	end
+	_G.SelectTradeSkill = function(idx) wSelectedIdx = idx end
+	_G.DoTradeSkill = function(idx, qty)
+		wCraftCalls[#wCraftCalls + 1] = { idx = idx, qty = qty }
+	end
+
+	-- Load 2-recipe Alchemy chain (Sub-Craft: Fire Oil qty=4 -> 2 crafts at c=2 yield, ct=5000ms; Main Order: Fire Protection Potion x2)
+	MerchantMasterDB.ahBuyerExtended = false
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "w1", name = "Fire Protection Potion", itemID = 6049, spellID = 7257, prof = "alchemy", qty = 2, sourceKind = "craft_order", sourceLabel = "Crafting Order",
+			reagents = { { itemID = 4402, name = "Small Flame Sac", qty = 1 }, { itemID = 6371, name = "Fire Oil", qty = 1 }, { itemID = 3372, name = "Leaded Vial", qty = 1 } } },
+		{ indent = 1, mainGroupKey = "w1", isSubBranchRoot = true, subGroupKey = "ws1", name = "Fire Oil", itemID = 6371, spellID = 7837, prof = "alchemy", craftProf = "alchemy", qty = 4, makeMyself = true, categoryName = "Fire Protection Potion",
+			reagents = { { itemID = 6359, name = "Firefin Snapper", qty = 2 }, { itemID = 3371, name = "Empty Vial", qty = 1 } } },
+	}, { title = "Batch Loading Bar Craft Plan" })
+
+	app.enterOrderFlowMode("craft")
+	-- Closed Alchemy shows Click to open Alchemy with SecureActionButton spell="Alchemy"
+	check(modal.waitingBanner:IsShown() and modal.waitingFs:GetText() == "Click to open Alchemy",
+		"Stage 4 closed Alchemy shows 'Click to open Alchemy'")
+	check(modal.openProfBtn:IsShown() and modal.openProfBtn:GetAttribute("type") == "spell"
+		and modal.openProfBtn:GetAttribute("spell") == "Alchemy",
+		"Closed Alchemy wires openProfBtn spell='Alchemy'")
+
+	-- Verify Mining resolves to spell='Smelting'
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "m_mine", name = "Smelt Copper", itemID = 2840, spellID = 2657, prof = "mining", qty = 2, sourceKind = "craft_order", sourceLabel = "Crafting Order" },
+	}, { title = "Mining Open Spell Check" })
+	app.enterOrderFlowMode("craft")
+	check(modal.waitingFs:GetText() == "Click to open Smelting (Mining)"
+		and modal.openProfBtn:GetAttribute("spell") == "Smelting",
+		"Closed Mining displays 'Click to open Smelting (Mining)' and binds spell='Smelting', got " .. tostring(modal.waitingFs:GetText()))
+
+	-- Restore Alchemy 2-recipe batch and open Alchemy
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "w1", name = "Fire Protection Potion", itemID = 6049, spellID = 7257, prof = "alchemy", qty = 2, sourceKind = "craft_order", sourceLabel = "Crafting Order",
+			reagents = { { itemID = 4402, name = "Small Flame Sac", qty = 1 }, { itemID = 6371, name = "Fire Oil", qty = 1 }, { itemID = 3372, name = "Leaded Vial", qty = 1 } } },
+		{ indent = 1, mainGroupKey = "w1", isSubBranchRoot = true, subGroupKey = "ws1", name = "Fire Oil", itemID = 6371, spellID = 7837, prof = "alchemy", craftProf = "alchemy", qty = 4, makeMyself = true, categoryName = "Fire Protection Potion",
+			reagents = { { itemID = 6359, name = "Firefin Snapper", qty = 2 }, { itemID = 3371, name = "Empty Vial", qty = 1 } } },
+	}, { title = "Batch Loading Bar Craft Plan" })
+	app.enterOrderFlowMode("craft")
+	wTSF:Show()
+	app._tsSessionScanned = false
+	app._lastTradeSkillScanTime = 0
+	app._lastCraftEventTime = 0
+	fireEvent("TRADE_SKILL_SHOW")
+
+	-- 1. Cast time population from Data_Recipes + C_Spell.GetSpellInfo haste override
+	local crSt = of.GetState().stages.craft
+	check(crSt.tasks[1] and crSt.tasks[1].castTimeMs == 5000,
+		"Craft task castTimeMs populated from Data_Recipes (Fire Oil = 5000ms), got " .. tostring(crSt.tasks[1] and crSt.tasks[1].castTimeMs))
+	local baseEta = of.GetTaskEtaSec(crSt.tasks[1], simNow)
+	check(math.abs(baseEta - 10.0) < 0.01, "GetTaskEtaSec returns 10.0s for 2 crafts x 5000ms, got " .. tostring(baseEta))
+	_G.C_Spell = {
+		GetSpellInfo = function(sid)
+			if sid == 7837 then return { castTime = 1500 } end
+			if sid == 7257 then return { castTime = 2000 } end
+			return nil
+		end,
+	}
+	local hastedEta = of.GetTaskEtaSec(crSt.tasks[1], simNow)
+	check(math.abs(hastedEta - 3.0) < 0.01, "C_Spell.GetSpellInfo haste override scales 2x 1500ms -> 3.0s, got " .. tostring(hastedEta))
+	if modal.Render then modal.Render() end
+
+	-- 2. Full-width Stage 4 Loading Bar & 7-row capacity without bottom footer
+	check(modal.craftTimerBar:IsShown(), "Stage 4 shows craftTimerBar when profession is open")
+	check(not modal.openProfBtn:IsShown(), "openProfBtn hides when profession is open")
+	local _, _, _, trX2 = modal.craftTimerTrack:GetPoint(2)
+	check(trX2 == 0, "cbCraftTimerBar track spans full width inside Spotlight (TOPRIGHT offset 0, got " .. tostring(trX2) .. ")")
+	check(math.floor(modal.spotlightCard:GetHeight() + 0.5) == 182,
+		"Stage 4 expands spotlightCard height to 182px for craftTimerBar, got " .. tostring(modal.spotlightCard:GetHeight()))
+	check(modal.getVisCap(false, true) == 7,
+		"Stage 4 visCap allows full 7 rows without Auto-Craft footer (got " .. tostring(modal.getVisCap(false, true)) .. ")")
+	check(not modal.craftTimerFill:IsShown(), "craftTimerFill is hidden while idle at 0%")
+	local idleTxt = modal.craftTimerFs:GetText() or ""
+	check(idleTxt:find("Est. ", 1, true) ~= nil and idleTxt:find("Queue ", 1, true) ~= nil,
+		"Idle craftTimerFs shows 'Est. ... | Queue ...', got: " .. tostring(idleTxt))
+
+	-- Simulate live UNIT_SPELLCAST_START with 0.75s elapsed / 1.5s on Craft #1 of 2 (total batch = 3.0s -> taskFrac = 0.25!)
+	_G.UnitCastingInfo = function(u)
+		if u == "player" then
+			return "Fire Oil", "Fire Oil", nil, (simNow - 0.75) * 1000, (simNow + 0.75) * 1000, true, "cast-w3-1", false, 7837
+		end
+	end
+	fireEvent("UNIT_SPELLCAST_START", "player", "cast-w3-1", 7837)
+	local midTiming = of.GetCraftTimingSummary(simNow)
+	check(math.abs((midTiming.taskFrac or 0) - 0.25) < 0.02 and math.abs((midTiming.taskLeftSec or 0) - 2.25) < 0.02,
+		"Total-time loading bar computes taskFrac=0.25 and taskLeftSec=2.25s mid-craft #1 (got frac=" .. tostring(midTiming.taskFrac) .. ", left=" .. tostring(midTiming.taskLeftSec) .. ")")
+	check(modal.craftTimerFill:IsShown() and modal.craftTimerFill:GetWidth() >= 4,
+		"UNIT_SPELLCAST_START shows craftTimerFill with positive width")
+	local castTxt = modal.craftTimerFs:GetText() or ""
+	check(castTxt:find("Crafting 2.2s left", 1, true) ~= nil or castTxt:find("Crafting 2.3s left", 1, true) ~= nil,
+		"Mid-cast craftTimerFs shows total batch time remaining ('Crafting ~2.3s left'), got: " .. tostring(castTxt))
+
+	-- Switching around in Craft list while Recipe #1 is crafting keeps active timer pinned ONLY to Recipe #1 and marks Row 1 pill 'CRAFTING'!
+	of.SelectCraftTask(2)
+	local otherTiming = of.GetCraftTimingSummary(simNow)
+	check(otherTiming.isSelectedTaskCrafting == false and otherTiming.isOtherTaskCrafting == true
+		and otherTiming.craftingTaskKey == crSt.tasks[1].taskKey and (otherTiming.taskFrac or 0) == 0,
+		"Clicking Recipe #2 while Recipe #1 casts does NOT move active timer onto Recipe #2")
+	check(not modal.craftTimerFill:IsShown() and (modal.craftTimerFs:GetText() or ""):find("Est. ", 1, true) ~= nil,
+		"Selected Recipe #2 displays static Est. timer instead of moving fill from Recipe #1")
+	check((modal.rows[1].cells.status:GetText() or ""):find("CRAFTING", 1, true) ~= nil
+		and (modal.rows[2].cells.status:GetText() or ""):find("No Mats", 1, true) ~= nil,
+		"Background crafting Recipe #1 displays 'CRAFTING' status pill while Recipe #2 displays 'No Mats', got r1="
+		.. tostring(modal.rows[1].cells.status:GetText()) .. ", r2=" .. tostring(modal.rows[2].cells.status:GetText()))
+	of.SelectCraftTask(1)
+	check(of.GetCraftTimingSummary(simNow).isSelectedTaskCrafting == true and modal.craftTimerFill:IsShown(),
+		"Selecting back to actively crafting Recipe #1 immediately resumes live timer fill")
+
+	-- Complete Craft #1 of 2: UNIT_SPELLCAST_STOP (non-interrupted) -> SUCCEEDED bridges smoothly with ZERO flash!
+	_G.UnitCastingInfo = function() return nil end
+	fireEvent("UNIT_SPELLCAST_STOP", "player", "cast-w3-1", 7837)
+	local stopBridgeTiming = of.GetCraftTimingSummary(simNow)
+	check(modal.craftTimerFill:IsShown() and (stopBridgeTiming.taskFrac or 0) >= 0.24
+		and of.GetActiveCraftingTaskKey(simNow) == crSt.tasks[1].taskKey,
+		"UNIT_SPELLCAST_STOP before SUCCEEDED keeps fill visible & monotonic (no flash), got frac=" .. tostring(stopBridgeTiming.taskFrac))
+	fireEvent("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-w3-1", 7837)
+	local after1Timing = of.GetCraftTimingSummary(simNow)
+	check(math.abs((after1Timing.taskFrac or 0) - 0.50) < 0.02,
+		"Between Craft #1 and #2, taskFrac remains 0.50 (does not reset to 0), got " .. tostring(after1Timing.taskFrac))
+	check(modal.craftTimerFill:IsShown() and modal.craftTimerFill:GetWidth() >= 100,
+		"Between crafts of a multi-craft batch, loading fill stays visible at 50% progress")
+
+	-- After the 1.5s grace window expires idle, batch flag clears back to Ready while 50% batch fill stays intact
+	simNow = simNow + 2.0
+	local expiredGrace = of.ExpireCraftingBatchIfNeeded(simNow)
+	check(expiredGrace == true and of.GetActiveCraftingTaskKey(simNow) == nil,
+		"ExpireCraftingBatchIfNeeded clears CRAFTING status after 1.5s idle grace")
+	check((modal.rows[1].cells.status:GetText() or ""):find("Ready", 1, true) ~= nil and modal.craftTimerFill:IsShown(),
+		"After grace expiry, Row 1 returns to 'Ready' while 50% fill stays visible")
+	wBags[6371] = 4
+	fireEvent("UNIT_SPELLCAST_START", "player", "cast-w3-2", 7837)
+	check((modal.rows[1].cells.status:GetText() or ""):find("CRAFTING", 1, true) ~= nil, "Craft #2 start re-activates CRAFTING pill")
+
+	-- Finish Craft #2 -> advances cleanly to task #2 & badge count drops 2 -> 1
+	check(of.GetTaskListBadgeCount and of.GetTaskListBadgeCount() == 2,
+		"OrderFlow.GetTaskListBadgeCount() reports 2 before recipe 1 completes")
+	fireEvent("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-w3-2", 7837)
+	check(of.GetTaskListBadgeCount() == 1, "GetTaskListBadgeCount drops to 1 after recipe 1 completes")
+	check(wSelectedIdx == 2, "Completing recipe 1 auto-selects next recipe index (2)")
+
+	-- Interrupted cast immediately clears CRAFTING state
+	fireEvent("UNIT_SPELLCAST_START", "player", "cast-w3-int", 7257)
+	check(of.GetActiveCraftingTaskKey(simNow) == crSt.tasks[2].taskKey, "Started task #2 cast activates CRAFTING")
+	fireEvent("UNIT_SPELLCAST_INTERRUPTED", "player", "cast-w3-int", 7257)
+	check(of.GetActiveCraftingTaskKey(simNow) == nil and (modal.rows[2].cells.status:GetText() or ""):find("Ready", 1, true) ~= nil,
+		"UNIT_SPELLCAST_INTERRUPTED clears CRAFTING status immediately")
+
+	-- 3. Craft-Finish Lag Fix: TRADE_SKILL_UPDATE session scan guard prevents repeat full rescans
+	local scansAfterShow = tsScanCount
+	simNow = simNow + 10
+	fireEvent("TRADE_SKILL_UPDATE")
+	simNow = simNow + 10
+	fireEvent("TRADE_SKILL_UPDATE")
+	simNow = simNow + 10
+	fireEvent("TRADE_SKILL_UPDATE")
+	check(tsScanCount == scansAfterShow,
+		"Repeat TRADE_SKILL_UPDATE events do not trigger redundant GetNumTradeSkills scans while session scanned (" .. tostring(scansAfterShow) .. " vs " .. tostring(tsScanCount) .. ")")
+
+	-- TRADE_SKILL_CLOSE resets session guard, hides craftTimerBar, and restores clickable openProfBtn
+	wTSF:Hide()
+	fireEvent("TRADE_SKILL_CLOSE")
+	check(app._tsSessionScanned == false, "TRADE_SKILL_CLOSE resets app._tsSessionScanned to false")
+	check(not modal.craftTimerBar:IsShown(), "TRADE_SKILL_CLOSE hides craftTimerBar")
+	check(modal.openProfBtn:IsShown() and modal.waitingFs:GetText() == "Click to open Alchemy",
+		"TRADE_SKILL_CLOSE restores clickable 'Click to open Alchemy' plaque")
+
+	-- 4. WoW: Forever 16001 ReagentBag (bag 5) + CharacterBankTab_1..9 + Collect Priority (Inventory > Mail > Bank)
+	app.getBagCountByID = sGetBag
+	_G.NUM_BAG_SLOTS = 4
+	_G.NUM_TOTAL_EQUIPPED_BAG_SLOTS = 5
+	_G.Enum = {
+		PlayerInteractionType = { Merchant = 5, Banker = 8, CharacterBanker = 44, MailInfo = 17 },
+		BagIndex = {
+			Backpack = 0, Bag_1 = 1, Bag_2 = 2, Bag_3 = 3, Bag_4 = 4,
+			ReagentBag = 5,
+			CharacterBankTab_1 = 12, CharacterBankTab_2 = 13, CharacterBankTab_3 = 14,
+			-- Notice BankBag_1 is intentionally nil just like WoW: Forever 16001!
+		},
+	}
+	local bagListF = app.getBagContainers()
+	local hasBag5 = false
+	for _, bid in ipairs(bagListF) do if bid == 5 then hasBag5 = true end end
+	check(hasBag5 == true, "Forever 16001: getBagContainers() includes ReagentBag (bag 5) even when BankBag_1 is nil")
+
+	local bankListF = app.getBankContainers()
+	local hasTab12, hasReagentInBank = false, false
+	for _, bid in ipairs(bankListF) do
+		if bid == 12 then hasTab12 = true end
+		if bid == 5 then hasReagentInBank = true end
+	end
+	check(hasTab12 == true and hasReagentInBank == false,
+		"Forever 16001: getBankContainers() includes CharacterBankTab_1 (12) and excludes ReagentBag (5)")
+
+	_G.C_Container = {
+		GetContainerNumSlots = function(bag)
+			if bag == 0 then return 1 end
+			if bag == 5 then return 4 end
+			if bag == 12 then return 2 end
+			return 0
+		end,
+		GetContainerItemInfo = function(bag, slot)
+			if bag == 0 and slot == 1 then
+				return {
+					itemID = 6359,
+					stackCount = 7,
+					hyperlink = "|cffffffff|Hitem:6359::::::::60:::::::|h[Firefin Snapper]|h|r",
+				}
+			end
+			if bag == 5 and slot == 1 then
+				return {
+					itemID = 3372,
+					stackCount = 99,
+					hyperlink = "|cffffffff|Hitem:3372::::::::60:::::::|h[Leaded Vial]|h|r",
+				}
+			end
+			return nil
+		end,
+		GetContainerItemLink = function(bag, slot)
+			if bag == 0 and slot == 1 then return "|cffffffff|Hitem:6359::::::::60:::::::|h[Firefin Snapper]|h|r" end
+			if bag == 5 and slot == 1 then return "|cffffffff|Hitem:3372::::::::60:::::::|h[Leaded Vial]|h|r" end
+			return nil
+		end,
+		GetContainerItemID = function(bag, slot)
+			if bag == 0 and slot == 1 then return 6359 end
+			if bag == 5 and slot == 1 then return 3372 end
+			return nil
+		end,
+	}
+	app.bagCountsDirty = true
+	app.cachedBagCountsByID = nil
+	local vialCnt = app.getBagCountByID(3372)
+	check(vialCnt == 99, "Forever 16001: getBagCountByID finds 99x Leaded Vial inside ReagentBag (5), got " .. tostring(vialCnt))
+
+	-- Priority: 10 needed with bags=3, mail=4, bank=5 -> strictly allocates 3 bags, 4 mail, 3 bank!
+	of.LoadFromShoppingRows({
+		{ name = "Priority Herb", itemID = 13463, qty = 0, ownedUsed = 10, categoryName = "Priority Goal" },
+		{ name = "Leaded Vial", itemID = 3372, qty = 0, ownedUsed = 15, categoryName = "Priority Goal" },
+	}, {
+		title = "Collect Priority Test",
+		ownershipProvider = function(id)
+			if id == 13463 then return { bags = 3, mail = 4, bank = 5, alts = {} } end
+			return { bags = app.getBagCountByID(id), mail = 0, bank = 20, alts = {} }
+		end,
+	})
+	local prioItems = of.GetState().stages.collect.items
+	local herbMail, herbBank, herbBags, vialBags, vialBank = 0, 0, 0, 0, 0
+	for _, it in ipairs(prioItems) do
+		if it.itemID == 13463 then
+			if it.source == "bags" then herbBags = it.needed
+			elseif it.source == "mail" then herbMail = it.needed
+			elseif it.source == "bank" then herbBank = it.needed end
+		elseif it.itemID == 3372 then
+			if it.source == "bags" then vialBags = it.needed
+			elseif it.source == "bank" then vialBank = it.needed end
+		end
+	end
+	check(herbBags == 3 and herbMail == 4 and herbBank == 3,
+		string.format("Collect prioritizes Inventory > Mail > Bank (expected bags=3, mail=4, bank=3; got %d, %d, %d)", herbBags, herbMail, herbBank))
+	check(vialBags == 15 and vialBank == 0,
+		"ReagentBag (5) vials fulfill entire 15x requirement in Inventory (bags=15, bank=0)")
+
+	-- 5. bagCounts / app.getBagCountByID cache fix: app.bagsDirty alone must not bust bagCounts cache
+	local containerSlotCalls = 0
+	local origNumSlots = _G.C_Container.GetContainerNumSlots
+	_G.C_Container.GetContainerNumSlots = function(bag)
+		containerSlotCalls = containerSlotCalls + 1
+		return origNumSlots(bag)
+	end
+	app.bagCountsDirty = true
+	app.cachedBagCountsByID = nil
+	local cnt1 = app.getBagCountByID(6359)
+	check(cnt1 == 7 and app.bagCountsDirty == false, "Initial getBagCountByID populates cache (got " .. tostring(cnt1) .. ")")
+	local callsAfterPopulate = containerSlotCalls
+	app.bagsDirty = true
+	for _ = 1, 5 do
+		check(app.getBagCountByID(6359) == 7, "Cached getBagCountByID returns 7 even when app.bagsDirty=true")
+	end
+	check(containerSlotCalls == callsAfterPopulate,
+		"app.bagsDirty alone does NOT bust app.getBagCountByID cache (calls " .. tostring(callsAfterPopulate) .. " vs " .. tostring(containerSlotCalls) .. ")")
+
+	-- Cleanup
+	if tab and tab.HideTab then tab.HideTab() end
+	app.exitAHBuyingMode(false)
+	_G.TradeSkillFrame, _G.CraftFrame, _G.ProfessionsFrame = sTSF, sCF, sPF
+	_G.C_TradeSkillUI, _G.C_Spell, _G.UnitCastingInfo, _G.GetTime = sCTrade, sCSpell, sUnitCast, sGetTime
+	_G.GetTradeSkillLine, _G.GetNumTradeSkills, _G.GetTradeSkillInfo, _G.GetTradeSkillRecipeLink, _G.SelectTradeSkill, _G.DoTradeSkill = sGetTSL, sGetNTS, sGetTSI, sGetTSLink, sSelTS, sDoTS
+	app.getBagCountByID = sGetBag
+	ns.IsForeignTradeSkill = sIsForeign
+	_G.C_Container = sCCont
+	_G.Enum = sEnum
+	_G.NUM_BAG_SLOTS = sNumBags
+	_G.NUM_TOTAL_EQUIPPED_BAG_SLOTS = sNumTotalBags
+end)()
+
+---------------------------------------------------------------------------------------------------
+-- 11. WS4: Shared ns.AHChannel Lease, Direct One-Click Cart Buying & Sniper Unlisted/Cap Guards
+---------------------------------------------------------------------------------------------------
+local function runWS4Tests()
+	local ch = ns.AHChannel
+	check(ch ~= nil and type(ch.TryAcquire) == "function" and type(ch.Release) == "function"
+		and type(ch.GetOwner) == "function" and type(ch.GetKind) == "function" and type(ch.IsBusy) == "function",
+		"WS4: ns.AHChannel lease API exported")
+
+	-- 11a. AHChannel lease semantics: acquire, mutual exclusion, market_scan preemption, release, AH close reset
+	ch.Reset()
+	check(ch.GetOwner() == nil and ch.IsBusy() == false and ch.IsBusy("cart_buyer") == false,
+		"WS4: AHChannel starts idle")
+	local ok1, err1 = ch.TryAcquire("market_scan", "browse")
+	check(ok1 == true and err1 == nil and ch.GetOwner() == "market_scan" and ch.GetKind() == "browse",
+		"WS4: market_scan acquires AHChannel")
+	check(ch.IsBusy("market_scan") == false and ch.IsBusy("sniper") == true and ch.IsBusy("cart_buyer") == true,
+		"WS4: IsBusy excludes current owner and flags others")
+	-- Explicit player action preempts background market_scan
+	local ok2 = ch.TryAcquire("cart_buyer", { kind = "commodity", preemptScan = true })
+	check(ok2 == true and ch.GetOwner() == "cart_buyer" and ch.GetKind() == "commodity",
+		"WS4: cart_buyer preempts market_scan cleanly")
+	-- Mutual exclusion between active non-scan owners
+	local ok3, err3 = ch.TryAcquire("sniper", "commodity")
+	check(ok3 == false and tostring(err3):find("cart_buyer", 1, true) ~= nil,
+		"WS4: sniper blocked while cart_buyer holds AHChannel")
+	check(ch.Release("sniper") == false and ch.GetOwner() == "cart_buyer",
+		"WS4: wrong owner cannot release cart_buyer lease")
+	check(ch.Release("cart_buyer") == true and ch.GetOwner() == nil and ch.IsBusy() == false,
+		"WS4: owner releases AHChannel cleanly")
+
+	-- Save globals for WS4 direct buy tests
+	local origCAH = _G.C_AuctionHouse
+	local origMoney = _G.GetMoney
+	local origTimerAfter = _G.C_Timer and _G.C_Timer.After
+	local origLegacy = _G.IsUsingLegacyAuctionClient
+	local origSearchAH2 = app.searchAH
+	local origMailHelper = ns.MailHelper
+	local origOpenCart = app.openCartBuyer
+
+	local pendingTimers = {}
+	if _G.C_Timer then
+		_G.C_Timer.After = function(delay, fn)
+			pendingTimers[#pendingTimers + 1] = { delay = delay, fn = fn, fired = false }
+		end
+	end
+	local function flushTimers(minDelay)
+		local list = pendingTimers
+		pendingTimers = {}
+		for _, t in ipairs(list) do
+			if not t.fired and (not minDelay or t.delay >= minDelay) then
+				t.fired = true
+				t.fn()
+			end
+		end
+	end
+
+	local ahCalls = { start = {}, confirm = {}, cancel = 0, bid = {} }
+	local mockMoney = 1000000 -- 100g
+	local mockThrottledReady = true
+	local mockQuoteRemaining = 25
+	local mockCommResults = {}
+	local mockItemResults = {}
+
+	_G.GetMoney = function() return mockMoney end
+	_G.IsUsingLegacyAuctionClient = function() return false end
+	_G.C_AuctionHouse = {
+		IsThrottledMessageSystemReady = function() return mockThrottledReady end,
+		GetQuoteDurationRemaining = function() return mockQuoteRemaining end,
+		StartCommoditiesPurchase = function(...)
+			ahCalls.start[#ahCalls.start + 1] = { n = select("#", ...), a1 = select(1, ...), a2 = select(2, ...), a3 = select(3, ...) }
+			return true
+		end,
+		ConfirmCommoditiesPurchase = function(id, qty)
+			ahCalls.confirm[#ahCalls.confirm + 1] = { itemID = id, qty = qty }
+			-- Simulate host hook firing synchronously during ConfirmCommoditiesPurchase
+			cb.OnCommodityPurchaseConfirmed(id, qty)
+			return true
+		end,
+		CancelCommoditiesPurchase = function()
+			ahCalls.cancel = ahCalls.cancel + 1
+		end,
+		PlaceBid = function(auctionID, amount)
+			ahCalls.bid[#ahCalls.bid + 1] = { auctionID = auctionID, amount = amount }
+			-- Simulate host hook firing synchronously during PlaceBid (must be ignored for self-initiated bids!)
+			cb.OnItemBidPlaced(auctionID, amount)
+			return true
+		end,
+		GetNumCommoditySearchResults = function(itemID)
+			return mockCommResults[itemID] and #mockCommResults[itemID] or 0
+		end,
+		GetCommoditySearchResultInfo = function(itemID, i)
+			return mockCommResults[itemID] and mockCommResults[itemID][i] or nil
+		end,
+		GetNumItemSearchResults = function(key)
+			local id = type(key) == "table" and key.itemID or nil
+			return id and mockItemResults[id] and #mockItemResults[id] or 0
+		end,
+		GetItemSearchResultInfo = function(key, i)
+			local id = type(key) == "table" and key.itemID or nil
+			return id and mockItemResults[id] and mockItemResults[id][i] or nil
+		end,
+	}
+
+	local searchCount = 0
+	app.searchAH = function() searchCount = searchCount + 1; return true end
+	_G.AuctionHouseFrame:Show()
+
+	-- 11b. app.multiSearchBuyer delegates to openCartBuyer natively
+	local delegatedTerms = nil
+	app.openCartBuyer = function(ct) delegatedTerms = ct; return true end
+	local multiRes = app.multiSearchBuyer("Test Multi", { { name = "Peacebloom", itemID = 2447, qty = 4 } })
+	app.openCartBuyer = origOpenCart
+	check(multiRes == true and delegatedTerms and #delegatedTerms == 1 and delegatedTerms[1].itemID == 2447,
+		"WS4: multiSearchBuyer delegates to openCartBuyer natively")
+
+	-- 11c. OrderFlow.CollectFromMail defers when ns.MailHelper.IsActive() is true
+	ns.MailHelper = { IsActive = function() return true end }
+	local mailTakeCalled = false
+	local origTakeMail = _G.TakeInboxItem
+	_G.TakeInboxItem = function() mailTakeCalled = true end
+	of.LoadFromShoppingRows({
+		{ name = "Sunfire Herb", itemID = 70001, qty = 0, ownedUsed = 2, categoryName = "Mail Test" },
+	}, {
+		title = "Mail Guard Test",
+		ownershipProvider = function() return { bags = 0, bank = 0, mail = 2, alts = {} } end,
+	})
+	of.SetActiveStage("collect")
+	local colOk, colReason = of.CollectFromMail(1)
+	check(colOk == false and colReason == "mail_helper_active" and mailTakeCalled == false,
+		"WS4: OrderFlow.CollectFromMail pauses/defers when MailHelper.IsActive() is true")
+	ns.MailHelper = origMailHelper
+	_G.TakeInboxItem = origTakeMail
+
+	-- 11d. Direct 2-click commodity buy (quote, confirm, verifiedTotal in spentCopper, all 5 GetPrimaryAction states)
+	app.sendShoppingRowsToBuyer({
+		{ name = "Copper Ore", itemID = 61001, qty = 5, ahUnitPrice = 1000, maxBuyUnit = 1200 },
+		{ name = "Rare Blade", itemID = 61002, qty = 2, ahUnitPrice = 20000, maxBuyUnit = 25000 },
+		{ name = "Final Herb", itemID = 61003, qty = 1, ahUnitPrice = 500 },
+	}, "WS4 Direct Cart")
+	local dst = cb.GetState()
+	check(cb.GetPrimaryAction().state == "idle" and cb.GetPrimaryAction().label == "Open in AH",
+		"WS4: idle before live search shows Open in AH")
+
+	-- Zero cross-talk when ah_seller owns channel
+	ch.TryAcquire("ah_seller", "sell_search")
+	mockCommResults[61001] = { { unitPrice = 99999, quantity = 50 } }
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 61001)
+	check(dst.items[1].liveUnit == nil and dst.items[1].liveKind == nil,
+		"WS4: handleCartBuyerEvent ignores COMMODITY_SEARCH_RESULTS_UPDATED when ah_seller owns AHChannel")
+	ch.Release("ah_seller")
+
+	-- Real live commodity search arrives for Copper Ore: 5x at 1000c = 5000c
+	mockCommResults[61001] = { { unitPrice = 1000, quantity = 20 } }
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 61001)
+	check(dst.items[1].liveKind == "commodity" and dst.items[1].liveAvailQty == 5 and dst.items[1].liveTotal == 5000,
+		"WS4: commodity search records liveKind='commodity', liveAvailQty=5, liveTotal=5000")
+	local paIdle = cb.GetPrimaryAction()
+	check(paIdle.state == "idle" and paIdle.label == "Buy 5x" and paIdle.enabled == true and paIdle.wideConfirm == false,
+		"WS4: GetPrimaryAction idle commodity shows 'Buy 5x', got " .. tostring(paIdle.label))
+	check(cb.GetCancelAction().active == false and cb.GetCancelAction().label == "Mark Bought",
+		"WS4: GetCancelAction idle shows Mark Bought")
+
+	-- Click 1: ExecutePrimaryAction starts commodity quote with STRICTLY 2 args
+	pendingTimers = {}
+	local sOk = cb.ExecutePrimaryAction()
+	check(sOk == true, "WS4: Click 1 StartDirectBuy succeeds")
+	check(#ahCalls.start == 1 and ahCalls.start[1].n == 2 and ahCalls.start[1].a1 == 61001 and ahCalls.start[1].a2 == 5,
+		"WS4: StartCommoditiesPurchase invoked with strictly 2 args (61001, 5)")
+	check(ch.GetOwner() == "cart_buyer" and cb.IsPurchaseInFlight() == true,
+		"WS4: AHChannel acquired by cart_buyer during quoting")
+	local paQuoting = cb.GetPrimaryAction()
+	check(paQuoting.state == "quoting" and paQuoting.enabled == false and paQuoting.label == "Quoting...",
+		"WS4: GetPrimaryAction quoting state verified")
+	check(cb.GetCancelAction().active == true and cb.GetCancelAction().label == "Cancel Buy",
+		"WS4: GetCancelAction during quoting shows Cancel Buy")
+
+	-- COMMODITY_PRICE_UPDATED with slight jump within 5% tolerance (1020c ea, 5100c total <= 5250c)
+	local evHandled = ns.MarketScan.HandleEvent("COMMODITY_PRICE_UPDATED", 1020, 5100)
+	check(evHandled == true, "WS4: MarketScan.HandleEvent returns true for COMMODITY_PRICE_UPDATED")
+	local paConfirm = cb.GetPrimaryAction()
+	check(paConfirm.state == "awaiting_confirm" and paConfirm.enabled == true and paConfirm.wideConfirm == true,
+		"WS4: GetPrimaryAction awaiting_confirm sets wideConfirm=true")
+	check(cb.GetDirectBuyState().verifiedTotal == 5100, "WS4: verifiedTotal preserved from arg2 (5100)")
+
+	-- Expired quote blocks ConfirmDirectBuy
+	mockQuoteRemaining = 0
+	local expOk, expErr = cb.ConfirmDirectBuy()
+	check(expOk == false and expErr == "quote_expired" and ch.GetOwner() == nil,
+		"WS4: GetQuoteDurationRemaining()==0 aborts ConfirmDirectBuy and releases lease")
+	mockQuoteRemaining = 25
+
+	-- Price jump above 5% tolerance / cap rejects quote automatically
+	check(cb.StartDirectBuy() == true, "WS4: restart commodity quote for jump test")
+	local cancelBefore = ahCalls.cancel
+	ns.MarketScan.HandleEvent("COMMODITY_PRICE_UPDATED", 1100, 5500) -- 5500 > floor(5000*1.05)=5250
+	check(cb.GetDirectBuyState() == nil and ch.GetOwner() == nil and ahCalls.cancel == cancelBefore + 1,
+		"WS4: price jump above 5% tolerance cancels quote and releases lease")
+
+	-- COMMODITY_PRICE_UNAVAILABLE aborts cleanly
+	check(cb.StartDirectBuy() == true, "WS4: restart commodity quote for unavailable test")
+	local unavailHandled = ns.MarketScan.HandleEvent("COMMODITY_PRICE_UNAVAILABLE")
+	check(unavailHandled == true and cb.GetDirectBuyState() == nil and ch.GetOwner() == nil,
+		"WS4: COMMODITY_PRICE_UNAVAILABLE cancels quote and releases lease")
+
+	-- Full 2-click commodity buy completion records exact verifiedTotal (5100c) and advances to item 2
+	pendingTimers = {}
+	check(cb.StartDirectBuy() == true, "WS4: start commodity quote for full confirm")
+	ns.MarketScan.HandleEvent("COMMODITY_PRICE_UPDATED", 1020, 5100)
+	local cOk = cb.ExecutePrimaryAction()
+	check(cOk == true, "WS4: Click 2 ConfirmDirectBuy succeeds")
+	local paConfirming = cb.GetPrimaryAction()
+	check(paConfirming.state == "confirming" and paConfirming.enabled == false and paConfirming.wideConfirm == true,
+		"WS4: GetPrimaryAction confirming state verified")
+	check(#ahCalls.confirm == 1 and ahCalls.confirm[1].itemID == 61001 and ahCalls.confirm[1].qty == 5,
+		"WS4: ConfirmCommoditiesPurchase called with (61001, 5)")
+	-- Confirm hook did NOT overwrite verifiedTotal
+	ns.MarketScan.HandleEvent("COMMODITY_PURCHASE_SUCCEEDED")
+	check(dst.spentCopper == 5100, "WS4: COMMODITY_PURCHASE_SUCCEEDED records exact verifiedTotal (5100c), got " .. tostring(dst.spentCopper))
+	check(dst.items[1].status == "done" and dst.activeIndex == 2 and ch.GetOwner() == nil,
+		"WS4: commodity purchase completes item 1, releases lease, and advances to item 2")
+
+	-- 11e. Non-commodity 1-click buyout: unit cap, stack warning, self-hook no-lockout, AUCTION_HOUSE_PURCHASE_COMPLETED auto-advance
+	-- First test over-cap block (unitBuyout = 60000 / 2 = 30000 > maxBuyUnit 25000)
+	mockItemResults[61002] = {
+		{ auctionID = 9001, buyoutAmount = 60000, quantity = 2, containsOwnerItem = false },
+	}
+	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 61002 })
+	check(dst.items[2].liveKind == "item" and dst.items[2].overBuyCap == true,
+		"WS4: item search flags overBuyCap when unitBuyout > maxBuyUnit")
+	local capBlkOk, capBlkErr = cb.StartDirectBuy()
+	check(capBlkOk == false and capBlkErr == "over_buy_cap",
+		"WS4: overBuyCap blocks StartDirectBuy for non-commodity item")
+	check(cb.GetPrimaryAction().action == "open_in_ah",
+		"WS4: overBuyCap primary action falls back to Open in AH")
+
+	-- Now provide valid listing: stack of 3x for 54000c (18000c ea <= 25000c cap, stack 3 > remaining 2 -> warning!)
+	mockItemResults[61002] = {
+		{ auctionID = 9000, buyoutAmount = 10000, quantity = 1, containsOwnerItem = true }, -- owner listing skipped
+		{ auctionID = 9002, buyoutAmount = 54000, quantity = 3, containsOwnerItem = false },
+	}
+	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 61002 })
+	check(dst.items[2].liveAuctionID == 9002 and dst.items[2].liveAuctionQty == 3 and dst.items[2].liveBuyout == 54000
+		and dst.items[2].overbuyStackWarning == true and dst.items[2].overBuyCap == false,
+		"WS4: item search skips owner listing, records liveAuctionQty=3 and overbuyStackWarning=true")
+	local paItem = cb.GetPrimaryAction()
+	check(paItem.state == "idle" and paItem.label == "Buy 3x (!)" and paItem.overbuyStackWarning == true,
+		"WS4: GetPrimaryAction shows stack warning 'Buy 3x (!)', got " .. tostring(paItem.label))
+
+	-- Legacy AH guard blocks direct buy
+	_G.IsUsingLegacyAuctionClient = function() return true end
+	local legOk, legErr = cb.StartDirectBuy()
+	check(legOk == false and legErr == "legacy_ah", "WS4: IsUsingLegacyAuctionClient blocks StartDirectBuy")
+	_G.IsUsingLegacyAuctionClient = function() return false end
+
+	-- Click 1: non-commodity PlaceBid (self-initiated OnItemBidPlaced must NOT create pendingExternalBid!)
+	pendingTimers = {}
+	local bOk = cb.ExecutePrimaryAction()
+	check(bOk == true, "WS4: 1-click non-commodity buyout succeeds")
+	check(#ahCalls.bid == 1 and ahCalls.bid[1].auctionID == 9002 and ahCalls.bid[1].amount == 54000,
+		"WS4: PlaceBid invoked with (9002, 54000)")
+	check(dst.pendingExternalBid == nil, "WS4: self-initiated PlaceBid hook does not create pendingExternalBid lockout")
+	local paBuying = cb.GetPrimaryAction()
+	check(paBuying.state == "buying" and paBuying.enabled == false and paBuying.label == "Buying...",
+		"WS4: GetPrimaryAction buying state verified")
+
+	-- AUCTION_HOUSE_PURCHASE_COMPLETED completes item 2, adds 54000c, releases lease, and auto-advances to item 3
+	local buyCompHandled = ns.MarketScan.HandleEvent("AUCTION_HOUSE_PURCHASE_COMPLETED", 9002)
+	check(buyCompHandled == true, "WS4: HandleEvent returns true for AUCTION_HOUSE_PURCHASE_COMPLETED")
+	check(dst.spentCopper == 5100 + 54000, "WS4: item buyout adds exact 54000c to spentCopper")
+	check(dst.items[2].status == "done" and dst.activeIndex == 3 and ch.GetOwner() == nil,
+		"WS4: item buyout marks item 2 done, releases lease, and advances to item 3")
+
+	-- 11f. Serial-guarded watchdog timeout releases wedged lease without cancelling newer serial
+	mockCommResults[61003] = { { unitPrice = 500, quantity = 10 } }
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 61003)
+	pendingTimers = {}
+	check(cb.StartDirectBuy() == true, "WS4: start quote for watchdog test")
+	local firstWatchdog = pendingTimers[#pendingTimers]
+	check(firstWatchdog ~= nil and firstWatchdog.delay == 30, "WS4: 30s quote watchdog armed")
+	-- Cancel & restart -> first watchdog becomes stale and must NOT cancel the new directBuy
+	cb.CancelDirectBuy("user cancel")
+	check(cb.StartDirectBuy() == true, "WS4: restart quote with new serial")
+	firstWatchdog.fn()
+	check(cb.GetDirectBuyState() ~= nil and ch.GetOwner() == "cart_buyer",
+		"WS4: stale watchdog serial does not cancel active directBuy")
+	-- Firing active watchdog cancels and releases lease
+	flushTimers(30)
+	check(cb.GetDirectBuyState() == nil and ch.GetOwner() == nil,
+		"WS4: active 30s watchdog cancels wedged quote and releases AHChannel")
+
+	-- 11g. SniperEngine WS4/WS2 guards: AHChannel mutual exclusion, qty==0 skip, 1.25x snapHist cap
+	local SE = ns.SniperEngine
+	check(SE ~= nil, "WS4: ns.SniperEngine loaded for cross-subsystem checks")
+	SE.atAH = true
+	-- Hold cart_buyer lease -> Sniper StartCommodityBuy must refuse with cart_buyer_busy
+	ch.TryAcquire("cart_buyer", "commodity")
+	local snBlk, snErr = SE.StartCommodityBuy({ idKey = "c:61003", itemID = 61003, buyQty = 1, totalCost = 500, mode = "gap" })
+	check(snBlk == false and snErr == "cart_buyer_busy",
+		"WS4: Sniper StartCommodityBuy blocked when cart_buyer holds AHChannel, got " .. tostring(snErr))
+	ch.Release("cart_buyer")
+
+	-- Hold sniper lease via SE.StartCommodityBuy -> CartBuyer StartDirectBuy must refuse
+	local snStartOk = SE.StartCommodityBuy({ idKey = "c:61003", itemID = 61003, buyQty = 1, totalCost = 500, mode = "gap" })
+	check(snStartOk == true and ch.GetOwner() == "sniper", "WS4: Sniper acquires 'sniper' AHChannel lease on purchase start")
+	local cbBlk, cbBlkErr = cb.StartDirectBuy()
+	check(cbBlk == false and tostring(cbBlkErr):find("sniper", 1, true) ~= nil,
+		"WS4: CartBuyer StartDirectBuy blocked while sniper holds AHChannel")
+	SE.CancelActivePurchase("test cleanup")
+	check(ch.GetOwner() == nil, "WS4: Sniper CancelActivePurchase releases 'sniper' AHChannel lease")
+
+	-- Sniper qty==0 skip + 1.25x snapHist anti-manipulation cap
+	local origQuerySnap = ns.QueryLocalSnapshot
+	local origSnapParsed = ns.snapshotParsed
+	local origRegSaleFn = ns.Pricing and ns.Pricing.GetItemSnapshotRegionSale
+	local origVendorFn = ns.GetVendorSellPrice
+	local origConserv = ns.GetConservativeSaleUnitPrice
+	local origDemandFn = ns.GetMultiSourceDemand
+
+	local testEcon = "WS4-Test-Econ"
+	local testSnap = {
+		-- Unlisted 14d item (qty=0, even if minBuyout were non-zero): MUST be skipped by both Vendor & Gap scans!
+		[62001] = { minBuyout = 100, marketValue = 50000, historical = 50000, qty = 0 },
+		-- Listed item with inflated marketValue (50000) vs historical (10000) and no regSale -> capped at 12500!
+		[62002] = { minBuyout = 2000, marketValue = 50000, historical = 10000, qty = 10 },
+	}
+	ns.snapshotParsed = { [testEcon] = { items = testSnap, meta = { updatedAt = 1760000000 } } }
+	ns.QueryLocalSnapshot = function(id)
+		local r = testSnap[id]
+		return r and (r.minBuyout or r.marketValue) or nil, r
+	end
+	if ns.Pricing then ns.Pricing.GetItemSnapshotRegionSale = function() return nil end end
+	ns.GetVendorSellPrice = function(id) return (id == 62001) and 50000 or 10 end
+	ns.GetConservativeSaleUnitPrice = nil
+	ns.GetMultiSourceDemand = function() return { effectiveDailySold = 20, dailySold = 20, demandSource = "velocity", confidence = 2 } end
+
+	local refP, refSrc = SE.GetReferencePrice(62002, testEcon)
+	check(refP == 12500 and refSrc == "snapshot_hist_cap",
+		"WS4: GetReferencePrice caps snapMV at 1.25 * snapHist when regSale==nil (expected 12500/snapshot_hist_cap, got "
+		.. tostring(refP) .. "/" .. tostring(refSrc) .. ")")
+
+	SE.ClearVendorDeals()
+	SE.ScanSnapshotForVendorDeals(testEcon, { minProfitCopper = 100 })
+	check(SE.vendorDealsByKey["vendor:62001"] == nil,
+		"WS4: ScanSnapshotForVendorDeals skips unlisted snapshot row with qty==0")
+
+	local sl = SE.BuildGapShortlist({ econ = testEcon, minDailySales = 1, minProfitCopper = 100, minQuality = 0 })
+	local foundUnlisted = false
+	for _, entry in ipairs(sl) do
+		if entry.itemID == 62001 then foundUnlisted = true end
+	end
+	check(not foundUnlisted, "WS4: BuildGapShortlist skips unlisted snapshot row with qty==0")
+
+	-- Restore WS4 mocks cleanly
+	ns.QueryLocalSnapshot = origQuerySnap
+	ns.snapshotParsed = origSnapParsed
+	if ns.Pricing then ns.Pricing.GetItemSnapshotRegionSale = origRegSaleFn end
+	ns.GetVendorSellPrice = origVendorFn
+	ns.GetConservativeSaleUnitPrice = origConserv
+	ns.GetMultiSourceDemand = origDemandFn
+	ch.Reset()
+	app.exitAHBuyingMode(false)
+	app.searchAH = origSearchAH2
+	_G.C_AuctionHouse = origCAH
+	_G.GetMoney = origMoney
+	_G.IsUsingLegacyAuctionClient = origLegacy
+	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+end
+runWS4Tests()
+
+---------------------------------------------------------------------------------------------------
+-- 12. WS4 Review Regressions (Majors #1-#4 from review_ws1_ws4.md)
+---------------------------------------------------------------------------------------------------
+local function runWS4ReviewRegressions()
+	local ch = ns.AHChannel
+	local SE = ns.SniperEngine
+	local origCAH = _G.C_AuctionHouse
+	local origMoney = _G.GetMoney
+	local origTimerAfter = _G.C_Timer and _G.C_Timer.After
+	local origLegacy = _G.IsUsingLegacyAuctionClient
+	local origSearchAH3 = app.searchAH
+	local origSearchBar = _G.AuctionHouseFrame and _G.AuctionHouseFrame.SearchBar
+
+	local timers = {}
+	if _G.C_Timer then
+		_G.C_Timer.After = function(delay, fn)
+			timers[#timers + 1] = { delay = delay, fn = fn }
+		end
+	end
+
+	local mockThrottled = true
+	local mockItems = {}
+	_G.GetMoney = function() return 1000000 end
+	_G.IsUsingLegacyAuctionClient = function() return false end
+	_G.C_AuctionHouse = {
+		IsThrottledMessageSystemReady = function() return mockThrottled end,
+		GetQuoteDurationRemaining = function() return 25 end,
+		StartCommoditiesPurchase = function() return true end,
+		ConfirmCommoditiesPurchase = function(id, qty)
+			cb.OnCommodityPurchaseConfirmed(id, qty)
+			return true
+		end,
+		CancelCommoditiesPurchase = function() end,
+		PlaceBid = function() return true end,
+		GetNumItemSearchResults = function(key)
+			local id = type(key) == "table" and key.itemID or nil
+			return id and mockItems[id] and #mockItems[id] or 0
+		end,
+		GetItemSearchResultInfo = function(key, i)
+			local id = type(key) == "table" and key.itemID or nil
+			return id and mockItems[id] and mockItems[id][i] or nil
+		end,
+	}
+
+	local searchCalls = 0
+	app.searchAH = function() searchCalls = searchCalls + 1; return true end
+	ch.Reset()
+	_G.AuctionHouseFrame:Show()
+
+	-- Load 2 items: item 1 non-commodity (63001, liveAuctionID=111, liveBuyout=5000), item 2 commodity (63002)
+	app.sendShoppingRowsToBuyer({
+		{ name = "Relic Sword", itemID = 63001, qty = 1, ahUnitPrice = 5000 },
+		{ name = "Peacebloom", itemID = 63002, qty = 5, ahUnitPrice = 200 },
+	}, "WS4 Regressions")
+	mockItems[63001] = {
+		{ auctionID = 111, buyoutAmount = 5000, quantity = 1, containsOwnerItem = false },
+	}
+	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 63001 })
+	local st = cb.GetState()
+	check(st.items[1].liveAuctionID == 111 and st.items[1].liveBuyout == 5000,
+		"WS4-R: item 1 seeded with liveAuctionID=111, liveBuyout=5000")
+
+	-- MAJOR #1: Unrelated auctionID (999) must NOT bind to cart item (111) or complete it
+	cb.OnItemBidPlaced(999, 5000)
+	check(st.pendingExternalBid == nil and cb.IsPurchaseInFlight() == false,
+		"WS4-R1: unmatched auctionID 999 does not set pendingExternalBid")
+	local handledUnrelated = ns.MarketScan.HandleEvent("AUCTION_HOUSE_PURCHASE_COMPLETED", 999)
+	check(handledUnrelated == false and st.items[1].remaining == 1 and st.items[1].status ~= "done",
+		"WS4-R1: AUCTION_HOUSE_PURCHASE_COMPLETED(999) never completes cart item 111")
+
+	-- MAJOR #2a: Ordinary below-buyout bid (2500 < 5000) must NOT set pendingExternalBid
+	cb.OnItemBidPlaced(111, 2500)
+	check(st.pendingExternalBid == nil and cb.IsPurchaseInFlight() == false,
+		"WS4-R2: below-buyout bid (2500 vs 5000) ignored by OnItemBidPlaced")
+
+	-- MAJOR #2b: Exact buyout bid sets pendingExternalBid + 15s serial watchdog
+	timers = {}
+	cb.OnItemBidPlaced(111, 5000)
+	check(st.pendingExternalBid ~= nil and st.pendingExternalBid.auctionID == 111 and cb.IsPurchaseInFlight() == true,
+		"WS4-R2: matching buyout bid sets pendingExternalBid")
+	check(#timers == 1 and timers[1].delay == 15, "WS4-R2: 15s expiration watchdog armed on pendingExternalBid")
+	local firstExtTimer = timers[1]
+	-- CancelDirectBuy clears pendingExternalBid and bumps serial so stale timer is harmless
+	cb.CancelDirectBuy("test cancel")
+	check(st.pendingExternalBid == nil and cb.IsPurchaseInFlight() == false,
+		"WS4-R2: CancelDirectBuy clears pendingExternalBid")
+
+	-- Re-arm, test stale watchdog does not clear newer pendingExternalBid, then active watchdog expires it
+	timers = {}
+	cb.OnItemBidPlaced(111, 5000)
+	firstExtTimer.fn()
+	check(st.pendingExternalBid ~= nil, "WS4-R2: stale watchdog serial does not clear newer pendingExternalBid")
+	timers[1].fn()
+	check(st.pendingExternalBid == nil and cb.IsPurchaseInFlight() == false,
+		"WS4-R2: active 15s watchdog expires pendingExternalBid cleanly")
+
+	-- AUCTION_HOUSE_CLOSED clears pendingExternalBid
+	cb.OnItemBidPlaced(111, 5000)
+	check(st.pendingExternalBid ~= nil, "WS4-R2: pendingExternalBid set before AH close")
+	_G.AuctionHouseFrame:Hide()
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_CLOSED")
+	check(st.pendingExternalBid == nil and cb.IsPurchaseInFlight() == false,
+		"WS4-R2: AUCTION_HOUSE_CLOSED clears pendingExternalBid")
+
+	-- MarkBought clears pendingExternalBid
+	_G.AuctionHouseFrame:Show()
+	cb.OpenInAH(1)
+	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 63001 })
+	cb.OnItemBidPlaced(111, 5000)
+	check(st.pendingExternalBid ~= nil, "WS4-R2: pendingExternalBid set before MarkBought")
+	cb.MarkBought(1)
+	check(st.pendingExternalBid == nil and cb.IsPurchaseInFlight() == false,
+		"WS4-R2: MarkBought clears pendingExternalBid")
+
+	-- MAJOR #3: OnCommodityPurchaseConfirmed ignores confirmations while Sniper holds AHChannel
+	-- CartBuyer is now active on item 2 (itemID 63002, qty 5)
+	check(st.active == true and st.items[2].itemID == 63002 and st.items[2].remaining == 5,
+		"WS4-R3: CartBuyer active on item 2 (63002)")
+	SE.atAH = true
+	local snDeal = { idKey = "c:63002", itemID = 63002, itemName = "Peacebloom", buyQty = 5, totalCost = 1000, mode = "gap", status = "ready" }
+	local sOk = SE.StartCommodityBuy(snDeal)
+	check(sOk == true and ch.GetOwner() == "sniper", "WS4-R3: Sniper acquired 'sniper' lease for commodity buy")
+	SE.OnEvent("COMMODITY_PRICE_UPDATED", 200, 1000)
+	local scOk = SE.ConfirmCommodityBuy(snDeal)
+	check(scOk == true, "WS4-R3: Sniper ConfirmCommodityBuy succeeded")
+	-- Host ConfirmCommoditiesPurchase hook fired cb.OnCommodityPurchaseConfirmed(63002, 5) synchronously;
+	-- CartBuyer MUST have ignored it so pendingExternal stays nil!
+	check(st.pendingExternal == nil, "WS4-R3: OnCommodityPurchaseConfirmed ignored while sniper owns AHChannel")
+	SE.OnEvent("COMMODITY_PURCHASE_SUCCEEDED")
+	check(SE.GetPurchaseState() == nil and snDeal.status == "bought" and ch.GetOwner() == nil,
+		"WS4-R3: Sniper completed its own COMMODITY_PURCHASE_SUCCEEDED cleanly")
+	check(st.items[2].bought == 0 and st.items[2].remaining == 5,
+		"WS4-R3: CartBuyer item 2 untouched by Sniper commodity purchase")
+
+	-- MAJOR #4a: OpenInAH rejected with "ah_busy" when another subsystem holds AHChannel
+	ch.TryAcquire("ah_sell", { kind = "sell_search", preemptScan = true })
+	local callsBeforeBusy = searchCalls
+	local openOk, openErr = cb.OpenInAH(2)
+	check(openOk == false and openErr == "ah_busy" and searchCalls == callsBeforeBusy,
+		"WS4-R4: OpenInAH rejects with 'ah_busy' when ah_sell owns AHChannel")
+	ch.Release("ah_sell")
+
+	-- MAJOR #4b: sendWantedWhenReady re-checks IsBusy("cart_buyer") before deferred StartSearch dispatch
+	app.searchAH = origSearchAH3
+	local startSearchCount = 0
+	local mockBar = {
+		SetSearchText = function() end,
+		StartSearch = function() startSearchCount = startSearchCount + 1 end,
+	}
+	_G.AuctionHouseFrame.SearchBar = mockBar
+	mockThrottled = false
+	app.searchAH("Peacebloom", 5, 2447)
+	check(startSearchCount == 0 and app.wanted and app.wanted.pendingBar == mockBar,
+		"WS4-R4: throttled searchAH defers StartSearch via pendingBar")
+	-- Another subsystem acquires AHChannel before throttle becomes ready
+	ch.TryAcquire("ah_undercut", { kind = "undercut", preemptScan = true })
+	mockThrottled = true
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+	check(startSearchCount == 0,
+		"WS4-R4: deferred sendWantedWhenReady aborts StartSearch when AHChannel is busy")
+	ch.Release("ah_undercut")
+
+	-- Once channel is free, deferred search dispatches cleanly on throttle ready
+	mockThrottled = false
+	app.searchAH("Peacebloom", 5, 2447)
+	mockThrottled = true
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+	check(startSearchCount == 1,
+		"WS4-R4: deferred sendWantedWhenReady dispatches StartSearch when AHChannel is idle")
+
+	-- MAJOR #5 (re-review): Cross-cart externalBidSerial watchdog isolation across resetAllStages
+	app.searchAH = function() return true end
+	timers = {}
+	app.sendShoppingRowsToBuyer({
+		{ name = "Relic Sword", itemID = 63001, qty = 1, ahUnitPrice = 5000 },
+	}, "Cart 1")
+	mockItems[63001] = {
+		{ auctionID = 211, buyoutAmount = 5000, quantity = 1, containsOwnerItem = false },
+	}
+	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 63001 })
+	cb.OnItemBidPlaced(211, 5000)
+	check(#timers == 1 and timers[1].delay == 15, "WS4-R5: Cart 1 manual buyout armed 15s watchdog")
+	local cart1Watchdog = timers[1]
+
+	-- Load Cart 2 before Cart 1's watchdog fires, and start manual buyout on Cart 2
+	timers = {}
+	app.sendShoppingRowsToBuyer({
+		{ name = "Arcane Staff", itemID = 63003, qty = 1, ahUnitPrice = 9000 },
+	}, "Cart 2")
+	mockItems[63003] = {
+		{ auctionID = 222, buyoutAmount = 9000, quantity = 1, containsOwnerItem = false },
+	}
+	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 63003 })
+	cb.OnItemBidPlaced(222, 9000)
+	local st2 = cb.GetState()
+	check(st2.pendingExternalBid ~= nil and st2.pendingExternalBid.auctionID == 222,
+		"WS4-R5: Cart 2 manual buyout staged pendingExternalBid for auction 222")
+
+	-- Fire Cart 1's stale watchdog: Cart 2's pendingExternalBid MUST survive and complete normally!
+	cart1Watchdog.fn()
+	check(st2.pendingExternalBid ~= nil and st2.pendingExternalBid.auctionID == 222,
+		"WS4-R5: Cart 1 watchdog does not clear Cart 2 pendingExternalBid after resetAllStages")
+	local comp2 = ns.MarketScan.HandleEvent("AUCTION_HOUSE_PURCHASE_COMPLETED", 222)
+	check(comp2 == true and st2.items[1].status == "done" and st2.spentCopper == 9000,
+		"WS4-R5: Cart 2 manual buyout completes normally after Cart 1 watchdog fired")
+
+	-- Cleanup
+	ch.Reset()
+	app.exitAHBuyingMode(false)
+	app.searchAH = origSearchAH3
+	if _G.AuctionHouseFrame then _G.AuctionHouseFrame.SearchBar = origSearchBar end
+	_G.C_AuctionHouse = origCAH
+	_G.GetMoney = origMoney
+	_G.IsUsingLegacyAuctionClient = origLegacy
+	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+end
+runWS4ReviewRegressions()
+
+local function runVendorRecognitionRegressions()
+	local of = app.orderFlow
+	local origMF = _G.MerchantFrame
+	local origAHF = _G.AuctionHouseFrame
+	local origUnitName = _G.UnitName
+	local origEnum = _G.Enum
+	local origGetMNum, origGetMID, origGetMLink, origGetMInfo, origGetMMax, origBuyM =
+		_G.GetMerchantNumItems, _G.GetMerchantItemID, _G.GetMerchantItemLink, _G.GetMerchantItemInfo, _G.GetMerchantItemMaxStack, _G.BuyMerchantItem
+	local origCMerchant = _G.C_MerchantFrame
+	local origMoney = _G.GetMoney
+	local origCapture = ns.CaptureMerchantVendorPrices
+	local origGetBag = app.getBagCountByID
+	local origCContVR = _G.C_Container
+	local origTimerAfter = _G.C_Timer and _G.C_Timer.After
+
+	_G.C_Container = {
+		GetContainerNumSlots = function(b) return b == 0 and 8 or 0 end,
+		GetContainerNumFreeSlots = function(b) return b == 0 and 8 or 0, 0 end,
+		GetContainerItemInfo = function() return nil end,
+	}
+
+	if _G.C_Timer then _G.C_Timer.After = function(_, fn) fn() end end
+	local vMF = CreateFrame("Frame", "MockRegressMerchant", UIParent); vMF:Hide()
+	_G.MerchantFrame = vMF
+	if _G.AuctionHouseFrame then _G.AuctionHouseFrame:Hide() end
+	_G.UnitName = function(unit)
+		if unit == "npc" then return "Mani Winterhoof" end
+		return origUnitName and origUnitName(unit) or "TestPlayer"
+	end
+	_G.GetMoney = function() return 500000 end
+
+	local bags = { [4711] = 0 }
+	app.getBagCountByID = function(id) return bags[id] or 0 end
+
+	local buyCalls = {}
+	_G.GetMerchantNumItems = function() return 1 end
+	_G.GetMerchantItemID = function() return nil end
+	_G.GetMerchantItemLink = function() return nil end
+	_G.GetMerchantItemInfo = nil
+	_G.C_MerchantFrame = {
+		GetItemInfo = function(slot)
+			if slot == 1 then
+				return {
+					itemID = 4711,
+					name = "Leaded Vial",
+					price = 162,
+					stackCount = 5,
+					numAvailable = -1,
+					isPurchasable = true,
+					hasExtendedCost = false,
+				}
+			end
+		end,
+	}
+	_G.GetMerchantItemMaxStack = function() return 20 end
+	_G.BuyMerchantItem = function(slot, qty)
+		buyCalls[#buyCalls + 1] = { slot = slot, qty = qty }
+		bags[4711] = (bags[4711] or 0) + qty
+	end
+
+	-- 1) CaptureMerchantVendorPrices throwing on MERCHANT_SHOW while modal is hidden still tracks vendor;
+	--    opening OrderFlow on "ah" then switching to "2. Vendor" recognizes open vendor, renders Spotlight,
+	--    reconciles manual bag purchases, and buys bundled Leaded Vial with qty=20 (4x5).
+	ns.CaptureMerchantVendorPrices = function() error("simulated vendor capture failure") end
+	modal:Hide()
+	vMF:Show()
+	fireEvent("MERCHANT_SHOW")
+	check(of.GetState().env.atVendor == true and of.GetState().env.vendorName == "Mani Winterhoof",
+		"VR-1: MERCHANT_SHOW sets atVendor even when modal is hidden and CaptureMerchantVendorPrices errors")
+
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "vr1", name = "Stonescale Oil", itemID = 13423, spellID = 17559, prof = "alchemy", qty = 6,
+			reagents = { { itemID = 13422, name = "Stonescale Eel", qty = 1 }, { itemID = 4711, name = "Leaded Vial", qty = 1 } } },
+		{ indent = 1, mainGroupKey = "vr1", name = "Stonescale Eel", itemID = 13422, qty = 473, ahUnitPrice = 500 },
+		{ indent = 1, mainGroupKey = "vr1", name = "Leaded Vial", itemID = 4711, qty = 496, isVendor = true, vendorUnitPrice = 32 },
+	}, {
+		title = "Vendor Recognition Test",
+		ownershipProvider = function(id) return { bags = bags[id] or 0, bank = 0, mail = 0, alts = {} } end,
+	})
+	app.enterOrderFlowMode("ah")
+	modal.stageBtns.vendor:Click("LeftButton")
+	check(of.GetActiveStage() == "vendor", "VR-1b: clicking stageBtns.vendor switches to vendor")
+	check(not modal.waitingBanner:IsShown() and modal.spotlightCard:IsShown(),
+		"VR-1c: open vendor hides waiting plaque and shows Spotlight")
+	check((modal.hdrSubFs:GetText() or ""):find("MANI WINTERHOOF", 1, true) ~= nil,
+		"VR-1d: header shows DOCKED TO VENDOR - MANI WINTERHOOF")
+	check(modal.buyBtn:IsEnabled(), "VR-1e: Buy from Vendor button enabled when vendor stocked via C_MerchantFrame.GetItemInfo")
+
+	-- Manual buy of 2x5 Leaded Vial while open reconciles via BAG_UPDATE_DELAYED
+	bags[4711] = 10
+	fireEvent("BAG_UPDATE_DELAYED")
+	local vItem = of.GetState().stages.vendor.items[1]
+	check(vItem.bought == 10 and vItem.remaining == 486,
+		"VR-1f: manual vendor purchase reconciles via BAG_UPDATE_DELAYED (10/496)")
+
+	-- Click Buy from Vendor on bundled 5-pack item -> passes 20 individual units (maxStack=20), NOT 4 packs
+	modal.buyBtn:Click("LeftButton")
+	check(#buyCalls == 1 and buyCalls[1].slot == 1 and buyCalls[1].qty == 20,
+		"VR-1g: BuyVendorItem passes individual unit count (20) to BuyMerchantItem for 5-pack Leaded Vial (got calls="
+		.. tostring(#buyCalls) .. " qty=" .. tostring(buyCalls[1] and buyCalls[1].qty) .. " notice=" .. tostring(of.GetState().notice) .. ")")
+	fireEvent("BAG_UPDATE_DELAYED")
+	check(vItem.bought == 30 and vItem.remaining == 466,
+		"VR-1h: BAG_UPDATE_DELAYED reconciles bundled purchase (30/496)")
+
+	-- 2) PLAYER_INTERACTION_MANAGER_FRAME_SHOW / HIDE opens & closes vendor without MERCHNAT_SHOW/CLOSED
+	vMF:Hide()
+	fireEvent("MERCHANT_CLOSED")
+	check(of.GetState().env.atVendor == false and modal.waitingBanner:IsShown(),
+		"VR-2a: MERCHANT_CLOSED returns strip to waiting state")
+	_G.Enum = { PlayerInteractionType = { Merchant = 5, Banker = 8, CharacterBanker = 8, MailInfo = 17 } }
+	vMF:Show()
+	fireEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW", 5)
+	check(of.GetState().env.atVendor == true and not modal.waitingBanner:IsShown() and modal.spotlightCard:IsShown(),
+		"VR-2b: PLAYER_INTERACTION_MANAGER_FRAME_SHOW(Merchant) opens vendor recognition")
+	vMF:Hide()
+	fireEvent("PLAYER_INTERACTION_MANAGER_FRAME_HIDE", 5)
+	check(of.GetState().env.atVendor == false and modal.waitingBanner:IsShown(),
+		"VR-2c: PLAYER_INTERACTION_MANAGER_FRAME_HIDE(Merchant) closes vendor recognition")
+
+	-- 3) Live MerchantFrame:IsShown() without ANY event fired is still detected on BuyVendorItem & Render
+	local silentMF = CreateFrame("Frame", "MockSilentMerchant", UIParent)
+	_G.MerchantFrame = silentMF
+	silentMF:Show()
+	check(modal.waitingBanner:IsShown(), "Pre-sync banner check before render")
+	modal.Render()
+	check(of.GetState().env.atVendor == true and not modal.waitingBanner:IsShown() and modal.spotlightCard:IsShown(),
+		"VR-3a: Render SyncLiveEnvironment detects open MerchantFrame without events")
+	buyCalls = {}
+	local okSilentBuy = of.BuyVendorItem(1)
+	check(okSilentBuy == true and #buyCalls == 1 and buyCalls[1].qty == 20,
+		"VR-3b: BuyVendorItem succeeds when MerchantFrame is open without prior event")
+
+	-- 4) sendShoppingRowsToBuyer while standing at open vendor (AH closed) opens directly to Stage 2 vendor
+	ns.CaptureMerchantVendorPrices = origCapture
+	app.enterOrderFlowMode("ah")
+	app.exitAHBuyingMode(false)
+	app.sendShoppingRowsToBuyer({
+		{ name = "Stonescale Eel", itemID = 13422, qty = 10, ahUnitPrice = 500 },
+		{ name = "Leaded Vial", itemID = 4711, qty = 20, isVendor = true, vendorUnitPrice = 32 },
+	}, "At Vendor Cart")
+	check(of.GetActiveStage() == "vendor" and modal:IsShown() and modal.spotlightCard:IsShown(),
+		"VR-4: sendShoppingRowsToBuyer at open vendor lands directly on Stage 2 vendor Spotlight")
+
+	-- Cleanup
+	silentMF:Hide()
+	fireEvent("MERCHANT_CLOSED")
+	app.exitAHBuyingMode(false)
+	_G.MerchantFrame = origMF
+	_G.AuctionHouseFrame = origAHF
+	_G.UnitName = origUnitName
+	_G.Enum = origEnum
+	_G.GetMerchantNumItems, _G.GetMerchantItemID, _G.GetMerchantItemLink, _G.GetMerchantItemInfo, _G.GetMerchantItemMaxStack, _G.BuyMerchantItem =
+		origGetMNum, origGetMID, origGetMLink, origGetMInfo, origGetMMax, origBuyM
+	_G.C_MerchantFrame = origCMerchant
+	_G.GetMoney = origMoney
+	ns.CaptureMerchantVendorPrices = origCapture
+	app.getBagCountByID = origGetBag
+	_G.C_Container = origCContVR
+	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+end
+runVendorRecognitionRegressions()
+
+local function runReloadPersistenceRegressions()
+	local savedQueue = MerchantMasterDB.craftOrderQueue
+	local savedRows = app.rawUnifiedShoppingRows
+	local savedActiveRows = app.activeShoppingRows
+	local savedSpentAH
+
+	MerchantMasterDB.craftOrderQueue = {
+		{ idx = 1, spellID = 7257, outputItemID = 6049, qty = 3 },
+	}
+	local sig1 = app.getOrderFlowCartSignature()
+	check(type(sig1) == "string" and sig1:find("cq:", 1, true) ~= nil,
+		"getOrderFlowCartSignature encodes queued craft orders deterministically")
+
+	local persistRows = {
+		{ isMainRow = true, mainGroupKey = "rp1", name = "Fire Protection Potion", itemID = 6049, spellID = 7257, prof = "alchemy", qty = 3, sourceKind = "craft_order", sourceLabel = "Crafting Order",
+			reagents = { { itemID = 4402, name = "Small Flame Sac", qty = 1 }, { itemID = 3372, name = "Leaded Vial", qty = 1 } } },
+		{ indent = 1, mainGroupKey = "rp1", name = "Small Flame Sac", itemID = 4402, qty = 3, ahUnitPrice = 400 },
+		{ indent = 1, mainGroupKey = "rp1", name = "Firefin Snapper", itemID = 6359, qty = 0, ownedUsed = 4 },
+		{ indent = 1, mainGroupKey = "rp1", name = "Leaded Vial", itemID = 3372, qty = 3, isVendor = true, vendorUnitPrice = 40 },
+	}
+	of.LoadFromShoppingRows(persistRows, {
+		title = "Reload Progress Cart",
+		cartSig = sig1,
+		ownershipProvider = function(id)
+			if id == 6359 then return { bags = 0, mail = 4, bank = 0, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	local ahSt = of.GetState().stages.ah
+	ahSt.items[1].bought = 2
+	ahSt.items[1].remaining = 1
+	ahSt.spentCopper = 800
+	savedSpentAH = ahSt.spentCopper
+	local colSt = of.GetState().stages.collect
+	colSt.items[1].collected = 3
+	colSt.items[1].remaining = 1
+	local venSt = of.GetState().stages.vendor
+	venSt.items[1].bought = 1
+	venSt.items[1].remaining = 2
+	venSt.spentCopper = 40
+	local crSt = of.GetState().stages.craft
+	crSt.tasks[1].completedCrafts = 1
+	crSt.tasks[1].remainingCrafts = 2
+	of.SetActiveStage("craft")
+
+	local blob = MerchantMasterDB.orderFlowState
+	check(type(blob) == "table" and blob.cartSig == sig1 and blob.activeStage == "craft",
+		"SaveState persists OrderFlow snapshot into MerchantMasterDB.orderFlowState")
+	check(blob.stages.ah.items[1].bought == 2 and blob.stages.collect.items[1].collected == 3
+		and blob.stages.vendor.items[1].bought == 1 and blob.stages.craft.tasks[1].completedCrafts == 1,
+		"Serialized snapshot stores partial counters across ALL 4 stages (AH/Collect/Vendor/Craft)")
+
+	-- Simulate fresh /reload Lua VM: wipe in-memory state via ClearSavedState, re-inject saved SavedVariables, call RestoreState()
+	local diskSnapshot = blob
+	of.ClearSavedState()
+	check(not of.HasAnyItems() and MerchantMasterDB.orderFlowState == nil,
+		"ClearSavedState clears both memory and MerchantMasterDB.orderFlowState")
+	MerchantMasterDB.orderFlowState = diskSnapshot
+	local restoredOk = of.RestoreState()
+	check(restoredOk == true and of.HasActiveSessionForSig(sig1) == true and of.GetActiveStage() == "craft",
+		"RestoreState recovers session & cartSig after simulated /reload")
+	local rSt = of.GetState()
+	check(rSt.stages.ah.items[1].bought == 2 and rSt.stages.ah.items[1].remaining == 1 and rSt.stages.ah.spentCopper == savedSpentAH,
+		"Restored Stage 1 AH preserves bought=2, remaining=1, and spentCopper")
+	check(rSt.stages.collect.items[1].collected == 3 and rSt.stages.collect.items[1].remaining == 1,
+		"Restored Stage 2 Collect preserves collected=3 and remaining=1")
+	check(rSt.stages.vendor.items[1].bought == 1 and rSt.stages.vendor.items[1].remaining == 2 and rSt.stages.vendor.spentCopper == 40,
+		"Restored Stage 3 Vendor preserves bought=1, remaining=2, and spentCopper")
+	check(rSt.stages.craft.tasks[1].completedCrafts == 1 and rSt.stages.craft.tasks[1].remainingCrafts == 2,
+		"Restored Stage 4 Craft preserves completedCrafts=1 and remainingCrafts=2")
+
+	-- Re-opening via sendShoppingRowsToBuyer when cart signature matches reuses restored progress instead of resetting!
+	app.sendShoppingRowsToBuyer(persistRows, "Reload Progress Cart")
+	local afterSendSt = of.GetState()
+	check(afterSendSt.stages.ah.items[1].bought == 2 and afterSendSt.stages.craft.tasks[1].completedCrafts == 1,
+		"Re-opening Send to AH / Task List after /reload keeps all stage counters intact")
+	app.exitAHBuyingMode(false)
+
+	-- Changing cart order (sig2 ~= sig1) rebuilds with preserveProgress=true so partial progress carries over cleanly
+	MerchantMasterDB.craftOrderQueue[1].qty = 4
+	local sig2 = app.getOrderFlowCartSignature()
+	check(sig2 ~= sig1, "Changing craft queue changes getOrderFlowCartSignature")
+	persistRows[1].qty = 4
+	persistRows[2].qty = 4
+	app.sendShoppingRowsToBuyer(persistRows, "Expanded Cart")
+	local afterGrowSt = of.GetState()
+	check(afterGrowSt.stages.ah.items[1].needed == 4 and afterGrowSt.stages.ah.items[1].bought == 2
+		and afterGrowSt.stages.craft.tasks[1].neededCrafts == 4 and afterGrowSt.stages.craft.tasks[1].completedCrafts == 1,
+		"Expanding cart preserves existing bought/completedCrafts counters while updating needed totals")
+	cb.MarkBought(1)
+	check(MerchantMasterDB.orderFlowState and MerchantMasterDB.orderFlowState.stages.ah.items[1].status == "done",
+		"cb.MarkBought(1) automatically persists status='done' to MerchantMasterDB.orderFlowState")
+	app.exitAHBuyingMode(false)
+
+	-- Empty Cart clears persisted orderFlowState
+	app.clearUnifiedShoppingList()
+	check(MerchantMasterDB.orderFlowState == nil and not of.HasAnyItems(),
+		"clearUnifiedShoppingList clears MerchantMasterDB.orderFlowState and in-memory OrderFlow")
+
+	MerchantMasterDB.craftOrderQueue = savedQueue
+	app.rawUnifiedShoppingRows = savedRows
+	app.activeShoppingRows = savedActiveRows
+end
+runReloadPersistenceRegressions()
+
+-- 15. Stage 5 Sell (100% Auctionator-Parity AH Selling + Bag Grid + Vendor Channel)
+local function runStage5AuctionatorParityTests()
+	local of = app.orderFlow
+	local origAH = _G.C_AuctionHouse
+	local origCCont = _G.C_Container
+	local origAHF = _G.AuctionHouseFrame
+	local origMF = _G.MerchantFrame
+	local origIL = _G.ItemLocation
+	local origGetTime = _G.GetTime
+	local origTimerAfter = _G.C_Timer and _G.C_Timer.After
+	local origGetItemInfo = _G.GetItemInfo
+	local origCItem = _G.C_Item
+	local origSetOverrideClick = _G.SetOverrideBindingClick
+	local origClearOverride = _G.ClearOverrideBindings
+	local origInCombat = _G.InCombatLockdown
+	local origShiftDown = _G.IsShiftKeyDown
+	local origGetMoney = _G.GetMoney
+
+	-- 0. Zero legacy symbols / Bindings.xml removed
+	local legLo, legHi = "dr" .. "ip", "Dr" .. "ip"
+	check(_G.BINDING_HEADER_MERCHANTMASTER == nil and _G["MerchantMaster" .. legHi .. "PostFromKey"] == nil,
+		"Zero legacy keybind globals remain after removal")
+	check(of.SetSellMode == nil and of["Start" .. legHi] == nil and of["Tick" .. legHi] == nil and of["Get" .. legHi .. "DueItems"] == nil
+		and of["Set" .. legHi .. "ItemConfig"] == nil and of["SetAll" .. legHi .. "Enabled"] == nil and of["PostNextDue" .. legHi] == nil,
+		"Zero legacy scheduling APIs remain on OrderFlow")
+	check(modal.sellModeStdBtn == nil and modal["sellMode" .. legHi .. "Btn"] == nil and modal["sell" .. legHi .. "Bar"] == nil
+		and modal[legLo .. "TickFrame"] == nil and modal[legLo .. "WheelBtn"] == nil,
+		"Zero legacy mode/panel widgets remain on cartBuyerModal")
+	check(modal.buyBtn and modal.buyBtn.GetName and modal.buyBtn:GetName() == "MerchantMasterTaskActionBtn",
+		"Task Strip primary button renamed to MerchantMasterTaskActionBtn")
+	local tab = ns.AHSellTab
+	check(tab ~= nil, "ns.AHSellTab module loaded")
+	tab.EnsureAttached()
+	check(tab.postBtn and tab.postBtn.GetName and tab.postBtn:GetName() == "MerchantMasterSellPostBtn",
+		"MM Sell primary Post button owns global name MerchantMasterSellPostBtn")
+	check(modal.stageBtns.sell == nil and modal.sellForm == nil and modal.sellBagPane == nil,
+		"Task Strip has 4 stages with no inline Stage 5 Sell widgets")
+	local fBind = io.open("../Bindings.xml", "r")
+	if fBind then fBind:close() end
+	check(fBind == nil, "Bindings.xml has been deleted from addon root")
+
+	local mockNow = 5000
+	local scheduledTimers = {}
+	_G.GetTime = function() return mockNow end
+	if _G.C_Timer then
+		_G.C_Timer.After = function(delay, fn)
+			if not delay or delay <= 0 then
+				fn()
+			else
+				scheduledTimers[#scheduledTimers + 1] = { at = mockNow + delay, fn = fn, fired = false }
+			end
+		end
+	end
+	local function advanceTimers(sec)
+		mockNow = mockNow + sec
+		for _, t in ipairs(scheduledTimers) do
+			if not t.fired and mockNow >= t.at then
+				t.fired = true
+				t.fn()
+			end
+		end
+	end
+
+	local mockMoney = 5000000
+	_G.GetMoney = function() return mockMoney end
+	local mockShift = false
+	_G.IsShiftKeyDown = function() return mockShift end
+	local mockInCombat = false
+	_G.InCombatLockdown = function() return mockInCombat end
+	local overrideBindCalls = {}
+	local clearOverrideCalls = 0
+	_G.SetOverrideBindingClick = function(owner, prio, key, btnName, mouseBtn)
+		overrideBindCalls[#overrideBindCalls + 1] = { owner = owner, prio = prio, key = key, btn = btnName, mouse = mouseBtn }
+	end
+	_G.ClearOverrideBindings = function(owner)
+		clearOverrideCalls = clearOverrideCalls + 1
+	end
+
+	local itemMetaMap = {
+		[81001] = { name = "Daily Potion A", quality = 1, itemLevel = 35, maxStack = 20, sellPrice = 200, classID = 0, isReagent = false },
+		[81002] = { name = "Daily Elixir B", quality = 2, itemLevel = 40, maxStack = 20, sellPrice = 300, classID = 0, isReagent = false },
+		[81003] = { name = "Vendor Craft C", quality = 1, itemLevel = 20, maxStack = 20, sellPrice = 500, classID = 7, isReagent = true },
+		[81004] = { name = "Bag Herb D", quality = 1, itemLevel = 15, maxStack = 20, sellPrice = 50, classID = 7, isReagent = true },
+		[81005] = { name = "Tempered Blade", quality = 3, itemLevel = 58, maxStack = 1, sellPrice = 4000, classID = 2, isReagent = false },
+		[81008] = { name = "Runed Ring", quality = 3, itemLevel = 52, maxStack = 1, sellPrice = 1500, classID = 4, isReagent = false },
+		[81009] = { name = "Silver Dagger", quality = 2, itemLevel = 44, maxStack = 1, sellPrice = 1000, classID = 2, isReagent = false },
+		[81010] = { name = "Caged Whelp", quality = 3, itemLevel = 1, maxStack = 1, sellPrice = 0, classID = 17, isReagent = false },
+	}
+	local mockDoesExist = true
+	_G.GetItemInfo = function(idOrLink)
+		local id = tonumber(idOrLink)
+		if not id and type(idOrLink) == "string" then
+			id = tonumber(idOrLink:match("item:(%d+)"))
+		end
+		local m = id and itemMetaMap[id] or nil
+		if m then
+			local lnk = (type(idOrLink) == "string" and idOrLink:find("|H", 1, true)) and idOrLink
+				or ("|cffffffff|Hitem:" .. tostring(id) .. "::::::::60:::::::|h[" .. m.name .. "]|h|r")
+			return m.name, lnk, m.quality, m.itemLevel, 1, "Misc", "Misc", m.maxStack, "", 134400, m.sellPrice, m.classID, 0, 0, 0, nil, m.isReagent
+		end
+		if origGetItemInfo then return origGetItemInfo(idOrLink) end
+		return nil
+	end
+	_G.C_Item = {
+		GetItemInfo = _G.GetItemInfo,
+		GetDetailedItemLevelInfo = function(idOrLink)
+			local id = tonumber(idOrLink) or (type(idOrLink) == "string" and tonumber(idOrLink:match("item:(%d+)")))
+			return (id and itemMetaMap[id] and itemMetaMap[id].itemLevel) or nil
+		end,
+		DoesItemExist = function() return mockDoesExist end,
+		IsBound = function() return false end,
+		GetItemIconByID = function() return 134400 end,
+	}
+
+	local bagState = {
+		[0] = {
+			[1] = { itemID = 81001, stackCount = 5, isLocked = false, isBound = false },
+			[2] = { itemID = 81002, stackCount = 6, isLocked = false, isBound = false },
+			[3] = { itemID = 81003, stackCount = 4, isLocked = false, isBound = false },
+		},
+	}
+	local function markBagsDirty()
+		app.bagsDirty = true
+		app.bagCountsDirty = true
+		app.cachedBagCountsByID = nil
+	end
+	markBagsDirty()
+
+	local vendorUseCalls = {}
+	local postCommCalls = {}
+	local confirmCommCalls = {}
+	local postItemCalls = {}
+	local confirmItemCalls = {}
+	local cancelSellCalls = 0
+	local searchCalls = {}
+	local mockCommLadder = {}
+	local mockItemLadder = {}
+	local mockNeedsConfirm = false
+	local mockIsNonCommodity = { [81005] = true, [81008] = true, [81009] = true, [81010] = true }
+	local mockSellValidByID = {}
+	local mockAvailPostCount = nil
+	local mockThrottleReady = true
+	local mockHasSearchResults = nil
+	local mockHasFullComm = nil
+	local mockCommDepositOverride = nil
+
+	_G.ItemLocation = {
+		CreateFromBagAndSlot = function(_, bag, slot) return { bagID = bag, slotIndex = slot } end,
+	}
+	_G.C_Container = {
+		GetContainerNumSlots = function(b) return (b == 0) and 8 or 0 end,
+		GetContainerItemInfo = function(b, s) return bagState[b] and bagState[b][s] or nil end,
+		UseContainerItem = function(b, s)
+			vendorUseCalls[#vendorUseCalls + 1] = { bag = b, slot = s }
+			if bagState[b] and bagState[b][s] then
+				bagState[b][s] = nil
+				markBagsDirty()
+			end
+		end,
+	}
+	_G.C_AuctionHouse = {
+		IsThrottledMessageSystemReady = function() return mockThrottleReady end,
+		IsSellItemValid = function(loc)
+			local slot = loc and bagState[loc.bagID] and bagState[loc.bagID][loc.slotIndex]
+			if slot and mockSellValidByID[slot.itemID] ~= nil then return mockSellValidByID[slot.itemID] end
+			return true
+		end,
+		GetAvailablePostCount = function(loc)
+			return mockAvailPostCount
+		end,
+		GetItemCommodityStatus = function(loc)
+			local slot = loc and bagState[loc.bagID] and bagState[loc.bagID][loc.slotIndex]
+			if slot and mockIsNonCommodity[slot.itemID] then return 1 end
+			return 2
+		end,
+		GetItemKeyFromItem = function(loc)
+			local slot = bagState[loc.bagID] and bagState[loc.bagID][loc.slotIndex]
+			local id = slot and slot.itemID or 0
+			local m = itemMetaMap[id]
+			return {
+				itemID = id,
+				itemLevel = (not mockIsNonCommodity[id]) and 0 or (m and m.itemLevel or 0),
+				itemSuffix = 0,
+				battlePetSpeciesID = 0,
+			}
+		end,
+		MakeItemKey = function(id, ilvl, suf, sp)
+			return { itemID = id, itemLevel = ilvl or 0, itemSuffix = suf or 0, battlePetSpeciesID = sp or 0 }
+		end,
+		GetItemKeyInfo = function(k)
+			return { itemID = k.itemID, isCommodity = not mockIsNonCommodity[k.itemID] }
+		end,
+		SendSellSearchQuery = function(k, sorts, splitOwned)
+			searchCalls[#searchCalls + 1] = { fn = "SendSellSearchQuery", key = k, sorts = sorts, splitOwned = splitOwned }
+		end,
+		SendSearchQuery = function(k, sorts, splitOwned)
+			searchCalls[#searchCalls + 1] = { fn = "SendSearchQuery", key = k, sorts = sorts, splitOwned = splitOwned }
+		end,
+		HasSearchResults = function()
+			if mockHasSearchResults ~= nil then return mockHasSearchResults end
+			return true
+		end,
+		HasFullCommoditySearchResults = function()
+			if mockHasFullComm ~= nil then return mockHasFullComm end
+			return true
+		end,
+		GetCommoditySearchResultsQuantity = function(id)
+			local tot = 0
+			for _, r in ipairs(mockCommLadder[id] or {}) do tot = tot + (r.quantity or 1) end
+			return tot
+		end,
+		GetNumCommoditySearchResults = function(id) return mockCommLadder[id] and #mockCommLadder[id] or 0 end,
+		GetCommoditySearchResultInfo = function(id, idx) return mockCommLadder[id] and mockCommLadder[id][idx] or nil end,
+		GetNumItemSearchResults = function(k)
+			local id = type(k) == "table" and k.itemID or k
+			return mockItemLadder[id] and #mockItemLadder[id] or 0
+		end,
+		GetItemSearchResultInfo = function(k, idx)
+			local id = type(k) == "table" and k.itemID or k
+			return mockItemLadder[id] and mockItemLadder[id][idx] or nil
+		end,
+		CalculateCommodityDeposit = function(id, dur, qty)
+			if mockCommDepositOverride ~= nil then return mockCommDepositOverride end
+			local mult = (dur == 1 and 15) or (dur == 2 and 60) or 180
+			return mult * (qty or 1)
+		end,
+		CalculateItemDeposit = function(loc, dur, qty)
+			local mult = (dur == 1 and 25) or (dur == 2 and 100) or 300
+			return mult * (qty or 1)
+		end,
+		PostCommodity = function(loc, dur, qty, unitPrice)
+			postCommCalls[#postCommCalls + 1] = { loc = loc, dur = dur, qty = qty, unitPrice = unitPrice }
+			return mockNeedsConfirm
+		end,
+		PostItem = function(loc, dur, qty, bid, buyout)
+			postItemCalls[#postItemCalls + 1] = { loc = loc, dur = dur, qty = qty, bid = bid, buyout = buyout }
+			return mockNeedsConfirm
+		end,
+		ConfirmPostCommodity = function(loc, dur, qty, unitPrice)
+			confirmCommCalls[#confirmCommCalls + 1] = { loc = loc, dur = dur, qty = qty, unitPrice = unitPrice }
+		end,
+		ConfirmPostItem = function(loc, dur, qty, bid, buyout)
+			confirmItemCalls[#confirmItemCalls + 1] = { loc = loc, dur = dur, qty = qty, bid = bid, buyout = buyout }
+		end,
+		CancelSell = function()
+			cancelSellCalls = cancelSellCalls + 1
+		end,
+	}
+	local ahShown = true
+	local mfShown = false
+	_G.AuctionHouseFrame = { IsShown = function() return ahShown end }
+	_G.MerchantFrame = { IsShown = function() return mfShown end }
+
+	-- 1. Load crafted outputs & check Forever defaults (8h duration=2, Match undercut="match") + clean serialization
+	local sellRows = {
+		{ isMainRow = true, mainGroupKey = "m1", name = "Daily Potion A", itemID = 81001, spellID = 98001, prof = "alchemy", qty = 5, sourceKind = "spread", sourceLabel = "Daily Spread" },
+		{ name = "Sub Oil", itemID = 81099, spellID = 98099, prof = "alchemy", qty = 5, makeMyself = true, indent = 1, mainGroupKey = "m1" },
+		{ isMainRow = true, mainGroupKey = "m2", name = "Daily Elixir B", itemID = 81002, spellID = 98002, prof = "alchemy", qty = 6, sourceKind = "spread", sourceLabel = "Daily Spread" },
+		{ isMainRow = true, mainGroupKey = "m3", name = "Vendor Craft C", itemID = 81003, spellID = 98003, prof = "alchemy", qty = 4, sourceKind = "craft_order", sourceLabel = "Craft Order" },
+	}
+	local cnts = of.LoadFromShoppingRows(sellRows, { title = "Auctionator Parity Sell Test" })
+	check(cnts.sell == 3, "Stage 5 Sell extracted 3 main craft outputs (excluding sub-craft), got " .. tostring(cnts.sell))
+	local sl = of.GetState().stages.sell
+	check(sl.duration == 2 and sl.undercutMode == "match",
+		"Stage 5 defaults match Auctionator Forever 16001: duration=2 (8h) and undercutMode='match'")
+	check(sl.mode == nil and sl[legLo .. "Running"] == nil, "Stage 5 state contains zero legacy mode/running fields")
+	local serClean = of.SerializeState()
+	check(serClean and serClean.stages and serClean.stages.sell
+		and serClean.stages.sell.duration == 2 and serClean.stages.sell.undercutMode == "match"
+		and serClean.stages.sell.mode == nil and serClean.stages.sell.items[1][legLo .. "Enabled"] == nil,
+		"SerializeState preserves Stage 5 parity fields with zero legacy fields")
+
+	-- Open MM Sell AH Tab & verify AH-scoped SPACE override shortcut binds cleanly (priority=false!)
+	overrideBindCalls = {}
+	clearOverrideCalls = 0
+	tab.SelectTab()
+	check(tab.IsShown(), "tab.SelectTab() displays standalone MM Sell tab")
+	check(#overrideBindCalls == 1 and overrideBindCalls[1].key == "SPACE"
+		and overrideBindCalls[1].prio == false and overrideBindCalls[1].btn == "MerchantMasterSellPostBtn",
+		"MM Sell binds non-priority SPACE override to MerchantMasterSellPostBtn while at AH")
+	check(#searchCalls >= 1 and searchCalls[#searchCalls].splitOwned == true,
+		"MM Sell search passes splitOwnedItems=true")
+
+	-- 2. Commodity UI: Unit Price label, Bid Price hidden, Duration 2h/8h/24h, Undercut cycle, Copper precision, Deposit + Total Price
+	check(tab.sellForm:IsShown() and not tab.sellBidRow:IsShown(),
+		"Commodity shows sellForm and hides Bid Price row")
+	check(stripColors(tab.sellPriceLbl:GetText()) == "Unit Price",
+		"Commodity price label is 'Unit Price', got: " .. tostring(stripColors(tab.sellPriceLbl:GetText())))
+	check(tab.sellDurBtns[1]:GetText() == "2h" and tab.sellDurBtns[2]:GetText() == "8h" and tab.sellDurBtns[3]:GetText() == "24h",
+		"Duration pills show WoW Forever 2h / 8h / 24h")
+	check(tab.sellMaxBtn and not tab.sellMaxBtn:IsEnabled(),
+		"Max button is auto-disabled when Quantity == GetPostLimit() (5 == 5)")
+
+	-- Quantity clamp & Max re-enable
+	of.SetSellItemQty(1, 2)
+	tab.Render()
+	check(of.GetSellPostQty(sl.items[1]) == 2 and tab.sellMaxBtn:IsEnabled(),
+		"Reducing qty to 2 enables Max button")
+	of.SetSellItemQty(1, 99)
+	check(of.GetSellPostQty(sl.items[1]) == 5, "Quantity > GetPostLimit() auto-clamps down to GetPostLimit (5)")
+	of.SetSellItemQty(1, 2)
+	tab.sellMaxBtn:Click("LeftButton")
+	check(of.GetSellPostQty(sl.items[1]) == 5 and not tab.sellMaxBtn:IsEnabled(),
+		"Clicking Max sets qty=5 and disables Max button")
+
+	-- Duration click immediately recalculates Deposit
+	tab.sellDurBtns[1]:Click("LeftButton")
+	local dep2h = of.ComputeSellDeposit(sl.items[1], 1, 5)
+	local depTxt2h = stripColors(tab.sellDepFs:GetText())
+	tab.sellDurBtns[3]:Click("LeftButton")
+	local dep24h = of.ComputeSellDeposit(sl.items[1], 3, 5)
+	local depTxt24h = stripColors(tab.sellDepFs:GetText())
+	check(sl.duration == 3 and dep24h > dep2h and depTxt2h ~= depTxt24h and depTxt24h:find("Deposit:", 1, true) ~= nil,
+		"Switching Duration 2h -> 24h immediately recalculates live Deposit (" .. tostring(dep2h) .. " -> " .. tostring(dep24h) .. ")")
+	tab.sellDurBtns[2]:Click("LeftButton")
+
+	-- 3. Live Current Prices ladder (commodities) + self-match + undercut modes + click-row-to-price + Shift-click exact match
+	mockCommLadder[81001] = {
+		{ unitPrice = 25000, quantity = 10, numOwnerItems = 0, containsOwnerItem = false, owners = { "RivalA" }, totalNumberOfOwners = 1, timeLeftSeconds = 7200 },
+		{ unitPrice = 25500, quantity = 5, numOwnerItems = 5, containsOwnerItem = true, owners = { "player" }, totalNumberOfOwners = 1, timeLeftSeconds = 3600 },
+		{ unitPrice = 26000, quantity = 40, numOwnerItems = 0, containsOwnerItem = false, owners = { "RivalB", "RivalC" }, totalNumberOfOwners = 4, timeLeftSeconds = 1800 },
+	}
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 81001)
+	check(tab.sellPricesBox:IsShown() and tab.sellPricesRows[1]:IsShown() and tab.sellPricesRows[2]:IsShown() and tab.sellPricesRows[3]:IsShown(),
+		"Current Prices panel renders 3 live commodity rows")
+	check(stripColors(tab.sellPricesCol1:GetText()) == "Unit Price" and stripColors(tab.sellPricesCol3:GetText()) == "Avail"
+		and stripColors(tab.sellPricesCol4:GetText()) == "You?",
+		"Current Prices commodity headers show Unit Price | Avail | You?")
+	check(stripColors(tab.sellPricesRows[2].c4:GetText()) == "Yes" and stripColors(tab.sellPricesRows[1].c4:GetText()) == "-",
+		"Current Prices marks own listing with 'Yes' and competitor with '-'")
+	check(of.ComputeSellUnitPrice(sl.items[1]) == 25000,
+		"Default Match (0% LIFO) matches competitor price 25000c")
+
+	-- Cycle undercut: match -> 1c -> 1s -> pct -> match
+	tab.sellUcBtn:Click("LeftButton")
+	check(sl.undercutMode == "1c" and of.ComputeSellUnitPrice(sl.items[1]) == 24999,
+		"Undercut -1c computes 24999c (exact 1c copper precision on Forever 16001)")
+	tab.sellUcBtn:Click("LeftButton")
+	check(sl.undercutMode == "1s" and of.ComputeSellUnitPrice(sl.items[1]) == 24900,
+		"Undercut -1s computes 24900c")
+	tab.sellUcBtn:Click("LeftButton")
+	check(sl.undercutMode == "pct" and of.ComputeSellUnitPrice(sl.items[1]) == 24750,
+		"Undercut -1% computes 24750c")
+	of.SetSellUndercutMode("1c")
+
+	-- Click competitor row 3 (26000c) -> sets customPrice = 25999c (undercut -1c); Shift-click row 3 -> exact 26000c; Click own row 2 -> exact 25500c!
+	tab.sellPricesRows[3]:Click("LeftButton")
+	check(sl.items[1].customPrice == 25999, "Left-clicking competitor Current Prices row sets undercut price (25999c)")
+	mockShift = true
+	tab.sellPricesRows[3]:Click("LeftButton")
+	mockShift = false
+	check(sl.items[1].customPrice == 26000, "Shift-clicking competitor Current Prices row sets exact price (26000c)")
+	tab.sellPricesRows[2]:Click("LeftButton")
+	check(sl.items[1].customPrice == 25500, "Left-clicking own Current Prices row matches exact price (25500c) without undercutting self")
+
+	-- Copper precision G/S/C input + zero mid-keystroke corruption + live Total Price update
+	sl.items[1].customPrice = 25500
+	tab.Render()
+	tab.sellPriceGBox:SetText("1")
+	tab.sellPriceSBox:SetText("23")
+	tab.sellPriceCBox:SetText("45")
+	local onTxtPrice = tab.sellPriceGBox:GetScript("OnTextChanged")
+	if onTxtPrice then onTxtPrice(tab.sellPriceGBox, true) end
+	check(sl.items[1].customPrice == 25500,
+		"Typing in sellPriceGBox does NOT corrupt model mid-keystroke (stays 25500)")
+	check(stripColors(tab.sellTotalFs:GetText()):find("6g 17s 25c", 1, true) ~= nil,
+		"Typing updates Total Price live (5 * 1g23s45c = 6g 17s 25c), got: " .. tostring(stripColors(tab.sellTotalFs:GetText())))
+	local onLost = tab.sellPriceCBox:GetScript("OnEditFocusLost")
+	if onLost then onLost(tab.sellPriceCBox) end
+	check(sl.items[1].customPrice == 12345,
+		"OnEditFocusLost commits exact copper precision 1g 23s 45c -> 12345c (no 1s rounding)")
+
+	-- Self-match when player is lowest commodity seller (containsOwnerItem + owners[1]=="player")
+	sl.items[1].customPrice = nil
+	mockCommLadder[81001] = {
+		{ unitPrice = 28000, quantity = 5, numOwnerItems = 5, containsOwnerItem = true, owners = { "player" }, totalNumberOfOwners = 1 },
+		{ unitPrice = 29000, quantity = 20, numOwnerItems = 0, containsOwnerItem = false, owners = { "RivalX" }, totalNumberOfOwners = 1 },
+	}
+	of.ScanSellItemMarket(1, "select")
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 81001)
+	check(sl.items[1].liveUnit == 28000 and sl.items[1].liveIsOwn == true and of.ComputeSellUnitPrice(sl.items[1]) == 28000,
+		"Self-match when lowest row is player: matches 28000c without undercutting self even under -1c rule")
+
+	-- Empty-result retry guard (SearchScan.lua:45,59)
+	searchCalls = {}
+	mockHasSearchResults = false
+	of.ScanSellItemMarket(1, "select")
+	local beforeRetry = #searchCalls
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 81001)
+	check(#searchCalls == beforeRetry + 1 and sl.pendingSearch ~= nil,
+		"Empty-result retry guard retries once when HasSearchResults()==false")
+	mockHasSearchResults = true
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 81001)
+	check(sl.pendingSearch == nil, "Retry search completes cleanly once HasSearchResults()==true")
+	mockHasSearchResults = nil
+
+	-- 4. Low-Price Commodity Threshold & Below-Vendor Warning Confirmation Gate
+	mockCommLadder[81001] = {
+		{ unitPrice = 50000, quantity = 500, numOwnerItems = 0, containsOwnerItem = false, owners = { "MarketA" }, totalNumberOfOwners = 1 },
+	}
+	of.ScanSellItemMarket(1, "select")
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 81001)
+	check(sl.items[1].priceThreshold and math.abs(sl.items[1].priceThreshold - 19000) < 1,
+		"Commodity PriceWarningThreshold computed accurately (19000c for 5g market), got: " .. tostring(sl.items[1].priceThreshold))
+	of.SetSellItemPrice(1, 15000, 0) -- 1g 50s <= 1g 90s threshold!
+	local okLow, errLow, whyLow = of.PostSellItem(1)
+	check(okLow == false and errLow == "confirm_low_price" and whyLow == "low_price",
+		"Posting <= PriceWarningThreshold triggers low_price confirmation gate")
+	check(tab.postBtn:GetText() == "Confirm Low Price" and tab.postAllBtn:GetText() == "Cancel",
+		"UI switches to 'Confirm Low Price' + 'Cancel' when warningConfirm is pending")
+	tab.postAllBtn:Click("LeftButton")
+	check(sl.warningConfirm == nil and tab.postBtn:GetText() == "Post",
+		"Clicking Cancel clears warningConfirm cleanly")
+
+	-- Below-vendor guard: vendorSell=200c; posting at 205c -> after 5% cut floor(205*5*0.95)=973 < 200*5=1000 -> below_vendor!
+	of.SetSellItemPrice(1, 205, 0)
+	local okBV, errBV, whyBV = of.PostSellItem(1)
+	check(okBV == false and errBV == "confirm_low_price" and whyBV == "below_vendor",
+		"Posting below vendor value after 5% AH cut triggers below_vendor confirmation gate")
+	of.CancelPendingSellPost("clear")
+
+	-- 5. PostCommodity + needsConfirmation -> ConfirmPostCommodity + ComposeAuctionPostedMessage + auto-advance
+	of.SetSellItemPrice(1, 49999, 0)
+	mockNeedsConfirm = true
+	postCommCalls = {}
+	confirmCommCalls = {}
+	local okP1, stP1 = of.PostSellItem(1)
+	check(okP1 == true and stP1 == "awaiting_confirm" and #postCommCalls == 1 and postCommCalls[1].qty == 5 and postCommCalls[1].unitPrice == 49999 and postCommCalls[1].dur == 2,
+		"PostCommodity passes exact (loc, dur=2, qty=5, unitPrice=49999) and enters awaiting_confirm")
+	check(tab.postBtn:GetText() == "Confirm Post" and tab.postAllBtn:GetText() == "Cancel",
+		"UI switches to 'Confirm Post' + 'Cancel' when needsConfirmation==true")
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55499)
+	check(sl.pendingPost ~= nil and sl.pendingPost.state == "awaiting_confirm",
+		"AUCTION_HOUSE_AUCTION_CREATED ignored while awaiting_confirm")
+	local okC1, stC1 = of.ConfirmPendingSellPost()
+	check(okC1 == true and stC1 == "confirming" and #confirmCommCalls == 1 and confirmCommCalls[1].unitPrice == 49999,
+		"ConfirmPostCommodity called with exact params")
+	bagState[0][1] = nil
+	markBagsDirty()
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55501)
+	check(sl.items[1].status == "done" and sl.items[1].remaining == 0 and sl.activeIndex == 2,
+		"AUCTION_HOUSE_AUCTION_CREATED marks item 1 done and auto-advances to item 2")
+	check((of.GetState().notice or ""):find("Daily Potion Ax5", 1, true) ~= nil
+		and (of.GetState().notice or ""):find("each)", 1, true) ~= nil,
+		"Posted summary matches ComposeAuctionPostedMessage format for qty>1, got: " .. tostring(of.GetState().notice))
+	mockNeedsConfirm = false
+
+	-- 6. Non-Commodity UI & all 4 Bid/Buyout combinations + Equipment (iLvl) + BattlePet (petLvl) + OnEnterPressed posts!
+	bagState[0][4] = { itemID = 81005, stackCount = 1, isLocked = false, isBound = false,
+		hyperlink = "|cff0070dd|Hitem:81005::::::::60:::::::|h[Tempered Blade]|h|r" }
+	bagState[0][5] = { itemID = 81005, stackCount = 1, isLocked = false, isBound = false,
+		hyperlink = "|cff0070dd|Hitem:81005::::::::60:::::::|h[Tempered Blade]|h|r" }
+	bagState[0][6] = { itemID = 81010, stackCount = 1, isLocked = false, isBound = false,
+		hyperlink = "|cff0070dd|Hbattlepet:200:25:3:100:100:100:0|h[Caged Whelp]|h|r" }
+	markBagsDirty()
+
+	-- Add weapon from bag (no explicit qty) -> defaults to postQty = 1 (even though 2 in bags!)
+	of.AddBagItemToSell(81005, nil, { name = "Tempered Blade", itemLink = bagState[0][4].hyperlink, classID = 2, itemLevel = 58, quality = 3, useDefaultQty = true })
+	local bladeIdx = #sl.items
+	tab.Render()
+	check(of.GetSellPostQty(sl.items[bladeIdx]) == 1 and of.GetSellPostLimit(sl.items[bladeIdx]) == 2,
+		"Weapon bag item defaults Quantity to 1 (while GetPostLimit == 2)")
+	check(stripColors(tab.activeFs:GetText()) == "Tempered Blade (58)",
+		"Equipment header appends (itemLevel), got: " .. tostring(stripColors(tab.activeFs:GetText())))
+	check(stripColors(tab.sellPriceLbl:GetText()) == "Buyout Price" and tab.sellBidRow:IsShown(),
+		"Non-commodity shows 'Buyout Price' and displays Bid Price row")
+
+	-- Non-commodity Current Prices ladder filters by itemLevel (58 matches, 40 ignored!) and shows Buyout/Bid/iLvl/You?
+	mockItemLadder[81005] = {
+		{ itemKey = { itemID = 81005, itemLevel = 40, itemSuffix = 0 }, buyoutAmount = 10000, bidAmount = 8000, quantity = 1, containsOwnerItem = false },
+		{ itemKey = { itemID = 81005, itemLevel = 58, itemSuffix = 0 }, buyoutAmount = 90000, bidAmount = 75000, quantity = 1, containsOwnerItem = false, owners = { "SmithX" } },
+		{ itemKey = { itemID = 81005, itemLevel = 58, itemSuffix = 0 }, buyoutAmount = 95000, bidAmount = 80000, quantity = 1, containsOwnerItem = true, owners = { "player" } },
+	}
+	of.ScanSellItemMarket(bladeIdx, "select")
+	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 81005, itemLevel = 0, itemSuffix = 0 })
+	check(#(sl.items[bladeIdx].currentListings or {}) == 2 and sl.items[bladeIdx].liveUnit == 90000,
+		"Equipment search filters out mismatched iLvl 40 and keeps iLvl 58 rows (liveUnit=90000)")
+	check(stripColors(tab.sellPricesCol1:GetText()) == "Buyout" and stripColors(tab.sellPricesCol2:GetText()) == "Bid"
+		and stripColors(tab.sellPricesCol3:GetText()) == "iLvl",
+		"Equipment Current Prices columns show Buyout | Bid | iLvl | You?")
+	-- Click row 1 (90000 BO, 75000 Bid) under -1c -> sets BO=89999 and carries Bid=75000 (< 89999)
+	tab.sellPricesRows[1]:Click("LeftButton")
+	check(sl.items[bladeIdx].customPrice == 89999 and sl.items[bladeIdx].bidPrice == 75000,
+		"Clicking non-commodity row sets undercut Buyout (89999c) and carries Bid (75000c)")
+
+	-- Mode (a): Bid >= Buyout > 0 -> Post MUST be DISABLED!
+	of.SetSellItemPrice(bladeIdx, 80000, 80000)
+	tab.Render()
+	local okGe, errGe = of.GetSellPostButtonState(bladeIdx)
+	check(okGe == false and errGe == "bid_ge_buyout" and not tab.postBtn:IsEnabled(),
+		"Post button is DISABLED when Bid >= Buyout > 0")
+	of.SetSellItemPrice(bladeIdx, 80000, 85000)
+	check(of.GetSellPostButtonState(bladeIdx) == false, "Post button stays DISABLED when Bid > Buyout > 0")
+
+	-- Mode (b): Buyout-only (Buyout=90000, Bid=0) -> PostItem(loc, dur, 1, nil, 90000)
+	postItemCalls = {}
+	of.SetSellItemPrice(bladeIdx, 90000, 0)
+	local okBO = of.PostSellItem(bladeIdx)
+	check(okBO == true and #postItemCalls == 1 and postItemCalls[1].bid == nil and postItemCalls[1].buyout == 90000,
+		"Non-commodity Buyout-only calls PostItem(loc, dur, 1, nil, 90000)")
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55601)
+	check((of.GetState().notice or ""):find("buyout at", 1, true) ~= nil and not (of.GetState().notice or ""):find("bidding at", 1, true),
+		"Single-item buyout-only message formats 'buyout at <price>'")
+
+	-- Mode (c): Bid + Buyout (Buyout=90000, Bid=70000) -> PostItem(loc, dur, 1, 70000, 90000)
+	bagState[0][4] = { itemID = 81005, stackCount = 1, isLocked = false, isBound = false,
+		hyperlink = "|cff0070dd|Hitem:81005::::::::60:::::::|h[Tempered Blade]|h|r" }
+	markBagsDirty()
+	of.SelectSellItem(bladeIdx)
+	check(sl.items[bladeIdx].bidPrice == 0, "Selecting item clears bidPrice to 0")
+	of.SetSellItemPrice(bladeIdx, 90000, 70000)
+	local okBB = of.PostSellItem(bladeIdx)
+	check(okBB == true and #postItemCalls == 2 and postItemCalls[2].bid == 70000 and postItemCalls[2].buyout == 90000,
+		"Non-commodity Bid+Buyout calls PostItem(loc, dur, 1, 70000, 90000)")
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55602)
+	check((of.GetState().notice or ""):find("bidding at", 1, true) ~= nil and (of.GetState().notice or ""):find("buyout at", 1, true) ~= nil,
+		"Single-item bid+buyout message includes both 'bidding at' and 'buyout at'")
+
+	-- Mode (d): Bid-only (Buyout=0, Bid=60000) via OnEnterPressed -> PostItem(loc, dur, 1, 60000, nil)
+	bagState[0][4] = { itemID = 81005, stackCount = 1, isLocked = false, isBound = false,
+		hyperlink = "|cff0070dd|Hitem:81005::::::::60:::::::|h[Tempered Blade]|h|r" }
+	markBagsDirty()
+	of.SelectSellItem(bladeIdx)
+	of.SetSellItemQty(bladeIdx, 1)
+	of.SetSellItemPrice(bladeIdx, 0, 0)
+	tab.Render()
+	tab.sellBidGBox:SetText("6")
+	tab.sellBidSBox:SetText("0")
+	tab.sellBidCBox:SetText("0")
+	tab.sellBidGBox:GetScript("OnEnterPressed")(tab.sellBidGBox)
+	check(#postItemCalls == 3 and postItemCalls[3].bid == 60000 and postItemCalls[3].buyout == nil,
+		"Bid-only (Buyout=0, Bid=60000) via OnEnterPressed commits and invokes PostItem(loc, dur, 1, 60000, nil)")
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55603)
+
+	-- Battlepet header formatting (petLevel) & default qty = 1
+	of.AddBagItemToSell(81010, nil, { name = "Caged Whelp", itemLink = bagState[0][6].hyperlink, classID = 17, quality = 3, useDefaultQty = true })
+	local petIdx = #sl.items
+	tab.Render()
+	check(stripColors(tab.activeFs:GetText()) == "Caged Whelp (25)" and of.GetSellPostQty(sl.items[petIdx]) == 1,
+		"Battlepet appends (petLevel) and defaults qty=1, got: " .. tostring(stripColors(tab.activeFs:GetText())))
+	of.RemoveSellItem(petIdx)
+	of.RemoveSellItem(bladeIdx)
+
+	-- 7. Skip (advances & disabled when no other pending) + Refresh (including lastItemInfo) + Bags grid + Sell Queue tab + Vendor channel
+	of.SelectSellItem(2)
+	check(tab.skipBtn:IsEnabled() == true, "Skip button enabled while item 3 is also pending")
+	tab.skipBtn:Click("LeftButton")
+	check(sl.activeIndex == 3, "Clicking Skip advances to next pending item (3)")
+	-- Vendor channel immediately clears SPACE override binding and hides AH form/Current Prices!
+	clearOverrideCalls = 0
+	of.ToggleSellItemChannel(3)
+	check(sl.items[3].channel == "vendor", "ToggleSellItemChannel switches item 3 to Vendor")
+	mfShown = true
+	of.OnMerchantShow()
+	tab.Render()
+	tab.SyncSpaceBinding()
+	check(clearOverrideCalls >= 1 and not tab.sellForm:IsShown() and tab.sellVendorBar:IsShown(),
+		"Vendor channel clears SPACE override, hides AH form, and shows Vendor controls")
+	local soldVend = of.SellAllToVendor()
+	check(soldVend == 1 and #vendorUseCalls == 1 and sl.items[3].status == "done",
+		"SellAllToVendor sells vendor-flagged item 3 and marks it done")
+	mfShown = false
+	of.OnMerchantClosed()
+
+	-- Only item 2 remains pending -> Skip MUST be disabled!
+	of.SelectSellItem(2)
+	tab.Render()
+	check(not tab.skipBtn:IsEnabled(), "Skip button is disabled when no other pending item exists")
+
+	-- Left-side Bags grid & Sell Queue mini-tab per-row X remove
+	bagState[0][7] = { itemID = 81004, stackCount = 9, isLocked = false, isBound = false }
+	markBagsDirty()
+	tab.Render()
+	check(tab.sellBagPane:IsShown(), "MM Sell left-side categorized Bags pane is shown")
+	local tileNew = nil
+	for _, tile in ipairs(tab.sellBagTiles or {}) do
+		if tile:IsShown() and tile._bagRec and tile._bagRec.itemID == 81004 then tileNew = tile; break end
+	end
+	check(tileNew ~= nil, "Bag grid displays sellable unqueued item 81004")
+	tileNew:Click("LeftButton")
+	check(#sl.items == 4 and sl.items[4].itemID == 81004 and of.GetSellPostQty(sl.items[4]) == 9,
+		"Clicking commodity bag tile adds item 81004 with default qty = GetPostLimit() (9)")
+	tab.SetSubTab("queue")
+	check(tab.sellQueueView:IsShown(), "Sell Queue sub-tab displays queue view")
+	local row4 = nil
+	for _, r in ipairs(tab.sellQueueRows or {}) do
+		if r:IsShown() and r._itemIndex == 4 then row4 = r; break end
+	end
+	check(row4 ~= nil and row4.removeBtn and row4.removeBtn:IsShown(),
+		"Sell Queue row displays per-row X remove button")
+	row4.removeBtn:Click("LeftButton")
+	check(#sl.items == 3, "Clicking per-row X removes item from Sell queue")
+	tab.SetSubTab("prices")
+
+	-- 8. GetMoney() < deposit block + Throttle events (all 6) & 8s wedge + UI_ERROR_MESSAGE + Multisell + Refresh lastItemInfo + Combat safety
+	of.SelectSellItem(2)
+	of.SetSellItemPrice(2, 20000, 0)
+	mockMoney = 5
+	tab.Render()
+	local okLowGold, errLowGold = of.PostSellItem(2)
+	check(okLowGold == false and errLowGold == "insufficient_money" and not tab.postBtn:IsEnabled(),
+		"GetMoney() < deposit blocks PostSellItem and disables Post button")
+	mockMoney = 5000000
+
+	-- Throttle gating across events + 8s safety valve
+	mockThrottleReady = false
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_THROTTLED_MESSAGE_QUEUED")
+	check(of.GetSellPrimaryAction().enabled == false, "Throttled AH disables Post button")
+	mockNow = mockNow + 9
+	check(of.GetSellPrimaryAction().enabled == true, "Throttle wedge safety valve releases after 8s")
+	mockThrottleReady = true
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_THROTTLED_SYSTEM_READY")
+
+	-- ConfirmPostItem watchdog + UI_ERROR_MESSAGE recovery + AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED
+	scheduledTimers = {}
+	mockNeedsConfirm = true
+	of.PostSellItem(2, { qty = 1, duration = 1, unitPrice = 20000 })
+	of.ConfirmPendingSellPost()
+	advanceTimers(16)
+	check(sl.pendingPost == nil, "ConfirmPendingSellPost watchdog clears wedged post after 15s")
+	mockNeedsConfirm = false
+	of.PostSellItem(2, { qty = 1, duration = 1, unitPrice = 20000 })
+	ns.MarketScan.HandleEvent("UI_ERROR_MESSAGE", 1, "Out of range.")
+	check(sl.pendingPost ~= nil, "Unrelated UI_ERROR_MESSAGE ignored during post")
+	ns.MarketScan.HandleEvent("UI_ERROR_MESSAGE", 1, "Not enough money")
+	check(sl.pendingPost == nil, "AH UI_ERROR_MESSAGE cleanly clears pendingPost")
+	of.PostSellItem(2, { qty = 1, duration = 1, unitPrice = 20000 })
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED")
+	check(sl.pendingPost == nil, "AUCTION_HOUSE_THROTTLED_MESSAGE_DROPPED cleanly clears pendingPost")
+
+	-- Multisell START / UPDATE / FAILURE (partial credit) + CancelSell on cancel during multisell
+	bagState[0][5] = { itemID = 81009, stackCount = 3, isLocked = false, isBound = false }
+	markBagsDirty()
+	of.AddBagItemToSell(81009, 3)
+	local msIdx = #sl.items
+	of.SetSellItemQty(msIdx, 3)
+	of.SetSellItemPrice(msIdx, 15000, 0)
+	local okMs = of.PostSellItem(msIdx)
+	check(okMs == true and sl.pendingPost ~= nil, "Started qty=3 non-commodity multisell")
+	ns.MarketScan.HandleEvent("AUCTION_MULTISELL_START", 3)
+	check(sl.pendingPost.multisellActive == true and (of.GetState().notice or ""):find("0/3", 1, true) ~= nil,
+		"AUCTION_MULTISELL_START activates multisell progress tracking")
+	ns.MarketScan.HandleEvent("AUCTION_MULTISELL_UPDATE", 2, 3)
+	bagState[0][5].stackCount = 1
+	markBagsDirty()
+	ns.MarketScan.HandleEvent("AUCTION_MULTISELL_FAILURE")
+	check(sl.pendingPost == nil and sl.items[msIdx].soldQty == 2 and sl.items[msIdx].remaining == 1,
+		"AUCTION_MULTISELL_FAILURE credits partial 2/3 posted and cleans up")
+
+	-- Cancel during active multisell calls C_AuctionHouse.CancelSell()
+	bagState[0][5].stackCount = 2
+	markBagsDirty()
+	of.SetSellItemQty(msIdx, 2)
+	of.SetSellItemPrice(msIdx, 15000, 0)
+	of.PostSellItem(msIdx)
+	ns.MarketScan.HandleEvent("AUCTION_MULTISELL_START", 2)
+	cancelSellCalls = 0
+	of.CancelPendingSellPost("user_cancel")
+	check(cancelSellCalls == 1 and sl.pendingPost == nil,
+		"Cancelling active multisell calls C_AuctionHouse.CancelSell()")
+	of.RemoveSellItem(msIdx)
+
+	-- Refresh scans lastItemInfo when queue becomes empty!
+	of.RemoveSellItem(3); of.RemoveSellItem(2); of.RemoveSellItem(1)
+	check(#sl.items == 0 and sl.lastItemInfo ~= nil, "Queue empty retains sl.lastItemInfo for Refresh")
+	searchCalls = {}
+	local okRefLast = of.RefreshSellSearch()
+	check(okRefLast == true and #searchCalls == 1 and searchCalls[1].key.itemID == sl.lastItemInfo.itemID,
+		"RefreshSellSearch re-scans sl.lastItemInfo when Sell queue is empty")
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", sl.lastItemInfo.itemID)
+
+	-- 9. Strict Review Regression Tests (Fixes 1-8)
+	local focusBoxes = {
+		tab.sellQtyBox, tab.sellPriceGBox, tab.sellPriceSBox, tab.sellPriceCBox,
+		tab.sellBidGBox, tab.sellBidSBox, tab.sellBidCBox,
+	}
+	local curFocusedBox = nil
+	for _, bx in ipairs(focusBoxes) do
+		if bx then
+			bx._origHasFocus = bx.HasFocus
+			bx._origClearFocus = bx.ClearFocus
+			bx._origSetFocus = bx.SetFocus
+			bx.HasFocus = function(self) return curFocusedBox == self end
+			bx.ClearFocus = function(self)
+				if curFocusedBox == self then
+					curFocusedBox = nil
+					local lost = self.GetScript and self:GetScript("OnEditFocusLost")
+					if lost then lost(self) end
+				end
+			end
+			bx.SetFocus = function(self)
+				if curFocusedBox and curFocusedBox ~= self then
+					curFocusedBox:ClearFocus()
+				end
+				curFocusedBox = self
+			end
+		end
+	end
+
+	-- Ensure fresh commodity item 81004 in bags (10x)
+	bagState[0][7] = { itemID = 81004, stackCount = 10, isLocked = false, isBound = false }
+	markBagsDirty()
+	of.AddBagItemToSell(81004, 10, { name = "Bag Herb D", useDefaultQty = true })
+	local rIdx = #sl.items
+	mockCommLadder[81004] = {
+		{ itemID = 81004, unitPrice = 25000, quantity = 15, owners = { "RivalHerb" }, containsOwnerItem = false },
+		{ itemID = 81004, unitPrice = 28000, quantity = 8, owners = { "SellerTwo" }, containsOwnerItem = false },
+	}
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 81004)
+	of.SetSellUndercutMode("match")
+	tab.Render()
+
+	-- Fix #3: Tabbing/blurring through Qty -> G -> S -> C without editing must NOT lock customPrice
+	check(sl.items[rIdx].customPrice == nil, "Fix #3 precondition: customPrice starts nil (follows live AH)")
+	tab.sellQtyBox:SetFocus()
+	tab.sellQtyBox:GetScript("OnTabPressed")(tab.sellQtyBox)
+	tab.sellPriceGBox:GetScript("OnTabPressed")(tab.sellPriceGBox)
+	tab.sellPriceSBox:GetScript("OnTabPressed")(tab.sellPriceSBox)
+	tab.sellPriceCBox:GetScript("OnEditFocusLost")(tab.sellPriceCBox)
+	check(sl.items[rIdx].customPrice == nil,
+		"Fix #3: Tabbing/blurring through Price boxes without editing does NOT lock customPrice")
+	of.SetSellUndercutMode("1c")
+	check((of.ComputeSellUnitPrice(sl.items[rIdx])) == 24999,
+		"Fix #3: Undercut Rule still recalculates live price cleanly after tabbing through inputs")
+	of.SetSellUndercutMode("match")
+
+	-- Fix #4: Setting Quantity = 0 must NOT bounce back to GetPostLimit(); Max stays enabled, Post stays disabled
+	of.SetSellItemQty(rIdx, 0)
+	tab.Render()
+	local qZero, limZero = of.GetSellPostQty(sl.items[rIdx])
+	check(qZero == 0 and limZero == 10 and tab.sellQtyBox:GetText() == "0"
+		and tab.sellMaxBtn:IsEnabled() == true and tab.postBtn:IsEnabled() == false,
+		"Fix #4: User-entered Quantity=0 stays 0 across Render(), keeps Max enabled and Post disabled")
+	tab.sellMaxBtn:Click("LeftButton")
+	check(of.GetSellPostQty(sl.items[rIdx]) == 10, "Fix #4: Clicking Max restores full GetPostLimit (10) from 0")
+
+	-- Fix #2: Clicking Current Prices row / Max / - / + / Rule while an EditBox has focus clears focus & leaves zero stale hybrid price
+	tab.sellPriceGBox:SetFocus()
+	tab.sellPriceGBox:SetText("99")
+	tab.sellPricesRows[2]:Click("LeftButton")
+	check((not tab.sellPriceGBox:HasFocus()) and tab.sellPriceGBox:GetText() == "2" and tab.sellPriceSBox:GetText() == "80" and tab.sellPriceCBox:GetText() == "0",
+		"Fix #2: Clicking Current Prices row while Gold box focused clears focus and updates ALL G/S/C boxes (no hybrid 99g80s)")
+	tab.sellQtyBox:SetFocus()
+	tab.sellQtyBox:SetText("99")
+	tab.sellQtyMinus:Click("LeftButton")
+	check((not tab.sellQtyBox:HasFocus()) and tab.sellQtyBox:GetText() == "9",
+		"Fix #2: Clicking Qty - while Qty box focused clears focus and updates box text cleanly")
+	tab.sellPriceGBox:SetFocus()
+	tab.sellPriceGBox:SetText("77")
+	tab.sellUcBtn:Click("LeftButton")
+	check((not tab.sellPriceGBox:HasFocus()) and tab.sellPriceGBox:GetText() == "2",
+		"Fix #2: Clicking Rule button while Price box focused clears focus and updates price boxes cleanly")
+	of.SetSellUndercutMode("match")
+
+	-- Fix #1: Typing new Price & Qty in focused EditBoxes and clicking Post commits BOTH before PostCommodity
+	postCommCalls = {}
+	tab.sellQtyBox:SetFocus()
+	tab.sellQtyBox:SetText("4")
+	tab.sellQtyBox:GetScript("OnTextChanged")(tab.sellQtyBox, true)
+	tab.sellPriceGBox:SetFocus()
+	tab.sellPriceGBox:SetText("3")
+	tab.sellPriceSBox:SetText("15")
+	tab.sellPriceCBox:SetText("7")
+	tab.sellPriceGBox:GetScript("OnTextChanged")(tab.sellPriceGBox, true)
+	tab.postBtn:Click("LeftButton")
+	check(#postCommCalls == 1 and postCommCalls[1].qty == 4 and postCommCalls[1].unitPrice == 31507
+		and (not tab.sellPriceGBox:HasFocus()) and (not tab.sellQtyBox:HasFocus()),
+		"Fix #1: Clicking Post while EditBoxes focused commits qty=4 & price=31507 and clears focus BEFORE PostCommodity")
+	bagState[0][7].stackCount = 6
+	markBagsDirty()
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55701)
+
+	-- Fix #5: Completing the LAST item in queue refreshes Current Prices directly into the displayed ladder (You? = Yes)
+	postCommCalls = {}
+	of.SetSellItemQty(rIdx, 6)
+	tab.Render()
+	tab.sellPriceGBox:SetFocus()
+	tab.sellPriceGBox:SetText("2")
+	tab.sellPriceSBox:SetText("45")
+	tab.sellPriceCBox:SetText("0")
+	tab.sellPriceGBox:GetScript("OnTextChanged")(tab.sellPriceGBox, true)
+	tab.postAllBtn:Click("LeftButton")
+	check(#postCommCalls == 1 and postCommCalls[1].qty == 6 and postCommCalls[1].unitPrice == 24500,
+		"Fix #1: Clicking Post All while Price box focused commits 24500 BEFORE PostCommodity")
+	bagState[0][7] = nil
+	markBagsDirty()
+	searchCalls = {}
+	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55702)
+	check(sl.items[rIdx].status == "done" and #searchCalls >= 1,
+		"Fix #5: Completing last item triggers post_complete_refresh search")
+	mockCommLadder[81004] = {
+		{ itemID = 81004, unitPrice = 24500, quantity = 6, owners = { "player" }, containsOwnerItem = true },
+		{ itemID = 81004, unitPrice = 25000, quantity = 15, owners = { "RivalHerb" }, containsOwnerItem = false },
+	}
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 81004)
+	tab.Render()
+	check(tab.sellPricesRows[1] and tab.sellPricesRows[1]:IsShown()
+		and tab.sellPricesRows[1]._listing and tab.sellPricesRows[1]._listing.containsOwnerItem == true
+		and stripColors(tab.sellPricesRows[1].c4:GetText()) == "Yes",
+		"Fix #5: Post-completion Current Prices immediately displays player's new listing (You? = Yes)")
+
+	-- Fix #8: Post All disabled when 0 pending AH items remain + geometry widths & non-clipped spotSubFs/activeFs
+	check(tab.postAllBtn:GetText() == "Post All" and tab.postAllBtn:IsEnabled() == false,
+		"Fix #8: Post All is DISABLED when 0 pending AH items remain")
+	check(tab.sellChBtn:GetWidth() >= 78 and tab.sellRefreshBtn:GetWidth() >= 56
+		and tab.sellQtyMinus:GetWidth() >= 22 and tab.sellQtyPlus:GetWidth() >= 22,
+		"Fix #8: Sell header and +/- buttons have non-truncating widths (ch>=78, refresh>=56, +/- >=22)")
+	local subH = tab.spotSubFs and tab.spotSubFs.GetHeight and tab.spotSubFs:GetHeight() or 0
+	local actH = tab.activeFs and tab.activeFs.GetHeight and tab.activeFs:GetHeight() or 0
+	check(subH >= 12 and actH >= 16,
+		"Fix #8: MM Sell spotSubFs (h=" .. tostring(subH) .. ") and activeFs (h=" .. tostring(actH) .. ") have non-clipping heights")
+
+	-- Fix #6: Non-commodity click buyout-only row preserves existing Bid when existingBid < newBuyout, clears when >= newBuyout
+	bagState[0][4] = { itemID = 81005, stackCount = 1, isLocked = false, isBound = false,
+		hyperlink = "|cff0070dd|Hitem:81005::::::::60:::::::|h[Tempered Blade]|h|r" }
+	markBagsDirty()
+	of.AddBagItemToSell(81005, 1, { name = "Tempered Blade", itemLink = bagState[0][4].hyperlink, classID = 2, itemLevel = 58, quality = 3 })
+	local b6Idx = #sl.items
+	of.SetSellItemPrice(b6Idx, 120000, 50000)
+	of.SelectSellListingPrice({ price = 90000, bidPrice = nil, containsOwnerItem = false }, true)
+	check(sl.items[b6Idx].customPrice == 90000 and sl.items[b6Idx].bidPrice == 50000,
+		"Fix #6: Clicking buyout-only row (90000) preserves existing Bid (50000 < 90000)")
+	of.SelectSellListingPrice({ price = 40000, bidPrice = nil, containsOwnerItem = false }, true)
+	check(sl.items[b6Idx].customPrice == 40000 and sl.items[b6Idx].bidPrice == 0,
+		"Fix #6: Clicking lower buyout-only row (40000) clears existing Bid (50000 >= 40000)")
+	of.RemoveSellItem(b6Idx)
+
+	-- Fix #7: Battlepet battlePetSpeciesID mismatch rejected + unbagged 0c commodity deposit returns 0, true
+	bagState[0][6] = { itemID = 82800, stackCount = 1, isLocked = false, isBound = false,
+		hyperlink = "|cff0070dd|Hbattlepet:239:25:3:1400:260:260:0000000000000000|h[Caged Whelp]|h|r" }
+	mockIsNonCommodity[82800] = true
+	itemMetaMap[82800] = { name = "Pet Cage", quality = 3, itemLevel = 1, maxStack = 1, sellPrice = 0, classID = 17, isReagent = false }
+	markBagsDirty()
+	of.AddBagItemToSell(82800, 1, { name = "Caged Whelp", itemLink = bagState[0][6].hyperlink, classID = 17, quality = 3 })
+	local bpIdx = #sl.items
+	mockItemLadder[82800] = {
+		{ itemKey = { itemID = 82800, itemLevel = 25, itemSuffix = 0, battlePetSpeciesID = 999 }, buyoutAmount = 11111, quantity = 1, owners = { "WrongPet" }, containsOwnerItem = false },
+	}
+	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 82800, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 999 })
+	check(sl.pendingSearch ~= nil and (not sl.items[bpIdx].listingsScanned),
+		"Fix #7: ITEM_SEARCH_RESULTS_UPDATED with mismatched battlePetSpeciesID (999 vs 239) is rejected")
+	mockItemLadder[82800] = {
+		{ itemKey = { itemID = 82800, itemLevel = 25, itemSuffix = 0, battlePetSpeciesID = 239 }, buyoutAmount = 77700, quantity = 1, owners = { "RightPet" }, containsOwnerItem = false },
+	}
+	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 82800, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 239 })
+	check(sl.items[bpIdx].listingsScanned == true and sl.items[bpIdx].liveUnit == 77700,
+		"Fix #7: Matching battlePetSpeciesID (239) is accepted and populates liveUnit=77700")
+	of.RemoveSellItem(bpIdx)
+	mockCommDepositOverride = 0
+	local depZero, depLive = of.ComputeSellDeposit({ itemID = 81004, isCommodity = true, vendorSell = 500 }, 2, 5)
+	mockCommDepositOverride = nil
+	check(depZero == 0 and depLive == true,
+		"Fix #7: Unbagged commodity CalculateCommodityDeposit returning 0c returns (0, true) instead of fallback 100c")
+	of.RemoveSellItem(rIdx)
+	for _, bx in ipairs(focusBoxes) do
+		if bx then
+			bx.HasFocus = bx._origHasFocus
+			bx.ClearFocus = bx._origClearFocus
+			bx.SetFocus = bx._origSetFocus
+			bx._origHasFocus, bx._origClearFocus, bx._origSetFocus = nil, nil, nil
+		end
+	end
+
+	-- Combat lockdown defers SPACE override clear & HideTab clears cleanly
+	of.AddBagItemToSell(81004, 5)
+	tab.Render()
+	clearOverrideCalls = 0
+	mockInCombat = true
+	tab.SyncSpaceBinding(true)
+	check(clearOverrideCalls == 0 and tab.IsSpacePendingSync() == true,
+		"InCombatLockdown defers ClearOverrideBindings cleanly without error")
+	mockInCombat = false
+	fireEvent("PLAYER_REGEN_ENABLED")
+	check(tab.IsSpacePendingSync() == false, "PLAYER_REGEN_ENABLED flushes deferred SPACE binding sync")
+	clearOverrideCalls = 0
+	tab.HideTab()
+	check(clearOverrideCalls >= 1 and not tab.IsShown(), "tab.HideTab clears SPACE override binding cleanly")
+
+	-- Cleanup
+	tab.HideTab()
+	_G.C_AuctionHouse = origAH
+	_G.C_Container = origCCont
+	_G.AuctionHouseFrame = origAHF
+	_G.MerchantFrame = origMF
+	_G.ItemLocation = origIL
+	_G.GetTime = origGetTime
+	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+	_G.GetItemInfo = origGetItemInfo
+	_G.C_Item = origCItem
+	_G.SetOverrideBindingClick = origSetOverrideClick
+	_G.ClearOverrideBindings = origClearOverride
+	_G.InCombatLockdown = origInCombat
+	_G.IsShiftKeyDown = origShiftDown
+	_G.GetMoney = origGetMoney
+end
+runStage5AuctionatorParityTests()
+
+---------------------------------------------------------------------------------------------------
+-- 14. Audit Fixes Regressions (#46 Backend + #47 UI/Events + #48 Live-WoW Scan Timeout)
+---------------------------------------------------------------------------------------------------
+local function runAuditFix46_47_48Regressions()
+	local of = app.orderFlow
+	local origAH = _G.C_AuctionHouse
+	local origAHF = _G.AuctionHouseFrame
+	local origMF = _G.MerchantFrame
+	local origBF = _G.BankFrame
+	local origTSF = _G.TradeSkillFrame
+	local origCF = _G.CraftFrame
+	local origCCont = _G.C_Container
+	local origIL = _G.ItemLocation
+	local origGetTime = _G.GetTime
+	local origTimerAfter = _G.C_Timer and _G.C_Timer.After
+	local origInCombat = _G.InCombatLockdown
+	local origEnum = _G.Enum
+	local origGetMNum, origGetMID, origGetMLink, origGetMInfo, origGetMMax, origBuyM =
+		_G.GetMerchantNumItems, _G.GetMerchantItemID, _G.GetMerchantItemLink, _G.GetMerchantItemInfo, _G.GetMerchantItemMaxStack, _G.BuyMerchantItem
+	local origCMerchant = _G.C_MerchantFrame
+	local origCTrade = _G.C_TradeSkillUI
+	local origMoney = _G.GetMoney
+	local origSearchAH = app.searchAH
+	local origGetBag = app.getBagCountByID
+
+	local mockNow = 50000
+	_G.GetTime = function() return mockNow end
+	local scheduledTimers = {}
+	if _G.C_Timer then
+		_G.C_Timer.After = function(delay, fn)
+			scheduledTimers[#scheduledTimers + 1] = { at = mockNow + (tonumber(delay) or 0), fn = fn }
+		end
+	end
+	local function advanceTimers(sec)
+		mockNow = mockNow + sec
+		local keep = {}
+		local run = {}
+		for _, t in ipairs(scheduledTimers) do
+			if t.at <= mockNow then run[#run + 1] = t.fn else keep[#keep + 1] = t end
+		end
+		scheduledTimers = keep
+		for _, fn in ipairs(run) do fn() end
+	end
+
+	local ahOpen = true
+	local ahFrame = CreateFrame("Frame", "Audit46AHFrame", UIParent)
+	ahFrame.IsShown = function() return ahOpen end
+	_G.AuctionHouseFrame = ahFrame
+	local mfFrame = CreateFrame("Frame", "Audit46MerchantFrame", UIParent); mfFrame:Hide()
+	_G.MerchantFrame = mfFrame
+	local bfFrame = CreateFrame("Frame", "Audit46BankFrame", UIParent); bfFrame:Hide()
+	_G.BankFrame = bfFrame
+	local tsfFrame = CreateFrame("Frame", "Audit46TSF", UIParent); tsfFrame:Hide()
+	_G.TradeSkillFrame = tsfFrame
+	local cfFrame = CreateFrame("Frame", "Audit46CF", UIParent); cfFrame:Hide()
+	_G.CraftFrame = cfFrame
+	local mockCombat = false
+	_G.InCombatLockdown = function() return mockCombat end
+	_G.GetMoney = function() return 9000000 end
+	_G.Enum = {
+		PlayerInteractionType = { Merchant = 5, Banker = 8, CharacterBanker = 8, MailInfo = 17 },
+		AuctionHouseSortOrder = { Price = 0, Buyout = 4 },
+		BagIndex = { CharacterBankTab_1 = 6 },
+	}
+
+	local bagState = { [0] = {}, [6] = {} }
+	local bankMainSlots = 0
+	local usedVendorSlots = {}
+	_G.C_Container = {
+		GetContainerNumSlots = function(b)
+			if b == -1 then return bankMainSlots end
+			if b == 0 then return 8 end
+			if b == 6 then return 4 end
+			return 0
+		end,
+		GetContainerNumFreeSlots = function(b)
+			if b == 0 then return 4, 0 end
+			return 0, 0
+		end,
+		GetContainerItemInfo = function(b, s)
+			return bagState[b] and bagState[b][s] or nil
+		end,
+		UseContainerItem = function(b, s)
+			usedVendorSlots[#usedVendorSlots + 1] = { bag = b, slot = s }
+		end,
+	}
+	_G.ItemLocation = {
+		CreateFromBagAndSlot = function(a, b, c)
+			local bag, slot
+			if type(a) == "table" then bag, slot = b, c else bag, slot = a, b end
+			return { bagID = bag, slotIndex = slot }
+		end,
+	}
+	app.getBagCountByID = function(id)
+		local total = 0
+		for s = 1, 8 do
+			local it = bagState[0][s]
+			if it and it.itemID == id then total = total + (it.stackCount or 1) end
+		end
+		return total
+	end
+
+	local commLadder = {}
+	local itemLadder = {}
+	local keyInfoMap = {}
+	local searchLog = {}
+	local mockAH = {
+		IsThrottledMessageSystemReady = function() return true end,
+		GetItemKeyFromItem = function(loc)
+			local info = bagState[loc.bagID] and bagState[loc.bagID][loc.slotIndex]
+			if info and info.itemID then return { itemID = info.itemID, itemLevel = info.itemLevel or 0, itemSuffix = 0 } end
+			return nil
+		end,
+		GetItemKeyInfo = function(key)
+			return key and keyInfoMap[key.itemID] or nil
+		end,
+		SendSellSearchQuery = function(key, sorts, minLvl)
+			searchLog[#searchLog + 1] = { fn = "SendSellSearchQuery", itemID = key and key.itemID, sortOrder = sorts and sorts[1] and sorts[1].sortOrder }
+		end,
+		SendSearchQuery = function(key, sorts, minLvl)
+			searchLog[#searchLog + 1] = { fn = "SendSearchQuery", itemID = key and key.itemID, sortOrder = sorts and sorts[1] and sorts[1].sortOrder }
+		end,
+		GetNumCommoditySearchResults = function(id) return commLadder[id] and #commLadder[id] or 0 end,
+		GetCommoditySearchResultInfo = function(id, idx) return commLadder[id] and commLadder[id][idx] or nil end,
+		GetNumItemSearchResults = function(key)
+			local id = type(key) == "table" and key.itemID or key
+			return itemLadder[id] and #itemLadder[id] or 0
+		end,
+		GetItemSearchResultInfo = function(key, idx)
+			local id = type(key) == "table" and key.itemID or key
+			return itemLadder[id] and itemLadder[id][idx] or nil
+		end,
+		IsSellItemValid = function(loc)
+			local info = bagState[loc.bagID] and bagState[loc.bagID][loc.slotIndex]
+			return info ~= nil and not info.isBound and info.ahValid ~= false
+		end,
+		CalculateItemDeposit = function() return 100 end,
+		PostCommodity = function() return false end,
+		PostItem = function() return false end,
+		StartCommoditiesPurchase = function() end,
+		ConfirmCommoditiesPurchase = function() end,
+		CancelCommoditiesPurchase = function() end,
+		PlaceBid = function() end,
+	}
+	_G.C_AuctionHouse = mockAH
+
+	-- 1) #47 Blocker #1: cbNoticeFs / cbNoticeBar visible & tinted across stages, hides when empty
+	of.LoadFromShoppingRows({
+		{ name = "Audit Herb A", itemID = 92001, qty = 5, ahUnitPrice = 500 },
+		{ name = "Audit Herb B", itemID = 92002, qty = 5, ahUnitPrice = 600 },
+	}, { title = "Audit47 Notice & AH Test" })
+	local openedIndices = {}
+	app.searchAH = function(name, qty, itemID)
+		openedIndices[#openedIndices + 1] = itemID
+		return true
+	end
+	local ahSt = cb.GetState()
+	ahSt.items[1].status = "done"; ahSt.items[1].remaining = 0; ahSt.items[1].bought = 5
+	app.enterOrderFlowMode("ah")
+	check(cb.GetState().activeIndex == 2 and openedIndices[#openedIndices] == 92002,
+		"enterOrderFlowMode('ah') opens first pending item #2 (92002), not hardcoded #1")
+
+	local ofSt = of.GetState()
+	ofSt.notice = "Deposit too high for test"
+	ofSt.noticeKind = "danger"
+	modal.Render()
+	check(modal.noticeBar:IsShown() and modal.noticeFs:IsShown()
+		and stripColors(modal.noticeFs:GetText()) == "Deposit too high for test",
+		"cbNoticeBar & cbNoticeFs display live danger notice text")
+	local visWithNotice = modal.getVisCap(false, false)
+	ofSt.notice = nil
+	cb.GetState().notice = nil
+	modal.Render()
+	check(not modal.noticeBar:IsShown() and not modal.noticeFs:IsShown(),
+		"cbNoticeBar & cbNoticeFs auto-hide when notice is cleared")
+	local visNoNotice = modal.getVisCap(false, false)
+	check(visWithNotice == visNoNotice - 1,
+		"getVisCap(hasFilter, hasCap) auto-deducts 1 row when cbNoticeBar is shown (" .. tostring(visWithNotice) .. " vs " .. tostring(visNoNotice) .. ")")
+
+	-- Stage 1 empty/done waiting banner guard + clearItemLiveAH + numOwnerItems subtraction + throttle recovery
+	commLadder[92002] = { { unitPrice = 550, quantity = 5, numOwnerItems = 5 } }
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 92002)
+	check(cb.GetState().items[2].liveUnit == nil,
+		"Stage 1 commodity scan subtracts numOwnerItems and clears stale liveUnit when 0 buyable units remain")
+	commLadder[92002] = { { unitPrice = 550, quantity = 6, numOwnerItems = 2 } }
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 92002)
+	check(cb.GetState().items[2].liveAvailQty == 4 and cb.GetState().items[2].liveUnit == 550,
+		"Stage 1 commodity scan subtracts 2 own items from 6 total -> liveAvailQty=4")
+	commLadder[92002] = {}
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 92002)
+	check(cb.GetState().items[2].liveUnit == nil and cb.GetState().items[2].liveAvailQty == nil,
+		"Empty commodity search clears stale Stage 1 liveUnit/liveAvailQty")
+	cb.GetState().items[2].status = "done"; cb.GetState().items[2].remaining = 0; cb.GetState().items[2].bought = 5
+	ahOpen = false
+	of.OnAuctionHouseClosed()
+	modal.Render()
+	check(not modal.waitingBanner:IsShown(), "Completed Stage 1 with AH closed does NOT show 'Please open Auction House to start.'")
+	ahOpen = true
+	of.OnAuctionHouseShow()
+
+	-- 2) #47.3 Stage 2 Collect: '0 in Bank' warning tint + BANKFRAME_CLOSED / PLAYER_INTERACTION_MANAGER Forever Bank Tab scan
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "b1", name = "Bank Potion", itemID = 92100, spellID = 99100, prof = "alchemy", qty = 1,
+			reagents = { { itemID = 92101, name = "Bank Herb", qty = 4 } } },
+		{ indent = 1, mainGroupKey = "b1", name = "Bank Herb", itemID = 92101, qty = 0, ownedUsed = 4 },
+	}, {
+		title = "Stage 2 Bank Tab Test",
+		ownershipProvider = function(id)
+			if id == 92101 then return { bags = 0, bank = 4, mail = 0, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	bagState[6][1] = { itemID = 92101, stackCount = 4, isLocked = false,
+		hyperlink = "|cffffffff|Hitem:92101::::::::60:::::::|h[Bank Herb]|h|r" }
+	bankMainSlots = 0 -- Forever 16001 Character Bank Tabs only (BANK_CONTAINER -1 has 0 slots)
+	bfFrame:Show()
+	fireEvent("PLAYER_INTERACTION_MANAGER_FRAME_SHOW", 8)
+	check(app.atBank == true and of.GetState().env.atBank == true,
+		"PLAYER_INTERACTION_MANAGER_FRAME_SHOW(CharacterBanker) sets app.atBank and env.atBank")
+	-- Simulate 0 in bank to check warning tint on '0 in Bank'
+	local colItem = of.GetState().stages.collect.items[1]
+	colItem.availableHere = 0
+	modal.Render()
+	local liveTxt = modal.spotLiveFs:GetText() or ""
+	check(liveTxt:find("0 in Bank", 1, true) ~= nil and not liveTxt:find("30d158", 1, true),
+		"Stage 2 '0 in Bank' uses warning tint instead of green hexPositive, got: " .. tostring(liveTxt))
+	-- Close bank with bankMainSlots == 0 -> scanBank still flushes Character Bank Tab!
+	bagState[6][1] = { itemID = 92101, stackCount = 2, isLocked = false,
+		hyperlink = "|cffffffff|Hitem:92101::::::::60:::::::|h[Bank Herb]|h|r" }
+	bfFrame:Hide()
+	fireEvent("BANKFRAME_CLOSED")
+	check(app.atBank == false and app.char and app.char.bank and app.char.bank["Bank Herb"] == 2,
+		"BANKFRAME_CLOSED flushes Forever Character Bank Tab even when BANK_CONTAINER(-1) has 0 slots")
+
+	-- 3) #46 + #47.3 Stage 3 Vendor: 'Done' label, pack-rounded TOTAL COST, Buy All Here disabled when 0 stocked, isPurchasable==false blocked
+	_G.GetMerchantNumItems = function() return 2 end
+	_G.GetMerchantItemID = function(s) return s == 1 and 92201 or 92202 end
+	_G.GetMerchantItemLink = function() return nil end
+	_G.GetMerchantItemInfo = nil
+	_G.GetMerchantItemMaxStack = function() return 20 end
+	local vendBuys = {}
+	_G.BuyMerchantItem = function(s, q) vendBuys[#vendBuys + 1] = { slot = s, qty = q } end
+	_G.C_MerchantFrame = {
+		GetItemInfo = function(slot)
+			if slot == 1 then
+				return { itemID = 92201, name = "Locked Pattern", price = 5000, stackCount = 1, numAvailable = -1, isPurchasable = false, hasExtendedCost = false }
+			elseif slot == 2 then
+				return { itemID = 92202, name = "Pack Vial", price = 1000, stackCount = 5, numAvailable = -1, isPurchasable = true, hasExtendedCost = false }
+			end
+		end,
+	}
+	of.LoadFromShoppingRows({
+		{ name = "Locked Pattern", itemID = 92201, qty = 1, isVendor = true, vendorUnitPrice = 5000 },
+	}, { title = "Vendor Locked Test" })
+	of.SetActiveStage("vendor")
+	mfFrame:Show()
+	of.OnMerchantShow()
+	modal.Render()
+	check(modal.nextBtn:GetText() == "Done", "Stage 3 Vendor cbNextBtn renamed from 'Mark' to 'Done'")
+	check(not modal.buyBtn:IsEnabled() and not modal.markBtn:IsEnabled(),
+		"Stage 3 disables Buy and Buy All Here when only item is isPurchasable=false")
+	local okLock, errLock = of.BuyVendorItem(1)
+	check(okLock == false and errLock == "not_purchasable", "BuyVendorItem rejects isPurchasable=false with 'not_purchasable'")
+
+	-- Pack-rounded TOTAL COST: need 3 of 5-pack @ 1000c (10s) -> 1 pack = 10s (NOT 6s)
+	of.LoadFromShoppingRows({
+		{ name = "Pack Vial", itemID = 92202, qty = 3, isVendor = true, vendorUnitPrice = 200 },
+	}, { title = "Vendor Pack Cost Test" })
+	of.SetActiveStage("vendor")
+	of.OnMerchantShow()
+	modal.Render()
+	check(stripColors(modal.spotDiffFs:GetText()):find("10s", 1, true) ~= nil,
+		"Stage 3 pack-sold TOTAL COST rounds up to full 5-pack cost (10s), got: " .. stripColors(modal.spotDiffFs:GetText()))
+	check(modal.markBtn:IsEnabled(), "Stage 3 enables Buy All Here when stocked purchasable item is present")
+	mfFrame:Hide()
+	of.OnMerchantClosed()
+
+	-- 4) #46 + #47.3 Stage 4 Craft: minimized spellcast tracking, interrupt reset, multi-output qty, combat banner, CraftFrame 1x, >4 reagents + overflow
+	local eightReagents = {}
+	for rIdx = 1, 8 do
+		eightReagents[rIdx] = { itemID = 92310 + rIdx, name = "Reagent " .. rIdx, qty = 1 }
+	end
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "c8", name = "Grand Elixir", itemID = 92300, spellID = 99300, prof = "alchemy", qty = 3, numMade = 2,
+			reagents = eightReagents },
+	}, { title = "Stage 4 Audit Test" })
+	of.SetActiveStage("craft")
+	-- Combat waiting banner
+	mockCombat = true
+	modal.Render()
+	check((modal.waitingFs:GetText() or ""):find("Leave combat to open", 1, true) ~= nil,
+		"Stage 4 waiting banner in combat displays 'Leave combat to open ...', got: " .. tostring(modal.waitingFs:GetText()))
+	mockCombat = false
+	-- Open Alchemy + check 6 reagents + '+2 more reagents' overflow in right drawer
+	_G.C_TradeSkillUI = {
+		GetBaseProfessionInfo = function() return { professionName = "Alchemy" } end,
+	}
+	tsfFrame:Show()
+	of.OnTradeSkillShow()
+	modal.SetExtended(true)
+	modal.Render()
+	check(modal.treeChainNodes[6] and modal.treeChainNodes[6]:IsShown(),
+		"Stage 4 Reagents drawer renders up to 6 reagent nodes without truncating at 4")
+	check(modal.treeChainOverflowFs and modal.treeChainOverflowFs:IsShown()
+		and stripColors(modal.treeChainOverflowFs:GetText()):find("+2 more reagents", 1, true) ~= nil,
+		"Stage 4 Reagents drawer shows '+2 more reagents' when recipe has 8 reagents")
+	modal.SetExtended(false)
+	-- Minimized Trade Strip still tracks UNIT_SPELLCAST_START/INTERRUPTED/SUCCEEDED + multi-output (numMade=2 -> 2 queued in Sell per craft!)
+	modal:Hide()
+	app._ahBuyingMode = false
+	fireEvent("UNIT_SPELLCAST_START", "player", "cast-1", 99300)
+	of.GetState().stages.craft.tasks[1].status = "active"
+	fireEvent("UNIT_SPELLCAST_INTERRUPTED", "player", "cast-1", 99300)
+	check(of.GetState().stages.craft.tasks[1].status == "pending"
+		and (of.GetState().notice or ""):find("interrupted", 1, true) ~= nil,
+		"UNIT_SPELLCAST_INTERRUPTED while minimized resets active craft to pending with notice")
+	fireEvent("UNIT_SPELLCAST_SUCCEEDED", "player", "cast-2", 99300)
+	check(of.GetState().stages.craft.tasks[1].completedCrafts == 1,
+		"UNIT_SPELLCAST_SUCCEEDED tracks craft progress even when Trade Strip is hidden/minimized")
+	local sellQItem = of.GetState().stages.sell.items[1]
+	check(sellQItem and sellQItem.totalQty == 4,
+		"Multi-output recipe (qty=3, numMade=2 -> 2 crafts) queues 4 units into Stage 5 Sell, got: " .. tostring(sellQItem and sellQItem.totalQty))
+	tsfFrame:Hide()
+	_G.C_TradeSkillUI = nil
+	-- Classic CraftFrame shows 'Craft 1x' instead of 'Craft Nx'
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "ce", name = "Enchant Test", itemID = 92350, spellID = 99350, prof = "enchanting", qty = 5,
+			reagents = { { itemID = 92351, name = "Strange Dust", qty = 1 } } },
+	}, { title = "Classic CraftFrame 1x Test" })
+	bagState[0][1] = { itemID = 92351, stackCount = 10, isLocked = false }
+	cfFrame:Show()
+	of.GetState().env.openProfKey = "enchanting"
+	app.enterOrderFlowMode("craft")
+	modal.Render()
+	check(modal.buyBtn:GetText() == "Craft 1x",
+		"Classic CraftFrame shows 'Craft 1x' (crafts 1 at a time), got: " .. tostring(modal.buyBtn:GetText()))
+	cfFrame:Hide()
+
+	-- 5) Stage 5 Sell Audit Regressions (Vendor split guard, Legacy AH gate, scan key-prime fallback & bid-only preference)
+	bagState[0][1] = { itemID = 92401, stackCount = 5, isLocked = false, isBound = false, ahValid = true, itemLevel = 25,
+		hyperlink = "|cffffffff|Hitem:92401::::::::60:::::::|h[Audit Flask]|h|r" }
+	bagState[0][2] = { itemID = 92402, stackCount = 4, isLocked = false, isBound = false, ahValid = true, itemLevel = 45,
+		hyperlink = "|cff1eff00|Hitem:92402::::::::60:::::::|h[Crafted Blade]|h|r" }
+	keyInfoMap[92401] = { itemName = "Audit Flask", isCommodity = true }
+	keyInfoMap[92402] = { itemName = "Crafted Blade", isCommodity = false }
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "s1", name = "Audit Flask", itemID = 92401, spellID = 99401, prof = "alchemy", qty = 5 },
+		{ isMainRow = true, mainGroupKey = "s2", name = "Crafted Blade", itemID = 92402, spellID = 99402, prof = "blacksmithing", qty = 2 },
+	}, { title = "MM Sell Audit Test" })
+	local tab = ns.AHSellTab
+	tab.SelectTab()
+	local sl = of.GetState().stages.sell
+
+	-- MM Sell left categorized bag pane shown cleanly while Task Strip keeps no sellBagPane
+	tab.Render()
+	check(tab.sellBagPane:IsShown() and modal.sellBagPane == nil, "MM Sell displays categorized Bags pane independently of Task Strip")
+
+	-- Vendor-flagged item hides AH form & shows Vendor bar
+	of.SetSellItemChannel(2, "vendor")
+	of.SelectSellItem(2)
+	mfFrame:Show()
+	of.OnMerchantShow()
+	tab.Render()
+	check(not tab.sellForm:IsShown() and tab.sellVendorBar:IsShown(),
+		"Vendor-flagged item hides AH form and shows Vendor Qty bar in MM Sell")
+	of.SetSellItemQty(2, 2)
+	usedVendorSlots = {}
+	local okVendOver, errVendOver = of.SellToVendor(2)
+	check(okVendOver == false and errVendOver == "split_needed" and #usedVendorSlots == 0,
+		"SellToVendor refuses to oversell stack of 4 when remaining=2 (returns split_needed)")
+	mfFrame:Hide()
+	of.OnMerchantClosed()
+
+	-- Legacy AH disables Post All (tab.postAllBtn) via both nil C_AuctionHouse and IsUsingLegacyAuctionClient()
+	of.SelectSellItem(1)
+	_G.C_AuctionHouse = nil
+	tab.Render()
+	check(not tab.postAllBtn:IsEnabled(), "MM Sell disables 'Post All' when C_AuctionHouse is nil")
+	_G.C_AuctionHouse = mockAH
+	local origLegacyClient = _G.IsUsingLegacyAuctionClient
+	_G.IsUsingLegacyAuctionClient = function() return true end
+	tab.Render()
+	check(not tab.postAllBtn:IsEnabled(), "MM Sell disables 'Post All' when IsUsingLegacyAuctionClient() == true")
+	_G.IsUsingLegacyAuctionClient = origLegacyClient
+
+	-- Live-WoW Scan Resilience:
+	-- (a) Mismatched isCommodity guess (guessed false, server answers COMMODITY_SEARCH_RESULTS_UPDATED)
+	of.SelectSellItem(1)
+	keyInfoMap[92401] = { itemName = "Audit Flask", isCommodity = false }
+	commLadder[92401] = { { unitPrice = 32000, quantity = 8, numOwnerItems = 0 } }
+	searchLog = {}
+	of.ScanSellItemMarket(1, "select")
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 92401)
+	check(sl.pendingSearch == nil and sl.items[1].liveUnit == 32000,
+		"COMMODITY_SEARCH_RESULTS_UPDATED accepted despite mismatched isCommodity=false guess (liveUnit=32000)")
+
+	-- (b) Non-commodity prefers lowest buyout listing over bid-only bait (88000c over 5000c bid-only)
+	of.SetSellItemChannel(2, "ah")
+	of.SelectSellItem(2)
+	keyInfoMap[92402] = { itemName = "Crafted Blade", isCommodity = true }
+	itemLadder[92402] = {
+		{ buyoutAmount = 0, bidAmount = 5000, quantity = 1, containsOwnerItem = false },
+		{ buyoutAmount = 88000, bidAmount = 70000, quantity = 1, containsOwnerItem = false },
+	}
+	of.ScanSellItemMarket(2, "select")
+	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 92402, itemLevel = 45, itemSuffix = 0 })
+	check(sl.pendingSearch == nil and sl.items[2].liveUnit == 88000,
+		"ITEM_SEARCH_RESULTS_UPDATED prefers buyout (88000c) over bid-only bait (5000c)")
+
+	-- (c) GetItemKeyInfo returns nil -> 1.5s prime fallback fires search query automatically without hanging 15s!
+	keyInfoMap[92401] = nil
+	scheduledTimers = {}
+	searchLog = {}
+	of.ScanSellItemMarket(1, "select")
+	check(sl.pendingKeyPrime ~= nil and #searchLog == 0, "Unprimed key awaits ITEM_KEY_ITEM_INFO_RECEIVED initially")
+	advanceTimers(2)
+	check(#searchLog == 1 and sl.pendingSearch ~= nil,
+		"1.5s prime fallback dispatches search query automatically when ITEM_KEY_ITEM_INFO_RECEIVED never fires")
+	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 92401)
+	check(sl.pendingSearch == nil and sl.items[1].liveUnit == 32000,
+		"Prime-fallback scan completes cleanly instead of timing out")
+
+	-- Cleanup
+	if tab and tab.HideTab then tab.HideTab() end
+	app.exitAHBuyingMode(false)
+	_G.C_AuctionHouse = origAH
+	_G.AuctionHouseFrame = origAHF
+	_G.MerchantFrame = origMF
+	_G.BankFrame = origBF
+	_G.TradeSkillFrame = origTSF
+	_G.CraftFrame = origCF
+	_G.C_Container = origCCont
+	_G.ItemLocation = origIL
+	_G.GetTime = origGetTime
+	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+	_G.InCombatLockdown = origInCombat
+	_G.Enum = origEnum
+	_G.GetMerchantNumItems, _G.GetMerchantItemID, _G.GetMerchantItemLink, _G.GetMerchantItemInfo, _G.GetMerchantItemMaxStack, _G.BuyMerchantItem =
+		origGetMNum, origGetMID, origGetMLink, origGetMInfo, origGetMMax, origBuyM
+	_G.C_MerchantFrame = origCMerchant
+	_G.C_TradeSkillUI = origCTrade
+	_G.GetMoney = origMoney
+	app.searchAH = origSearchAH
+	app.getBagCountByID = origGetBag
+end
+runAuditFix46_47_48Regressions()
+
+---------------------------------------------------------------------------------------------------
+-- 15. Forever 16001 Two-Word Surname Character Identity & Syndicator Self-Exclusion (#57)
+---------------------------------------------------------------------------------------------------
+local function runForeverSurnameAltRegression()
+	local of = app.orderFlow
+	local origRegNames = _G.RegionalUniqueNamesEnabled
+	local origConstants = _G.Constants
+	local origUnitName = _G.UnitName
+	local origUnitGUID = _G.UnitGUID
+	local origGetRealm = _G.GetRealmName
+	local origNormRealm = _G.GetNormalizedRealmName
+	local origSyn = _G.Syndicator
+	local origCCont = _G.C_Container
+	local origChars = MerchantMasterDB.chars
+	local origCharKey = app.charKey
+	local origChar = app.char
+	local origActiveChar = ns.activeChar
+	local origIncludeAlts = MerchantMasterDB.includeAlts
+	local origLegacy = MerchantMasterDB.enableLegacyPriceAddons
+	local origTimerAfter = _G.C_Timer and _G.C_Timer.After
+
+	if _G.C_Timer then _G.C_Timer.After = function() end end
+	_G.RegionalUniqueNamesEnabled = function() return true end
+	_G.Constants = { CharacterNameSeparatorConsts = { CHARACTERNAME_SURNAME_SEPARATOR = " " } }
+	_G.UnitName = function(u)
+		if u == "player" then return "Aldric", "Stone" end
+		return origUnitName and origUnitName(u) or "NPC"
+	end
+	_G.UnitGUID = function(u)
+		if u == "player" then return "Player-16001-0001" end
+		return origUnitGUID and origUnitGUID(u) or nil
+	end
+	_G.GetRealmName = function() return "Forever" end
+	_G.GetNormalizedRealmName = function() return "Forever" end
+	_G.C_Container = {
+		GetContainerNumSlots = function(b) return b == 0 and 4 or 0 end,
+		GetContainerNumFreeSlots = function(b) return b == 0 and 3 or 0, 0 end,
+		GetContainerItemInfo = function(b, s)
+			if b == 0 and s == 1 then
+				return { itemID = 92901, stackCount = 10, isLocked = false,
+					hyperlink = "|cffffffff|Hitem:92901::::::::60:::::::|h[Test Surname Herb]|h|r" }
+			end
+			return nil
+		end,
+	}
+
+	local fullNm, firstNm = app.getForeverPlayerName()
+	check(fullNm == "Aldric Stone" and firstNm == "Aldric",
+		"getForeverPlayerName returns 'Aldric Stone', 'Aldric' when RegionalUniqueNamesEnabled() == true")
+
+	local activeEcon = ns.DetectActiveEconomy()
+	local oldKey = activeEcon .. "-Forever-Aldric"
+	local newKey = activeEcon .. "-Forever-Aldric Stone"
+	MerchantMasterDB.chars = {
+		[oldKey] = {
+			name = "Aldric",
+			realm = "Forever",
+			faction = "Horde",
+			economy = activeEcon,
+			bags = { ["Test Surname Herb"] = 10 },
+			bank = { ["Test Surname Herb"] = 7 },
+			mail = {},
+		},
+	}
+
+	fireEvent("PLAYER_LOGIN")
+	check(app.charKey == newKey, "PLAYER_LOGIN builds full surname charKey '" .. tostring(newKey) .. "', got '" .. tostring(app.charKey) .. "'")
+	check(app.char.name == "Aldric Stone" and app.char.firstName == "Aldric" and app.char.guid == "Player-16001-0001",
+		"PLAYER_LOGIN records full name, firstName, and player GUID on app.char")
+	check(MerchantMasterDB.chars[oldKey] == nil,
+		"PLAYER_LOGIN migrates and removes legacy single-word self key '" .. tostring(oldKey) .. "'")
+	check(app.char.bank and app.char.bank["Test Surname Herb"] == 7,
+		"PLAYER_LOGIN migration preserves saved bank counts from legacy single-word self entry")
+
+	-- Also inject a stale unmigrated single-word 'Aldric' char entry + same-GUID entry -> alts() MUST skip both!
+	MerchantMasterDB.chars[activeEcon .. "-Forever-AldricStale"] = {
+		name = "Aldric",
+		realm = "Forever",
+		faction = "Horde",
+		economy = activeEcon,
+		bags = { ["Test Surname Herb"] = 10 },
+	}
+	MerchantMasterDB.chars[activeEcon .. "-Forever-SameGuidAlias"] = {
+		name = "OldAldric",
+		guid = "Player-16001-0001",
+		realm = "Forever",
+		faction = "Horde",
+		economy = activeEcon,
+		bags = { ["Test Surname Herb"] = 10 },
+	}
+	local altList = app.getAlts()
+	check(#altList == 0, "alts() excludes stale single-word self and same-GUID self entries, got count=" .. tostring(#altList))
+
+	-- Seed real alt ('BankAlt Last') in native MerchantMasterDB.chars (Syndicator legacy bridge removed)
+	MerchantMasterDB.chars[activeEcon .. "-Forever-BankAlt Last"] = {
+		name = "BankAlt Last",
+		realm = "Forever",
+		faction = "Horde",
+		economy = activeEcon,
+		bags = { ["Test Surname Herb"] = 5 },
+		bank = {},
+		mail = {},
+	}
+	MerchantMasterDB.includeAlts = true
+	app.ownershipRev = (app.ownershipRev or 0) + 1
+
+	local bd = app.getItemOwnershipBreakdown(92901, "Test Surname Herb")
+	check(#bd.alts == 1 and bd.alts[1].name == "BankAlt Last" and bd.alts[1].qty == 5 and bd.alts[1].location == "Bags",
+		"getItemOwnershipBreakdown excludes self ('Aldric'/'Aldric Stone') and reports only real alt 'BankAlt Last' (5x), got count="
+		.. tostring(#bd.alts) .. " first=" .. tostring(bd.alts[1] and bd.alts[1].name))
+
+	-- Stage 2 Collect using live getItemOwnershipBreakdown never lists Aldric / Aldric Stone as an alt
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "sn1", name = "Surname Potion", itemID = 92900, spellID = 99900, prof = "alchemy", qty = 1,
+			reagents = { { itemID = 92901, name = "Test Surname Herb", qty = 22 } } },
+		{ indent = 1, mainGroupKey = "sn1", name = "Test Surname Herb", itemID = 92901, qty = 0, ownedUsed = 22 },
+	}, {
+		title = "Forever Surname Stage 2 Collect Test",
+		ownershipProvider = function(id, nm) return app.getItemOwnershipBreakdown(id, nm) end,
+	})
+	local altItems = {}
+	for _, it in ipairs(of.GetState().stages.collect.items or {}) do
+		if it.source == "alt" then altItems[#altItems + 1] = it end
+	end
+	check(#altItems == 1 and altItems[1].altLabel == "On Alt: BankAlt Last (Bags 5x)",
+		"Stage 2 Collect alt bucket shows only real alt 'BankAlt Last' (never self Aldric/Aldric Stone), got: "
+		.. tostring(altItems[1] and altItems[1].altLabel))
+
+	-- #62.1: Single-string "Aldric Stone" from UnitName("player") (with second == nil and RegionalUniqueNamesEnabled() == false) still splits firstName == "Aldric"
+	_G.RegionalUniqueNamesEnabled = function() return false end
+	_G.UnitName = function(u)
+		if u == "player" then return "Aldric Stone", nil end
+		return origUnitName and origUnitName(u) or "NPC"
+	end
+	local singleFull, singleFirst = app.getForeverPlayerName()
+	check(singleFull == "Aldric Stone" and singleFirst == "Aldric",
+		"#62: Single-string UnitName('player')='Aldric Stone' (second=nil) still splits firstName='Aldric', got: "
+		.. tostring(singleFull) .. " / " .. tostring(singleFirst))
+
+	-- #62.2: Stale "Aldric" under a DIFFERENT key with stale old bags (Mageweave Cloth / Gold Power Core / Thorium Bar) is purged on PLAYER_LOGIN without copying old bags
+	local weirdKey = activeEcon .. "-OldRealmName-Aldric"
+	MerchantMasterDB.chars = {
+		[weirdKey] = {
+			name = "Aldric",
+			realm = "OldRealmName",
+			faction = "Horde",
+			economy = activeEcon,
+			bags = { ["Mageweave Cloth"] = 40, ["Gold Power Core"] = 12, ["Thorium Bar"] = 25 },
+			bank = { ["Test Surname Herb"] = 9 },
+			mail = {},
+		},
+	}
+	fireEvent("PLAYER_LOGIN")
+	check(MerchantMasterDB.chars[weirdKey] == nil,
+		"#62: PLAYER_LOGIN purges stale 'Aldric' under arbitrary key '" .. tostring(weirdKey) .. "'")
+	check(app.char.bank and app.char.bank["Test Surname Herb"] == 9,
+		"#62: PLAYER_LOGIN preserves bank counts when migrating arbitrary stale 'Aldric' key")
+	check(not (app.char.bags and (app.char.bags["Mageweave Cloth"] or app.char.bags["Gold Power Core"] or app.char.bags["Thorium Bar"])),
+		"#62: PLAYER_LOGIN never copies stale old bags (Mageweave/Gold Power Core/Thorium Bar) into 'Aldric Stone'")
+
+	-- #61: OrderFlow.RestoreState strips stale "On Alt: Aldric" rows on /reload
+	local origSavedOrderFlow = MerchantMasterDB.orderFlowState
+	MerchantMasterDB.orderFlowState = {
+		active = true,
+		activeStage = "collect",
+		stages = {
+			collect = {
+				activeIndex = 2,
+				items = {
+					{
+						name = "Mageweave Cloth",
+						itemID = 4338,
+						source = "alt",
+						status = "alt_info",
+						needed = 20,
+						collected = 0,
+						remaining = 20,
+						altLabel = "On Alt: Aldric (Bags 20x)",
+						altOwners = { { name = "Aldric", location = "Bags", qty = 20 } },
+					},
+					{
+						name = "Thorium Bar",
+						itemID = 12359,
+						source = "alt",
+						status = "alt_info",
+						needed = 15,
+						collected = 0,
+						remaining = 15,
+						altLabel = "On Alt: Aldric (Bags 10x), BankAlt Last (Bank 5x)",
+						altOwners = {
+							{ name = "Aldric", location = "Bags", qty = 10 },
+							{ name = "BankAlt Last", location = "Bank", qty = 5 },
+						},
+					},
+				},
+			},
+		},
+	}
+	of.RestoreState()
+	local restoredCol = of.GetState().stages.collect
+	check(#restoredCol.items == 1 and restoredCol.items[1].itemID == 12359,
+		"#61: OrderFlow.RestoreState drops self-only 'On Alt: Aldric' collect row cleanly, got count=" .. tostring(#restoredCol.items))
+	check(restoredCol.items[1].altLabel == "On Alt: BankAlt Last (Bank 5x)" and restoredCol.items[1].remaining == 5 and restoredCol.items[1].needed == 5,
+		"#61: OrderFlow.RestoreState strips self from mixed alt row, rebuilds altLabel, and clamps qty to 5, got: "
+		.. tostring(restoredCol.items[1].altLabel) .. " rem=" .. tostring(restoredCol.items[1].remaining))
+	check(restoredCol.activeIndex == 1,
+		"#61: OrderFlow.RestoreState clamps collect activeIndex to valid range (1), got: " .. tostring(restoredCol.activeIndex))
+	MerchantMasterDB.orderFlowState = origSavedOrderFlow
+
+	-- Cleanup
+	_G.RegionalUniqueNamesEnabled = origRegNames
+	_G.Constants = origConstants
+	_G.UnitName = origUnitName
+	_G.UnitGUID = origUnitGUID
+	_G.GetRealmName = origGetRealm
+	_G.GetNormalizedRealmName = origNormRealm
+	_G.Syndicator = origSyn
+	_G.C_Container = origCCont
+	MerchantMasterDB.chars = origChars
+	app.charKey = origCharKey
+	app.char = origChar
+	ns.activeChar = origActiveChar
+	MerchantMasterDB.includeAlts = origIncludeAlts
+	MerchantMasterDB.enableLegacyPriceAddons = origLegacy
+	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+	app.bagsDirty = true
+	app.bagCountsDirty = true
+	app.ownershipRev = (app.ownershipRev or 0) + 1
+end
+runForeverSurnameAltRegression()
+
+---------------------------------------------------------------------------------------------------
+-- 16. Forever 16001 TSM-Style BAG_UPDATE / PLAYER_ENTERING_WORLD Resync & /mm resync (#67)
+---------------------------------------------------------------------------------------------------
+local function runForeverBagResyncRegression()
+	local origCCont = _G.C_Container
+	local origTimerAfter = _G.C_Timer and _G.C_Timer.After
+	local origRegNames = _G.RegionalUniqueNamesEnabled
+	local origUnitName = _G.UnitName
+	local origUnitGUID = _G.UnitGUID
+	local origGetRealm = _G.GetRealmName
+	local origSynData = _G.SYNDICATOR_DATA
+	local origChars = MerchantMasterDB.chars
+	local origCharKey = app.charKey
+	local origChar = app.char
+	local origActiveChar = ns.activeChar
+
+	local timers = {}
+	if _G.C_Timer then
+		_G.C_Timer.After = function(delay, fn)
+			timers[#timers + 1] = { delay = tonumber(delay) or 0, fn = fn }
+		end
+	end
+	local function runTimersByDelay(maxDelay)
+		local keep, toRun = {}, {}
+		for _, t in ipairs(timers) do
+			if t.delay <= maxDelay then toRun[#toRun + 1] = t.fn else keep[#keep + 1] = t end
+		end
+		timers = keep
+		for _, fn in ipairs(toRun) do fn() end
+	end
+
+	local liveBags = {
+		[0] = {},
+		[1] = { [1] = { itemID = 93001, stackCount = 6, isLocked = false, hyperlink = "|cffffffff|Hitem:93001::::::::60:::::::|h[Live Bag1 Herb]|h|r" } },
+		[2] = {},
+	}
+	_G.C_Container = {
+		GetContainerNumSlots = function(b) return liveBags[b] and 4 or 0 end,
+		GetContainerNumFreeSlots = function(b) return liveBags[b] and 3 or 0, 0 end,
+		GetContainerItemInfo = function(b, s) return liveBags[b] and liveBags[b][s] or nil end,
+	}
+	_G.RegionalUniqueNamesEnabled = function() return true end
+	_G.UnitName = function(u)
+		if u == "player" then return "Aldric", "Stone" end
+		return origUnitName and origUnitName(u) or "NPC"
+	end
+	_G.UnitGUID = function(u)
+		if u == "player" then return "Player-16001-0001" end
+		return origUnitGUID and origUnitGUID(u) or nil
+	end
+	_G.GetRealmName = function() return "Forever" end
+
+	local activeEcon = ns.DetectActiveEconomy()
+	local charKey = activeEcon .. "-Forever-Aldric Stone"
+	MerchantMasterDB.chars = {
+		[charKey] = {
+			name = "Aldric Stone",
+			firstName = "Aldric",
+			guid = "Player-16001-0001",
+			realm = "Forever",
+			faction = "Horde",
+			economy = activeEcon,
+			bags = { ["Mageweave Cloth"] = 40, ["Thorium Bar"] = 25 },
+			bank = {},
+			mail = {},
+		},
+	}
+	app.charKey = charKey
+	app.char = MerchantMasterDB.chars[charKey]
+	ns.activeChar = app.char
+
+	local mmEventFrame = nil
+	for _, fr in ipairs(frames) do
+		if fr._events and fr._events["BAG_UPDATE"] and fr._events["PLAYER_ENTERING_WORLD"] then
+			mmEventFrame = fr
+			break
+		end
+	end
+	check(mmEventFrame ~= nil, "#67: Main MerchantMaster event frame registers BAG_UPDATE and PLAYER_ENTERING_WORLD")
+	local function fireMM(ev, ...)
+		if mmEventFrame and mmEventFrame._scripts and mmEventFrame._scripts.OnEvent then
+			mmEventFrame._scripts.OnEvent(mmEventFrame, ev, ...)
+		end
+	end
+
+	-- 1) Burst of BAG_UPDATE events coalesces into 1 next-frame timer and clears stale bag items from bag 1..5
+	timers = {}
+	fireMM("BAG_UPDATE", 1)
+	fireMM("BAG_UPDATE", 1)
+	fireMM("BAG_UPDATE", 2)
+	check(#timers == 1 and timers[1].delay == 0,
+		"#67: Multiple BAG_UPDATE events coalesce into 1 next-frame C_Timer.After(0), got count=" .. tostring(#timers))
+	runTimersByDelay(0)
+	check(app.char.bags["Live Bag1 Herb"] == 6 and app.char.bags["Mageweave Cloth"] == nil and app.char.bags["Thorium Bar"] == nil,
+		"#67: BAG_UPDATE resyncs non-backpack bag 1 and drops stale Mageweave Cloth / Thorium Bar")
+
+	-- 2) PLAYER_ENTERING_WORLD schedules next-frame (0s) + 1.0s safety resync for slow Forever container load
+	liveBags[1][1] = nil
+	timers = {}
+	fireMM("PLAYER_ENTERING_WORLD", true, false)
+	runTimersByDelay(0)
+	check(app.char.bags["Live Bag1 Herb"] == nil,
+		"#67: PLAYER_ENTERING_WORLD next-frame resync removes emptied bag item")
+	liveBags[2][1] = { itemID = 93002, stackCount = 4, isLocked = false, hyperlink = "|cffffffff|Hitem:93002::::::::60:::::::|h[Late Loaded Ore]|h|r" }
+	runTimersByDelay(1.0)
+	check(app.char.bags["Late Loaded Ore"] == 4,
+		"#67: PLAYER_ENTERING_WORLD 1.0s safety resync captures late-loaded Forever bag 2 item")
+
+	-- 3) /mm resync (app.resyncBags) clears stale caches, purges stale single-word 'Aldric', and omits removed Syndicator ghost scan
+	app.char.bags["Gold Power Core"] = 12
+	local staleAldricKey = activeEcon .. "-Forever-Aldric"
+	MerchantMasterDB.chars[staleAldricKey] = {
+		name = "Aldric",
+		realm = "Forever",
+		faction = "Horde",
+		economy = activeEcon,
+		bags = { ["Gold Power Core"] = 12 },
+		bank = {},
+	}
+	local res = app.resyncBags(false)
+	check(res.purged == 1 and MerchantMasterDB.chars[staleAldricKey] == nil,
+		"#67: app.resyncBags purges stale single-word 'Aldric' record")
+	check(app.char.bags["Gold Power Core"] == nil and app.char.bags["Late Loaded Ore"] == 4 and res.bagTypes == 1,
+		"#67: app.resyncBags refreshes app.char.bags from live containers and removes stale Gold Power Core")
+	check(res.syndicatorGhosts == nil, "#67: app.resyncBags omits removed Syndicator ghost scan in standalone mode")
+	SlashCmdList.MERCHANTMASTER("resync")
+	check(app.char.bags["Late Loaded Ore"] == 4 and app.char.bags["Gold Power Core"] == nil,
+		"#67: /mm resync slash command executes cleanly")
+
+	-- Cleanup
+	_G.C_Container = origCCont
+	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+	_G.RegionalUniqueNamesEnabled = origRegNames
+	_G.UnitName = origUnitName
+	_G.UnitGUID = origUnitGUID
+	_G.GetRealmName = origGetRealm
+	_G.SYNDICATOR_DATA = origSynData
+	MerchantMasterDB.chars = origChars
+	app.charKey = origCharKey
+	app.char = origChar
+	ns.activeChar = origActiveChar
+	app.bagsDirty = true
+	app.bagCountsDirty = true
+	app.ownershipRev = (app.ownershipRev or 0) + 1
+end
+runForeverBagResyncRegression()
+
+-- 22. Regression A: Craft-Complete Clear Queue, Unblocked Re-Buy & Mid-Session Mail Non-Double-Deduction
+local function runCraftCompleteClearAndRebuyRegression()
+	local modal = app.ui and app.ui.cartBuyerModal
+	local origAHF = _G.AuctionHouseFrame
+	local origMailF = _G.MailFrame
+	local origTSF = _G.TradeSkillFrame
+	local origCCont = _G.C_Container
+	local origGetBag = app.getBagCountByID
+	local origOwn = app.getItemOwnershipBreakdown
+	local origSendSig = app.getOrderFlowCartSignature
+
+	local ahShown = true
+	local mailShown = false
+	local bagCounts = { [95001] = 0 }
+	_G.AuctionHouseFrame = { IsShown = function() return ahShown end }
+	_G.MailFrame = { IsShown = function() return mailShown end }
+	_G.TradeSkillFrame = { IsShown = function() return true end }
+	_G.C_Container = {
+		GetContainerNumSlots = function() return 0 end,
+		GetContainerItemInfo = function() return nil end,
+	}
+	app.getBagCountByID = function(id) return bagCounts[id] or 0 end
+	app.getItemOwnershipBreakdown = function(id)
+		return { bags = bagCounts[id] or 0, bank = 0, mail = 0, alts = {} }
+	end
+
+	local sigIdx = "sig-rebuy-same"
+	app.getOrderFlowCartSignature = function() return sigIdx end
+
+	local buyCraftRows = {
+		{ name = "Reg Herb", itemID = 95001, qty = 4, unitPrice = 500, estUnitCost = 500 },
+		{ isMainRow = true, mainGroupKey = "rc1", name = "Reg Potion", itemID = 95002, spellID = 99502, prof = "alchemy", qty = 1,
+			reagents = { { itemID = 95001, name = "Reg Herb", qty = 4 } } },
+	}
+	check(app.sendShoppingRowsToBuyer(buyCraftRows, "Rebuy Regression") == true,
+		"RegA: Initial sendShoppingRowsToBuyer succeeds")
+	of.SetActiveStage("ah")
+	of.GetState().stages.ah.items[1].bought = 4
+	of.GetState().stages.ah.items[1].remaining = 0
+	of.GetState().stages.ah.items[1].status = "done"
+
+	-- Simulate craft completion after mail collect
+	bagCounts[95001] = 4
+	local colSt = of.GetState().stages.collect
+	colSt.items = { { itemID = 95001, name = "Reg Herb", source = "mail", needed = 4, collected = 4, remaining = 0, status = "done" } }
+	bagCounts[95001] = 0
+	of.SetActiveStage("craft")
+	of.MarkCraftDone(1)
+	check(of.IsPipelineComplete() == true and of.IsCraftCycleComplete() == true,
+		"RegA: Pipeline and craft cycle report complete after craft finishes")
+	local stComp = of.GetState()
+	check(stComp.stageCompletePrompt and stComp.stageCompletePrompt.action == "clear_queue"
+		and stComp.stageCompletePrompt.label == "Clear Queue ->",
+		"RegA: Completed craft surfaces Clear Queue -> stage prompt")
+	modal.Render()
+	check(modal.clearBtn and modal.clearBtn:IsShown() and modal.nextStageBtn:GetText() == "Clear Queue ->",
+		"RegA: Header Clear button and Clear Queue -> CTA both visible after craft completion")
+
+	-- Re-buying with IDENTICAL signature must NOT be blocked or marked done!
+	check(of.HasActiveSessionForSig(sigIdx) == false,
+		"RegA: HasActiveSessionForSig returns false once craft cycle is complete")
+	check(app.sendShoppingRowsToBuyer(buyCraftRows, "Rebuy Same Sig") == true,
+		"RegA: Re-sending identical rows after craft completion succeeds")
+	local reAH = of.GetState().stages.ah.items[1]
+	local reCr = of.GetState().stages.craft.tasks[1]
+	check(of.GetActiveStage() == "ah" and reAH and reAH.bought == 0 and reAH.remaining == 4 and reAH.status ~= "done",
+		"RegA: Re-buying resets activeStage to 'ah' with full remaining=4 (craft does not block buying)")
+	check(reCr and reCr.completedCrafts == 0 and reCr.remainingCrafts == 1 and reCr.status ~= "done",
+		"RegA: Re-buying resets craft task completedCrafts to 0")
+
+	-- Direct LoadFromShoppingRows(preserveProgress=true) after craft complete also clears prior bought/craft state
+	of.GetState().stages.ah.items[1].bought = 4
+	of.GetState().stages.ah.items[1].remaining = 0
+	of.GetState().stages.ah.items[1].status = "done"
+	of.SetActiveStage("craft")
+	of.MarkCraftDone(1)
+	of.LoadFromShoppingRows(buyCraftRows, { title = "Direct Reload", preserveProgress = true, cartSig = sigIdx })
+	check(of.GetState().stages.ah.items[1].bought == 0 and of.GetState().stages.ah.items[1].remaining == 4
+		and of.GetState().stages.craft.tasks[1].completedCrafts == 0,
+		"RegA: Direct LoadFromShoppingRows(preserveProgress=true) after completed craft does not carry over bought or craft counts")
+
+	-- Mid-session queue expansion: bought 4, collected 4 into bags -> adding 4 more must NOT double-deduct mail-collected 4!
+	of.GetState().stages.ah.items[1].bought = 4
+	of.GetState().stages.ah.items[1].remaining = 0
+	of.GetState().stages.ah.items[1].status = "done"
+	of.GetState().stages.collect.items = {
+		{ itemID = 95001, name = "Reg Herb", source = "mail", needed = 4, collected = 4, remaining = 0, status = "done" },
+	}
+	bagCounts[95001] = 4 -- Already in bags so BuildUnifiedShoppingList asks only for the new 4
+	of.LoadFromShoppingRows({
+		{ name = "Reg Herb", itemID = 95001, qty = 4, unitPrice = 500, estUnitCost = 500 },
+		{ isMainRow = true, mainGroupKey = "rc2", name = "Reg Potion", itemID = 95002, spellID = 99502, prof = "alchemy", qty = 2,
+			reagents = { { itemID = 95001, name = "Reg Herb", qty = 8 } } },
+	}, { title = "Mid-session Expand", preserveProgress = true, cartSig = "sig-mid-2" })
+	local midAH = of.GetState().stages.ah.items[1]
+	check(midAH and midAH.bought == 0 and midAH.remaining == 4,
+		"RegA: Mid-session expansion subtracts mailCollected (4) from old.bought (4) so remaining stays 4 (zero double-deduction)")
+
+	-- Clear Queue wipes craftOrderQueue, crateTurnInQueue, and OrderFlow cleanly
+	bagCounts[95001] = 0
+	of.GetState().stages.ah.items[1].bought = 4; of.GetState().stages.ah.items[1].remaining = 0; of.GetState().stages.ah.items[1].status = "done"
+	of.SetActiveStage("craft")
+	of.MarkCraftDone(1)
+	MerchantMasterDB.craftOrderQueue = { { spellID = 99502, count = 1 } }
+	MerchantMasterDB.crateTurnInQueue = { ["999"] = 2 }
+	modal.Render()
+	modal.nextStageBtn:Click("LeftButton")
+	check(not of.HasAnyItems() and MerchantMasterDB.orderFlowState == nil
+		and #MerchantMasterDB.craftOrderQueue == 0 and next(MerchantMasterDB.crateTurnInQueue) == nil,
+		"RegA: Clicking Clear Queue -> clears OrderFlow, craftOrderQueue, and crateTurnInQueue")
+
+	-- Header Clear button works equivalently
+	of.LoadFromShoppingRows(buyCraftRows, { title = "Header Clear Test" })
+	MerchantMasterDB.crateTurnInQueue = { ["998"] = 1 }
+	modal.clearBtn:Click("LeftButton")
+	check(not of.HasAnyItems() and next(MerchantMasterDB.crateTurnInQueue) == nil,
+		"RegA: Clicking header Clear button clears OrderFlow and crateTurnInQueue")
+
+	app.exitAHBuyingMode(false)
+	_G.AuctionHouseFrame = origAHF
+	_G.MailFrame = origMailF
+	_G.TradeSkillFrame = origTSF
+	_G.C_Container = origCCont
+	app.getBagCountByID = origGetBag
+	app.getItemOwnershipBreakdown = origOwn
+	app.getOrderFlowCartSignature = origSendSig
+end
+runCraftCompleteClearAndRebuyRegression()
+
+-- 23. Regression B: Alt Bank Stays ALT Despite AH Mail (No False Conversion + Genuine Alt Mail Split)
+local function runAltBankVsMailRegression()
+	local origMailF = _G.MailFrame
+	local origNumItems = _G.GetInboxNumItems
+	local origHdrInfo = _G.GetInboxHeaderInfo
+	local origInvInfo = _G.GetInboxInvoiceInfo
+	local origGetItem = _G.GetInboxItem
+	local origGetLink = _G.GetInboxItemLink
+	local origOwn = app.getItemOwnershipBreakdown
+	local origGetBag = app.getBagCountByID
+
+	local inbox = {
+		{ sender = "Auction House", subj = "Auction won: Sun Copper (5)", invoice = "buyer",
+			atts = { { itemID = 95100, name = "Sun Copper", count = 5 } } },
+		{ sender = "Auction House", subj = "Auction expired: Sun Copper (3)", invoice = "seller",
+			atts = { { itemID = 95100, name = "Sun Copper", count = 3 } } },
+	}
+	_G.MailFrame = { IsShown = function() return true end }
+	_G.GetInboxNumItems = function() return #inbox, #inbox end
+	_G.GetInboxHeaderInfo = function(idx)
+		local m = inbox[idx]
+		if not m then return nil end
+		return nil, nil, m.sender, m.subj, 0, 0, 30, #m.atts
+	end
+	_G.GetInboxInvoiceInfo = function(idx)
+		local m = inbox[idx]
+		return m and m.invoice or nil
+	end
+	_G.GetInboxItem = function(idx, aIdx)
+		local att = inbox[idx] and inbox[idx].atts[aIdx]
+		if not att then return nil end
+		return att.name, att.itemID, 134400, att.count, 1, true
+	end
+	_G.GetInboxItemLink = function(idx, aIdx)
+		local att = inbox[idx] and inbox[idx].atts[aIdx]
+		return att and ("|cffffffff|Hitem:" .. tostring(att.itemID) .. "::::::::60:::::::|h[" .. att.name .. "]|h|r") or nil
+	end
+	app.getBagCountByID = function() return 0 end
+	app.getItemOwnershipBreakdown = function(id)
+		if id == 95100 then
+			return { bags = 0, bank = 0, mail = 0, alts = { { name = "Bankalt", location = "Bank", qty = 5 } } }
+		end
+		return { bags = 0, bank = 0, mail = 0, alts = {} }
+	end
+
+	of.LoadFromShoppingRows({
+		{ name = "Sun Copper", itemID = 95100, qty = 5, ownedUsed = 5, ahUnitPrice = 400 },
+	}, { title = "Alt vs AH Mail", ownershipProvider = app.getItemOwnershipBreakdown })
+
+	-- Simulate AH buying the remaining 5 -> creates a MAIL row for 5 beside the ALT Bank row for 5
+	of.GetState().stages.ah.items[1].bought = 0
+	if of.SetActiveStage then of.SetActiveStage("collect") end
+	local colItems = of.GetState().stages.collect.items
+	colItems[#colItems + 1] = {
+		itemID = 95100, name = "Sun Copper", source = "mail", needed = 5, collected = 0, remaining = 5,
+		status = "pending", purchasedFromAH = true,
+	}
+
+	if of.OnMailShow then of.OnMailShow() end
+	of.ScanOpenMailbox()
+	local foundAlt, foundAHMail = nil, nil
+	for _, it in ipairs(of.GetState().stages.collect.items) do
+		if it.itemID == 95100 and it.source == "alt" then foundAlt = it
+		elseif it.itemID == 95100 and it.source == "mail" then foundAHMail = it end
+	end
+	check(foundAlt ~= nil and foundAlt.status == "alt_info" and foundAlt.needed == 5,
+		"RegB: Alt Bank item remains ALT (alt_info, 5x) even with AH buyer + AH expired mail in inbox")
+	check(foundAHMail ~= nil and foundAHMail.status == "ready" and foundAHMail.needed == 5,
+		"RegB: AH mail entry matches inbox attachment as MAIL (ready, 5x)")
+
+	-- Direct CollectFromMail on ALT index refuses cleanly
+	local altIdx = nil
+	for idx, it in ipairs(of.GetState().stages.collect.items) do
+		if it.source == "alt" and it.itemID == 95100 then altIdx = idx; break end
+	end
+	local colAltOk, colAltErr = of.CollectFromMail(altIdx)
+	check(colAltOk == false and colAltErr == "not_mail_item" and of.GetState().stages.collect.items[altIdx].source == "alt",
+		"RegB: CollectFromMail rejects source=='alt' without converting it to 'mail'")
+
+	-- RestoreState self-healing on saved legacy mail row holding altOwners/altLabel
+	local savedCorrupt = of.SerializeState()
+	for _, it in ipairs(savedCorrupt.stages.collect.items) do
+		if it.source == "alt" and it.itemID == 95100 then
+			it.source = "mail"
+			it.status = "pending"
+		end
+	end
+	of.ClearSavedState()
+	MerchantMasterDB.orderFlowState = savedCorrupt
+	of.RestoreState()
+	local healedAlt = nil
+	for _, it in ipairs(of.GetState().stages.collect.items) do
+		if it.source == "alt" and it.altOwners and #it.altOwners > 0 then healedAlt = it; break end
+	end
+	check(healedAlt ~= nil and healedAlt.status == "alt_info",
+		"RegB: RestoreState self-heals saved mail row with altOwners/altLabel back to source='alt', status='alt_info'")
+
+	-- Genuine non-AH mail sent directly by Bankalt-Realm splits cleanly without wiping remaining Alt Bank qty!
+	inbox[3] = { sender = "Bankalt-Forever", subj = "Here is some copper", invoice = nil,
+		atts = { { itemID = 95100, name = "Sun Copper", count = 3 } } }
+	of.ScanOpenMailbox()
+	local altAfterSplit, altMailRow = nil, nil
+	for _, it in ipairs(of.GetState().stages.collect.items) do
+		if it.itemID == 95100 and it.source == "alt" then altAfterSplit = it
+		elseif it.itemID == 95100 and it.source == "mail" and it.purchasedFromAH ~= true then altMailRow = it end
+	end
+	check(altAfterSplit ~= nil and altAfterSplit.needed == 2 and altAfterSplit.altLabel == "On Alt: Bankalt (Bank 2x)",
+		"RegB: Genuine 3x non-AH mail from Bankalt leaves remaining 2x as ALT ('Bankalt (Bank 2x)')")
+	check(altMailRow ~= nil and altMailRow.needed == 3 and altMailRow.status == "ready",
+		"RegB: Genuine 3x non-AH mail from Bankalt splits into its own ready MAIL entry")
+	-- Re-scanning is idempotent (no duplicate deduction)
+	of.ScanOpenMailbox()
+	check(altAfterSplit.needed == 2 and altMailRow.needed == 3,
+		"RegB: Second ScanOpenMailbox is idempotent after alt-mail split")
+
+	of.ClearSavedState()
+	_G.MailFrame = origMailF
+	_G.GetInboxNumItems = origNumItems
+	_G.GetInboxHeaderInfo = origHdrInfo
+	_G.GetInboxInvoiceInfo = origInvInfo
+	_G.GetInboxItem = origGetItem
+	_G.GetInboxItemLink = origGetLink
+	app.getItemOwnershipBreakdown = origOwn
+	app.getBagCountByID = origGetBag
+end
+runAltBankVsMailRegression()
+
+-- 24. Regression C: Standalone MM Sell AH Tab (LibAHTab, Drag-and-Drop, Categories, Sub-Tabs)
+local function runStandaloneMMSellTabRegression()
+	local origAHF = _G.AuctionHouseFrame
+	local origAH = _G.C_AuctionHouse
+	local origCCont = _G.C_Container
+	local origCurInfo = _G.GetCursorInfo
+	local origClearCur = _G.ClearCursor
+	local origGetItemInfo = _G.GetItemInfo
+	local origCItem = _G.C_Item
+
+	local mockTabs = { CreateFrame("Button", "MockAHBuyTab", UIParent), CreateFrame("Button", "MockAHSellTab", UIParent) }
+	local ahTitle = ""
+	local displayModeHooked = {}
+	local ahShown = true
+	local mockFullAH = CreateFrame("Frame", "MockFullAHFrame", UIParent)
+	mockFullAH:SetSize(820, 540)
+	mockFullAH.Tabs = mockTabs
+	mockFullAH.IsShown = function() return ahShown end
+	mockFullAH.SetTitle = function(_, t) ahTitle = t end
+	mockFullAH.SetDisplayMode = function(_, mode)
+		-- Trigger posthooks on fallback lib if hooksecurefunc isn't stubbed
+		for _, fn in ipairs(displayModeHooked) do fn(mockFullAH, mode) end
+	end
+	local origHookSec = _G.hooksecurefunc
+	_G.hooksecurefunc = function(tbl, fnName, cb)
+		if tbl == mockFullAH and fnName == "SetDisplayMode" then
+			displayModeHooked[#displayModeHooked + 1] = cb
+		elseif origHookSec then
+			return origHookSec(tbl, fnName, cb)
+		end
+	end
+	_G.AuctionHouseFrame = mockFullAH
+
+	local bagItems = {
+		[1] = { itemID = 96001, stackCount = 1, isLocked = false, isBound = false, quality = 3,
+			hyperlink = "|cff0070dd|Hitem:96001::::::::60:::::::|h[Runed Sword]|h|r" },
+		[2] = { itemID = 96002, stackCount = 1, isLocked = false, isBound = true, quality = 3,
+			hyperlink = "|cff0070dd|Hitem:96002::::::::60:::::::|h[Bound Helmet]|h|r" },
+		[3] = { itemID = 96003, stackCount = 5, isLocked = false, isBound = false, quality = 1,
+			hyperlink = "|cffffffff|Hitem:96003::::::::60:::::::|h[Mana Draft]|h|r" },
+		[4] = { itemID = 96004, stackCount = 10, isLocked = false, isBound = false, quality = 2,
+			hyperlink = "|cff1eff00|Hitem:96004::::::::60:::::::|h[Green Gem]|h|r" },
+	}
+	local metaTbl = {
+		[96001] = { name = "Runed Sword", classID = 2, quality = 3, ilvl = 55, maxStack = 1, sell = 1000 },
+		[96002] = { name = "Bound Helmet", classID = 4, quality = 3, ilvl = 55, maxStack = 1, sell = 1000 },
+		[96003] = { name = "Mana Draft", classID = 0, quality = 1, ilvl = 20, maxStack = 20, sell = 50 },
+		[96004] = { name = "Green Gem", classID = 7, quality = 2, ilvl = 30, maxStack = 20, sell = 250 },
+	}
+	local bagDirtyReset = function()
+		app.bagsDirty = true
+		app.bagCountsDirty = true
+		app.cachedBagCountsByID = nil
+	end
+	bagDirtyReset()
+
+	_G.GetItemInfo = function(idOrLink)
+		local id = tonumber(idOrLink) or (type(idOrLink) == "string" and tonumber(idOrLink:match("item:(%d+)")))
+		local m = id and metaTbl[id]
+		if m then
+			return m.name, bagItems[1] and bagItems[1].hyperlink or ("item:" .. id), m.quality, m.ilvl, 1, "Misc", "Misc", m.maxStack, "", 134400, m.sell, m.classID, 0, 0, 0, nil, false
+		end
+		return origGetItemInfo and origGetItemInfo(idOrLink) or nil
+	end
+	_G.C_Item = {
+		GetItemInfo = _G.GetItemInfo,
+		GetDetailedItemLevelInfo = function(idOrLink)
+			local id = tonumber(idOrLink) or (type(idOrLink) == "string" and tonumber(idOrLink:match("item:(%d+)")))
+			return (id and metaTbl[id] and metaTbl[id].ilvl) or nil
+		end,
+		DoesItemExist = function() return true end,
+		IsBound = function(loc)
+			local slot = loc and bagItems[loc.slotIndex]
+			return slot and slot.isBound == true or false
+		end,
+		GetItemIconByID = function() return 134400 end,
+	}
+	_G.C_Container = {
+		GetContainerNumSlots = function(b) return (b == 0) and 4 or 0 end,
+		GetContainerItemInfo = function(b, s) return (b == 0) and bagItems[s] or nil end,
+	}
+	_G.C_AuctionHouse = {
+		IsSellItemValid = function(loc)
+			local slot = loc and bagItems[loc.slotIndex]
+			return not (slot and slot.isBound == true)
+		end,
+		GetItemCommodityStatus = function(loc)
+			local slot = loc and bagItems[loc.slotIndex]
+			return (slot and metaTbl[slot.itemID] and metaTbl[slot.itemID].maxStack == 1) and 1 or 2
+		end,
+		GetItemKeyFromItem = function(loc)
+			local slot = loc and bagItems[loc.slotIndex]
+			return { itemID = slot and slot.itemID or 0, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 }
+		end,
+		MakeItemKey = function(id) return { itemID = id, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 } end,
+		GetItemKeyInfo = function() return { isCommodity = true } end,
+		SendSellSearchQuery = function() end,
+		SendSearchQuery = function() end,
+		IsThrottledMessageSystemReady = function() return true end,
+	}
+
+	local cursorCleared = 0
+	_G.ClearCursor = function() cursorCleared = cursorCleared + 1 end
+	_G.GetCursorInfo = function() return nil end
+
+	of.ClearSavedState()
+	local tab = ns.AHSellTab
+	tab.EnsureAttached()
+	check(tab.tabButton and tab.tabButton:GetText() == "MM Sell",
+		"RegC: Standalone AH tab attaches cleanly with label 'MM Sell'")
+
+	tab.SelectTab()
+	check(tab.IsShown() and ahTitle == "MerchantMaster - Sell",
+		"RegC: Selecting MM Sell shows tab frame and sets AH title to 'MerchantMaster - Sell'")
+
+	mockFullAH:SetDisplayMode({ 1 })
+	check(not tab.IsShown(), "RegC: Switching AH displayMode hides MM Sell tab cleanly")
+
+	SlashCmdList.MERCHANTMASTER("sell")
+	check(tab.IsShown(), "RegC: /mm sell selects MM Sell tab when Auction House is open")
+
+	-- Drag-and-drop: valid sword adds; soulbound helmet rejects & clears cursor!
+	local okDropSword = tab.HandleBagDrop(0, 1)
+	check(okDropSword == true and #of.GetState().stages.sell.items == 1 and of.GetState().stages.sell.items[1].itemID == 96001,
+		"RegC: Drag/drop bag item adds sellable Weapon (96001) to MM Sell")
+
+	cursorCleared = 0
+	local okDropBound, errDropBound = tab.HandleBagDrop(0, 2)
+	check(okDropBound == false and errDropBound == "bound" and cursorCleared >= 1,
+		"RegC: Drag/drop rejects soulbound item cleanly and clears cursor")
+
+	-- Bag categories rendered on left pane (Weapon, Consumable, Trade Goods; Bound Helmet excluded)
+	local hdrTexts = {}
+	for _, h in ipairs(tab.sellBagCatHdrs or {}) do
+		if h:IsShown() then hdrTexts[#hdrTexts + 1] = stripColors(h:GetText()) end
+	end
+	local hasWep, hasCons, hasTG = false, false, false
+	for _, ht in ipairs(hdrTexts) do
+		if ht == "Weapon" then hasWep = true
+		elseif ht == "Consumable" then hasCons = true
+		elseif ht == "Trade Goods" then hasTG = true end
+	end
+	check(hasWep and hasCons and hasTG,
+		"RegC: Left bag grid groups items by category headers (Weapon, Consumable, Trade Goods)")
+
+	-- Price History sub-tab renders daily trend points cleanly
+	local econ = ns.DetectActiveEconomy and ns.DetectActiveEconomy() or "Alliance"
+	local origDaily = MerchantMasterDB and MerchantMasterDB.ahDaily
+	MerchantMasterDB = MerchantMasterDB or {}
+	MerchantMasterDB.ahDaily = MerchantMasterDB.ahDaily or {}
+	MerchantMasterDB.ahDaily[econ] = MerchantMasterDB.ahDaily[econ] or {}
+	local curDay = math.floor(((time and time()) or 1700000000) / 86400)
+	MerchantMasterDB.ahDaily[econ][96001] = {
+		{ d = curDay - 1, lastP = 42000, lastQ = 12 },
+		{ d = curDay, lastP = 45000, lastQ = 8 },
+	}
+	tab.SetSubTab("history")
+	check(tab.sellHistoryView:IsShown() and tab.sellHistoryRows[1]:IsShown(),
+		"RegC: Price History sub-tab renders recorded daily price rows for active item")
+
+	-- Sell Queue sub-tab + Clear Queue button
+	tab.SetSubTab("queue")
+	check(tab.sellQueueView:IsShown() and tab.sellQueueClearBtn:IsEnabled(),
+		"RegC: Sell Queue sub-tab shows queue and enabled Clear button")
+	tab.sellQueueClearBtn:Click("LeftButton")
+	check(#of.GetState().stages.sell.items == 0 and not tab.sellQueueClearBtn:IsEnabled(),
+		"RegC: Clicking Clear in Sell Queue sub-tab empties queue and disables Clear")
+
+	-- Closing AH hides tab and clears SPACE binding
+	tab.OnAuctionHouseClosed()
+	check(not tab.IsShown(), "RegC: Closing AH hides MM Sell tab cleanly")
+
+	-- Auctionator LibAHTab-1-0 compatibility: CreateTab returns nil & tabFrame reparents to AuctionHouseFrame
+	local origLibStub = _G.LibStub
+	local extTabs = {}
+	local extBtn = CreateFrame("Button", "LibAHFrame-1.0-MerchantMaster_Sell", UIParent)
+	local extSelected = nil
+	local extLibAHTab = {
+		DoesIDExist = function(_, id) return extTabs[id] ~= nil end,
+		CreateTab = function(_, id, attachedFrame, displayText, tabHeader)
+			extTabs[id] = { frameRef = attachedFrame, displayText = displayText, tabHeader = tabHeader, btn = extBtn }
+			extBtn:SetText(displayText)
+			attachedFrame:Hide()
+			return nil
+		end,
+		GetButton = function(_, id) return extTabs[id] and extTabs[id].btn or nil end,
+		SetSelected = function(_, id)
+			extSelected = id
+			if extTabs[id] and extTabs[id].frameRef then extTabs[id].frameRef:Show() end
+		end,
+	}
+	_G.LibStub = setmetatable({}, {
+		__call = function(_, name)
+			if name == "LibAHTab-1-0" then return extLibAHTab end
+			if origLibStub then return origLibStub(name) end
+			return nil
+		end,
+	})
+	local mockAuctionatorAH = CreateFrame("Frame", "MockAuctionatorAHFrame", UIParent)
+	mockAuctionatorAH:SetSize(820, 540)
+	mockAuctionatorAH.Tabs = { CreateFrame("Button", "MockAucTab1", UIParent) }
+	mockAuctionatorAH.IsShown = function() return true end
+	mockAuctionatorAH.SetDisplayMode = function() end
+	_G.AuctionHouseFrame = mockAuctionatorAH
+	tab.EnsureAttached()
+	check(tab.tabButton == extBtn and extBtn:GetText() == "MM Sell",
+		"RegC: Real LibAHTab CreateTab returning nil resolves tabButton via GetButton")
+	check(tab.frame and tab.frame.GetParent and tab.frame:GetParent() == mockAuctionatorAH,
+		"RegC: EnsureAttached reparents MM Sell frame onto active AuctionHouseFrame")
+	tab.SelectTab()
+	check(extSelected == "MerchantMaster_Sell" and tab.IsShown(),
+		"RegC: SelectTab delegates through external LibAHTab SetSelected cleanly")
+	tab.OnAuctionHouseClosed()
+	_G.LibStub = origLibStub
+
+	if MerchantMasterDB then
+		if MerchantMasterDB.ahDaily and MerchantMasterDB.ahDaily[econ] then
+			MerchantMasterDB.ahDaily[econ][96001] = nil
+		end
+		MerchantMasterDB.ahDaily = origDaily
+	end
+	_G.hooksecurefunc = origHookSec
+	_G.AuctionHouseFrame = origAHF
+	_G.C_AuctionHouse = origAH
+	_G.C_Container = origCCont
+	_G.GetCursorInfo = origCurInfo
+	_G.ClearCursor = origClearCur
+	_G.GetItemInfo = origGetItemInfo
+	_G.C_Item = origCItem
+	bagDirtyReset()
+end
+runStandaloneMMSellTabRegression()
+
+print("PASS: test_cart_buyer (" .. n .. " assertions)")
