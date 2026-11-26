@@ -59,6 +59,20 @@ On a fresh install, the top status capsule displays **No AH Scan Yet** and the D
 
 ---
 
+## Optional: Automatic AH Snapshots & 7x24 Heatmaps
+
+MerchantMaster runs 100% standalone from live in-game scans. If you also want automatic 15-minute Blizzard Auction House snapshots, a 30-day local market database, 7x24 heatmaps, and 7-day sales velocity running in the background while WoW is closed, install the separate lightweight companion [JustBenji/MerchantMaster-Snapshots](https://github.com/JustBenji/MerchantMaster-Snapshots) (pure Python stdlib, zero executables, zero files added to the WowUp addon `.zip`):
+
+*   **Requirements:** **Python 3.11+** ([python.org/downloads](https://www.python.org/downloads/) or `winget install Python.Python.3.12`) and a free [Battle.net API key](https://develop.battle.net/access/clients).
+*   **1-Line PowerShell Install & Setup GUI:**
+    ```powershell
+    py -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; py -m snapshot_builder setup-gui
+    ```
+    *(If `py` is not recognized, replace both `py` with `python`.)*
+*   **Zero In-Game Folder Setup:** The Setup GUI auto-detects `<WoW>\_forever_\Interface\AddOns` (or lets you click **Browse...**), writes the sibling `MerchantMaster_Snapshots` addon automatically, and schedules background syncs—just enter your API key, choose your server, click **Save, Schedule & Sync Now**, and run `/reload` in WoW.
+
+---
+
 ## WoW Forever Economy Glossary
 
 *   **Live AH & `AH_SELL` (`MM Sell` Tab):** Captures current floor prices (`ahPrices`), a 72-hour scan ring buffer (`ahHistory`), and rolling daily buckets (`ahDaily`) per economy, paired with the integrated **MM Sell** Auction House tab for fast undercut posting, posting queues, and auction tracking.
