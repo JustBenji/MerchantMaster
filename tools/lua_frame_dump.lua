@@ -4997,6 +4997,7 @@ if not cartAhOnly then
 		sizeSkinViewport("goblin")
 		applySkin("goblin")
 		switchTab("console_setup2")
+		if ns.UIConsole and ns.UIConsole.SyncExtensions then ns.UIConsole.SyncExtensions() end
 		if app.refreshSkinLayout then app.refreshSkinLayout() end
 		drainTimers(500)
 		flushPendingLayout()
@@ -5008,23 +5009,74 @@ if not cartAhOnly then
 	end
 	end
 
-	-- console-snapshots2-goblin: Console -> Snapshot Settings 2 (GitHub Auto-Sync V2)
+	-- console-snapshots2-goblin: Console -> MerchantMasterSync (Install state)
 	if not onlyScenes or onlyScenes["console-snapshots2-goblin"] then
 	do
 		local priorSnapRaw, priorSnapParsed, priorSnapHeat = ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache
 		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = {}, {}, {}
+		local priorExt = app.snapshotExtension
+		app.snapshotExtension = nil
 		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
 
 		sizeSkinViewport("goblin")
 		applySkin("goblin")
 		switchTab("console_setup2")
+		if ns.UIConsole and ns.UIConsole.SyncExtensions then ns.UIConsole.SyncExtensions() end
 		if app.refreshSkinLayout then app.refreshSkinLayout() end
 		drainTimers(500)
 		flushPendingLayout()
 		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
 		dumpScene("console-snapshots2-goblin")
 
+		app.snapshotExtension = priorExt
 		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = priorSnapRaw, priorSnapParsed, priorSnapHeat
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+	end
+	end
+
+	-- console-snapshots2-insync-goblin: Console -> MerchantMasterSync (In Sync glowing green orb state)
+	if not onlyScenes or onlyScenes["console-snapshots2-insync-goblin"] then
+	do
+		local priorExt = app.snapshotExtension
+		local priorBgMode = _G.MerchantMasterDB and _G.MerchantMasterDB.backgroundPriceMode
+		local priorGetMeta = ns.Pricing and ns.Pricing.GetSnapshotSystemMeta
+		if type(_G.MerchantMasterDB) == "table" then
+			_G.MerchantMasterDB.backgroundPriceMode = "local"
+			_G.MerchantMasterDB.useTSMPrices = false
+		end
+		app.snapshotExtension = {
+			apiVersion = 1,
+			version = "2.1.0",
+			supportsOsMode = true,
+		}
+		if ns.Pricing then
+			ns.Pricing.GetSnapshotSystemMeta = function()
+				return {
+					totalRuns = 148,
+					dbBytes = 256820000,
+					exportBytes = 8390000,
+					intervalMin = 15,
+					exportedAt = os.time(),
+				}
+			end
+		end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+
+		sizeSkinViewport("goblin")
+		applySkin("goblin")
+		switchTab("console_setup2")
+		if ns.UIConsole and ns.UIConsole.SyncExtensions then ns.UIConsole.SyncExtensions() end
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		drainTimers(500)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("console-snapshots2-insync-goblin")
+
+		if ns.Pricing then ns.Pricing.GetSnapshotSystemMeta = priorGetMeta end
+		app.snapshotExtension = priorExt
+		if type(_G.MerchantMasterDB) == "table" then
+			_G.MerchantMasterDB.backgroundPriceMode = priorBgMode
+		end
 		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
 	end
 	end

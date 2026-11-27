@@ -184,12 +184,12 @@ Spot mispriced auctions quickly after a scan, whether you want historical-gap fl
 *   **Disenchant Sniper** covers all `3,438` disenchantable WoW Forever DB2 weapons/armor (plus craftables and live `Browse` scaling synthesis) using **Scan All Equipment** (server-filtered Weapons + Armor in Uncommon/Rare/Epic) and a light O(1) Stage-1 EV pre-filter before Stage-2 Buy Moat calculation.
 *   Synchronous click-to-buy workflow with live price ladders for WoW Forever compliance.
 
-### 17. Console & Snapshot Settings
-Inspect addon storage, switch themes, configure Mail presets, generate redacted bug reports, or set up optional background snapshots.
+### 17. Console & MerchantMasterSync
+Inspect addon storage, switch themes, configure Mail presets, generate redacted bug reports, or enable automatic background snapshots.
 
 ![Console and Snapshot Settings](.previews/17-baron-console-snapshots.png)
 
-*   **Snapshot Settings (`/mm snapshots`):** Includes a mutually exclusive 3-way **Price Refresh Mode** selector (`Local Snapshot` | `TSM Light` | `None (Manual AH)`) alongside **Windows** (PowerShell), **Linux / Steam Deck** (`install_linux.py`), and **macOS** setup cards plus live database and WoW AddOn folder status. `Local Snapshot` and `TSM Light` are mutually exclusive: switching to **TSM Light** writes hourly refreshed prices into MerchantMaster's tables (requiring both the **TradeSkillMaster** addon and **TSM Desktop App** locally) while pausing local snapshot reads, 7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth; switching to **None (Manual AH)** pauses both external feeds cleanly.
+*   **MerchantMasterSync (`/mm snapshots`):** Features an Apple-style hero status card with an **Install** prompt for the portable desktop app (turning to a glowing green **In Sync** orb once connected), a mutually exclusive 3-way **Price Refresh Mode** selector (`Local Snapshot` | `TSM Light` | `None (Manual AH)`), and a collapsed **Terminal / Advanced** drawer with Windows (PowerShell), Linux / Steam Deck (`install_linux.py`), and macOS CLI commands. `Local Snapshot` and `TSM Light` never mix: switching to **TSM Light** pulls hourly prices when both the **TradeSkillMaster** addon and **TSM Desktop App** are running while pausing local snapshot reads, 7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth; switching to **None (Manual AH)** pauses both external feeds cleanly.
 *   **Top Header Freshness Pill:** Displays the active market data source and age without clipping: `TSM <time>` (`TSM Light`), `Snap <time>` (`Local Snapshot`), or `AH <time>` (manual in-game scan), with the active refresh mode and timestamps shown on hover.
 *   **Database (`/mm db`):** Inspects WoW SavedVariables alongside the dedicated **AH Snapshot Storage (On Disk)** card (`SQLite DB`, `WAL`, `SHM`, `Sync Log`, row counts, active DB path, and combined total).
 *   Reports clearly if `MerchantMaster_Snapshots` is installed on disk but unchecked in **Esc -> AddOns**, with a manual **Refresh** button to retry loading.
@@ -227,9 +227,9 @@ On a fresh install, the top status capsule shows **No AH Scan Yet** and Today's 
 
 ## Optional: Automatic AH Snapshots & 7x24 Heatmaps
 
-MerchantMaster works 100% standalone from in-game Auction House scans. If you also want automatic Auction House updates, 30 days of price history, 7x24 demand heatmaps, and 7-day sales speed while WoW is closed, install the free optional companion [JustBenji/MerchantMaster-Snapshots](https://github.com/JustBenji/MerchantMaster-Snapshots) (**no Battle.net API key required**).
+MerchantMaster works 100% standalone from in-game Auction House scans. If you also want automatic Auction House updates, 30 days of price history, 7x24 demand heatmaps, and 7-day sales speed while WoW is closed, download the portable **MerchantMasterSync** tray app from [JustBenji/MerchantMaster-Snapshots](https://github.com/JustBenji/MerchantMaster-Snapshots/releases/latest) (**no Battle.net API key or terminal commands required**).
 
-You can copy the exact command for your OS anytime inside WoW under **Console -> Snapshot Sync** (`/mm snapshots`):
+Open **Console -> MerchantMasterSync** (`/mm snapshots`) inside WoW for the one-click **Install** link and green **In Sync** indicator, or expand **Terminal / Advanced** for optional CLI setup:
 
 *   **Windows (PowerShell, Python 3.11+):**
     ```powershell
@@ -292,7 +292,7 @@ Aliases: `/mm`, `/merchantmaster`, `/crates`, `/waylaid`
 | `/mm shopping` | Toggle the detachable **Shopping List** window (also `/mm shop`) |
 | `/mm sell` | Select the **MM Sell** tab while at the Auction House |
 | `/mm mail` | Open **Console -> Mail** (Preset Recipients & send safety net) |
-| `/mm snapshots` | Open **Console -> Snapshot Settings** (optional background helper setup) |
+| `/mm snapshots` | Open **Console -> MerchantMasterSync** (desktop app & Price Refresh Mode) |
 | `/mm db` | Open **Console -> Database** (SavedVariables & disk snapshot storage) |
 | `/mm console` | Open **Console** overview, diagnostics, and Debug Bundle tools |
 | `/mm options` | Open **Console -> Settings** (`/mm blizzoptions` for Blizzard Settings) |

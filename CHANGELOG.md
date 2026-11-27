@@ -2,6 +2,10 @@
 
 All notable player-facing changes to **MerchantMaster** are documented in this file.
 
+## [3.3.5] - 2026-11-28
+
+*   **MerchantMasterSync Apple-Style Tab (`/mm snapshots`):** Replaced the CLI wall on Console's **Snapshot Sync** tab with the clean **MerchantMasterSync** experience featuring a centered status orb (**Install** before setup, glowing green **In Sync** once active), a one-click **Install** release link for the new portable **MerchantMasterSync** desktop tray app (Windows, Linux, and macOS), the compact 3-way **Price Refresh Mode** bar (`Local Snapshot` | `TSM Light` | `None (Manual AH)`), and a collapsed-by-default **Terminal / Advanced** drawer for command-line power users.
+
 ## [3.3.4] - 2026-11-27
 
 *   **GoblinTV Broadcast Overview & Neutral Volume Bars:** Added the multi-pane **GoblinTV** overview (`Today's Overview`), unified `GoblinTV | Morning Brief | Market Pulse` switcher, and neutral-blue volume histogram bars across price and profit charts (reserving green/red strictly for price direction).

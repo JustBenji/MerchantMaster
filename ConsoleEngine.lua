@@ -505,6 +505,7 @@ CE.INSTALL_COMMANDS_V2 = {
 	linuxUninstall = "~/.local/bin/mm-snapshots uninstall-task",
 	macosRebuild = "python3 -m snapshot_builder sync --source github --force",
 	macosUninstall = "python3 -m snapshot_builder uninstall-task",
+	desktopAppUrl = "https://github.com/JustBenji/MerchantMaster-Snapshots/releases/latest",
 	dataRepoUrl = "https://github.com/JustBenji/MerchantMaster-SnapshotData",
 	guideUrl = "https://github.com/JustBenji/MerchantMaster-Snapshots",
 }

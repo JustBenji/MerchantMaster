@@ -3,7 +3,7 @@
 --   1. Overview            (RAM, SavedVariables, Live AH scans, Health, optional Snapshot cards)
 --   2. Database            (WoW SavedVariables schema inspector + optional SQLite companion tables)
 --   3. Perf & Debug        (Zero-overhead opt-in runtime profiler & privacy-safe Debug Bundle)
---   4. Snapshot Sync       (GitHub Auto-Sync & 3-way Price Refresh Mode)
+--   4. MerchantMasterSync  (Apple-style Sync Companion, Price Refresh Mode & Advanced CLI)
 --   5. Settings            (Synced /mm options, Leveling guide, tooltip settings)
 --   6. Mail                (Saved mail recipients, mailbox quick-pick buttons & safety net)
 --   7. Tooltip Setup       (Item tooltip sections, price format, modifier & live example preview)
@@ -1575,7 +1575,7 @@ local function buildPerfView(parent)
 end
 
 ---------------------------------------------------------------------------------------------------
--- Sub-View 4: Snapshot Sync - GitHub Auto-Sync (Zero API Key) (console_setup2)
+-- Sub-View 4: MerchantMasterSync - Apple-Style Sync & Price Refresh Mode (console_setup2)
 ---------------------------------------------------------------------------------------------------
 
 local function buildSetupV2View(parent)
@@ -1585,6 +1585,8 @@ local function buildSetupV2View(parent)
 
 	local v2 = {
 		frame = frame,
+		advExpanded = false,
+		showDownloadRow = false,
 	}
 
 	local function addCardAccent(card, r, g, b, a)
@@ -1597,39 +1599,127 @@ local function buildSetupV2View(parent)
 		return bar
 	end
 
-	-- Top Status & Feed Summary Card
+	-- 1. Hero Status Card (Apple-like minimal Install / glowing green In Sync card)
 	local statusCard = createSurfaceCard(frame, "glass_r12", "cardBg")
 	statusCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
 	statusCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
-	statusCard:SetHeight(72)
-	addCardAccent(statusCard, 0.24, 0.84, 0.48, 0.90)
+	statusCard:SetHeight(272)
+	v2.heroAccent = addCardAccent(statusCard, 0.24, 0.84, 0.48, 0.90)
 	v2.statusCard = statusCard
 
-	local stTitle = makeFs(statusCard, 13, "semibold", "text")
-	stTitle:SetPoint("TOPLEFT", statusCard, "TOPLEFT", 14, -8)
-	stTitle:SetPoint("TOPRIGHT", statusCard, "TOPRIGHT", -14, -8)
-	stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - Zero API Key)")
+	local T = getTheme()
+	local assets = T and T.ASSETS or nil
+	local circleFill = (assets and assets.circle_fill) or "Interface\\AddOns\\MerchantMaster\\Assets\\apple\\circle_fill"
+	local circleStroke = (assets and assets.circle_stroke) or "Interface\\AddOns\\MerchantMaster\\Assets\\apple\\circle_stroke"
+
+	local orbWrap = CreateFrame("Frame", nil, statusCard)
+	orbWrap:SetSize(52, 52)
+	orbWrap:SetPoint("TOP", statusCard, "TOP", 0, -16)
+	v2.orbWrap = orbWrap
+
+	local orbHalo = orbWrap:CreateTexture(nil, "ARTWORK", nil, 1)
+	orbHalo:SetAllPoints(orbWrap)
+	if orbHalo.SetTexture then orbHalo:SetTexture(circleFill) end
+	if orbHalo.SetVertexColor then orbHalo:SetVertexColor(0.20, 0.82, 0.46, 0.22) end
+	v2.orbHalo = orbHalo
+
+	local orbRing = orbWrap:CreateTexture(nil, "ARTWORK", nil, 2)
+	orbRing:SetSize(38, 38)
+	orbRing:SetPoint("CENTER", orbWrap, "CENTER", 0, 0)
+	if orbRing.SetTexture then orbRing:SetTexture(circleStroke) end
+	if orbRing.SetVertexColor then orbRing:SetVertexColor(0.20, 0.82, 0.46, 0.45) end
+	v2.orbRing = orbRing
+
+	local orbDot = orbWrap:CreateTexture(nil, "ARTWORK", nil, 3)
+	orbDot:SetSize(18, 18)
+	orbDot:SetPoint("CENTER", orbWrap, "CENTER", 0, 0)
+	if orbDot.SetTexture then orbDot:SetTexture(circleFill) end
+	if orbDot.SetVertexColor then orbDot:SetVertexColor(0.20, 0.82, 0.46, 1.0) end
+	v2.orbDot = orbDot
+
+	local stTitle = makeFs(statusCard, 20, "semibold", "text", "CENTER")
+	stTitle:SetPoint("TOP", orbWrap, "BOTTOM", 0, -6)
+	stTitle:SetSize(680, 26)
+	stTitle:SetText("MerchantMasterSync")
 	v2.stTitle = stTitle
 
-	local stBody = makeFs(statusCard, 11, "regular", "textSecondary")
-	stBody:SetPoint("TOPLEFT", statusCard, "TOPLEFT", 14, -26)
-	stBody:SetPoint("TOPRIGHT", statusCard, "TOPRIGHT", -14, -26)
-	stBody:SetHeight(22)
+	local stBody = makeFs(statusCard, 11, "regular", "textSecondary", "CENTER")
+	stBody:SetPoint("TOP", stTitle, "BOTTOM", 0, -4)
+	stBody:SetSize(680, 26)
 	if stBody.SetJustifyV then stBody:SetJustifyV("TOP") end
 	if stBody.SetWordWrap then stBody:SetWordWrap(true) end
 	v2.stBody = stBody
 
-	local stFeed = makeFs(statusCard, 11, "regular", "textBlue")
-	stFeed:SetPoint("BOTTOMLEFT", statusCard, "BOTTOMLEFT", 14, 6)
-	stFeed:SetPoint("BOTTOMRIGHT", statusCard, "BOTTOMRIGHT", -14, 6)
+	local installBtn = createButton(statusCard, "Install", 168, 30, {
+		variant = "primary",
+		pill = true,
+		fontSize = 12,
+	})
+	installBtn:SetPoint("TOP", stBody, "BOTTOM", 0, -10)
+	attachTooltip(installBtn, "MerchantMasterSync Desktop App", {
+		"Portable zero-setup desktop tray app for Windows, macOS, and Linux.",
+		"Auto-detects your WoW _forever_ folder and keeps prices fresh every 15 minutes with zero code.",
+	})
+	v2.installBtn = installBtn
+
+	-- Ultra-clean 3-step visual strip shown before install
+	local stepRow = makeFs(statusCard, 11, "regular", "textSecondary", "CENTER")
+	stepRow:SetPoint("TOP", installBtn, "BOTTOM", 0, -14)
+	stepRow:SetSize(720, 20)
+	stepRow:SetText("1. Click Install    ->    2. Download & open MerchantMasterSync    ->    3. Type /reload in WoW")
+	v2.stepRow = stepRow
+
+	-- Compact URL drawer revealed cleanly when clicking Install / Download App
+	local downloadRow = CreateFrame("Frame", nil, statusCard)
+	downloadRow:SetSize(520, 44)
+	downloadRow:SetPoint("TOP", installBtn, "BOTTOM", 0, -10)
+	downloadRow:Hide()
+	v2.downloadRow = downloadRow
+
+	local downloadUrlBox = createSingleLineBox(downloadRow, 420, 24)
+	downloadUrlBox:SetPoint("TOPLEFT", downloadRow, "TOPLEFT", 0, 0)
+	v2.downloadUrlBox = downloadUrlBox
+
+	local downloadCopyBtn = createButton(downloadRow, "Copy Link", 92, 24, {
+		variant = "secondary",
+		pill = true,
+		fontSize = 10,
+	})
+	downloadCopyBtn:SetPoint("TOPRIGHT", downloadRow, "TOPRIGHT", 0, 0)
+	downloadCopyBtn:SetScript("OnClick", function()
+		selectAllInBox(downloadUrlBox)
+		if v2.stFeed then
+			v2.stFeed:SetText(colorHex("hexBlue", "Link highlighted - press Ctrl+C, open in your browser, run MerchantMasterSync, then /reload.", getPal()))
+		end
+	end)
+	v2.downloadCopyBtn = downloadCopyBtn
+
+	local downloadHintFs = makeFs(downloadRow, 10, "regular", "textMuted", "CENTER")
+	downloadHintFs:SetPoint("TOPLEFT", downloadUrlBox, "BOTTOMLEFT", 0, -4)
+	downloadHintFs:SetPoint("TOPRIGHT", downloadCopyBtn, "BOTTOMRIGHT", 0, -4)
+	downloadHintFs:SetText("Press Ctrl+C, open in your browser, run the portable MerchantMasterSync app, then /reload.")
+	v2.downloadHintFs = downloadHintFs
+
+	installBtn:SetScript("OnClick", function()
+		v2.showDownloadRow = true
+		v2.retheme()
+		selectAllInBox(v2.downloadUrlBox)
+		if v2.stFeed then
+			v2.stFeed:SetText(colorHex("hexBlue", "Link highlighted - press Ctrl+C, open in your browser, run MerchantMasterSync, then /reload.", getPal()))
+		end
+	end)
+
+	local stFeed = makeFs(statusCard, 10, "regular", "textBlue", "CENTER")
+	stFeed:SetPoint("BOTTOMLEFT", statusCard, "BOTTOMLEFT", 14, 10)
+	stFeed:SetPoint("BOTTOMRIGHT", statusCard, "BOTTOMRIGHT", -14, 10)
 	if stFeed.SetWordWrap then stFeed:SetWordWrap(true) end
-	stFeed:SetText("Public Feed: JustBenji/MerchantMaster-SnapshotData (tag: snapshots-live)  |  SHA256 verified before import")
+	stFeed:SetText("Public Feed: JustBenji/MerchantMaster-SnapshotData (tag: snapshots-live)")
 	v2.stFeed = stFeed
 
-	-- 3-Way Price Refresh Mode Card (Local Snapshot & TSM Light never mix)
+	-- 2. Compact 3-Way Price Refresh Mode Card (Local Snapshot & TSM Light never mix)
 	local tsmCard = createSurfaceCard(frame, "glass_r12", "cardBg")
-	tsmCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -80)
-	tsmCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -80)
+	tsmCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -280)
+	tsmCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -280)
 	tsmCard:SetHeight(72)
 	addCardAccent(tsmCard, 0.24, 0.72, 0.98, 0.90)
 	v2.tsmCard = tsmCard
@@ -1729,6 +1819,26 @@ local function buildSetupV2View(parent)
 	tsmSubFs:SetText("Manual in-game Auction House scans only. Both Local Snapshot background data and TSM Light are paused (Local Snapshot and TSM Light never mix).")
 	v2.tsmSubFs = tsmSubFs
 
+	-- 3. Collapsed-by-default Terminal / Advanced Drawer (PowerShell & Linux/macOS CLI commands)
+	local advToggleBtn = createButton(frame, "Terminal / Advanced >", 172, 24, {
+		variant = "secondary",
+		pill = true,
+		fontSize = 10,
+	})
+	advToggleBtn:SetPoint("TOPLEFT", tsmCard, "BOTTOMLEFT", 0, -8)
+	v2.advToggleBtn = advToggleBtn
+
+	local advHintFs = makeFs(frame, 10, "regular", "textMuted", "LEFT")
+	advHintFs:SetPoint("LEFT", advToggleBtn, "RIGHT", 10, 0)
+	advHintFs:SetText("Optional PowerShell / Terminal setup, preview, rebuild & uninstall commands")
+	v2.advHintFs = advHintFs
+
+	local advPanel = CreateFrame("Frame", nil, frame)
+	advPanel:SetPoint("TOPLEFT", advToggleBtn, "BOTTOMLEFT", 0, -8)
+	advPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+	advPanel:Hide()
+	v2.advPanel = advPanel
+
 	local function makeCopyRowV2(card, yOff, labelText, btnVariant)
 		local isPrimary = (btnVariant == "primary")
 		local lbl = makeFs(card, 11, "semibold", isPrimary and "textGold" or "textMuted")
@@ -1757,10 +1867,10 @@ local function buildSetupV2View(parent)
 		return box, selBtn, lbl
 	end
 
-	-- Left Column: Windows Automatic GitHub Sync
-	local winCard = createSurfaceCard(frame, "glass_r12", "cardBg")
-	winCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -160)
-	winCard:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0)
+	-- Left Column inside Advanced Panel: Windows CLI
+	local winCard = createSurfaceCard(advPanel, "glass_r12", "cardBg")
+	winCard:SetPoint("TOPLEFT", advPanel, "TOPLEFT", 0, 0)
+	winCard:SetPoint("BOTTOMLEFT", advPanel, "BOTTOMLEFT", 0, 0)
 	winCard:SetWidth(460)
 	addCardAccent(winCard, 0.30, 0.66, 0.96, 0.85)
 	v2.winCard = winCard
@@ -1789,14 +1899,14 @@ local function buildSetupV2View(parent)
 	winNote:SetPoint("BOTTOMRIGHT", winCard, "BOTTOMRIGHT", -14, 8)
 	if winNote.SetJustifyV then winNote:SetJustifyV("TOP") end
 	if winNote.SetWordWrap then winNote:SetWordWrap(true) end
-	winNote:SetText("Installs hidden Task Scheduler catch-up (zero UAC prompt, 100-350 KB/hr deltas). Rebuild re-syncs local cache; Uninstall removes scheduled sync cleanly.")
+	winNote:SetText("Installs background scheduled sync (zero UAC prompt, 100-350 KB/hr deltas). Rebuild re-syncs local cache; Uninstall turns off scheduled sync cleanly.")
 	v2.winNote = winNote
 
-	-- Right Column: Linux / Steam Deck & macOS Automatic GitHub Sync
-	local unixCard = createSurfaceCard(frame, "glass_r12", "cardBg")
+	-- Right Column inside Advanced Panel: Linux / Steam Deck & macOS CLI
+	local unixCard = createSurfaceCard(advPanel, "glass_r12", "cardBg")
 	unixCard:SetPoint("TOPLEFT", winCard, "TOPRIGHT", 10, 0)
-	unixCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -160)
-	unixCard:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+	unixCard:SetPoint("TOPRIGHT", advPanel, "TOPRIGHT", 0, 0)
+	unixCard:SetPoint("BOTTOMRIGHT", advPanel, "BOTTOMRIGHT", 0, 0)
 	addCardAccent(unixCard, 0.30, 0.66, 0.96, 0.85)
 	v2.unixCard = unixCard
 
@@ -1824,8 +1934,62 @@ local function buildSetupV2View(parent)
 	unixNote:SetPoint("BOTTOMRIGHT", unixCard, "BOTTOMRIGHT", -14, 8)
 	if unixNote.SetJustifyV then unixNote:SetJustifyV("TOP") end
 	if unixNote.SetWordWrap then unixNote:SetWordWrap(true) end
-	unixNote:SetText("Uses isolated ~/.local/bin/mm-snapshots with systemd timer / launchd agent & SHA256 check. Feed: github.com/JustBenji/MerchantMaster-SnapshotData")
+	unixNote:SetText("Uses isolated ~/.local/bin/mm-snapshots with SHA256 verification. Feed: github.com/JustBenji/MerchantMaster-SnapshotData")
 	v2.unixNote = unixNote
+
+	local function applyDrawerLayout()
+		local open = v2.advExpanded == true
+		tsmCard:ClearAllPoints()
+		stTitle:ClearAllPoints()
+		stBody:ClearAllPoints()
+		stFeed:ClearAllPoints()
+		if open then
+			statusCard:SetHeight(72)
+			orbWrap:Hide()
+			installBtn:Hide()
+			stepRow:Hide()
+			downloadRow:Hide()
+			stTitle:SetJustifyH("LEFT")
+			applyFont(stTitle, 13, "semibold")
+			stTitle:SetPoint("TOPLEFT", statusCard, "TOPLEFT", 14, -8)
+			stTitle:SetPoint("TOPRIGHT", statusCard, "TOPRIGHT", -14, -8)
+			stTitle:SetHeight(18)
+			stBody:SetJustifyH("LEFT")
+			stBody:SetPoint("TOPLEFT", statusCard, "TOPLEFT", 14, -26)
+			stBody:SetPoint("TOPRIGHT", statusCard, "TOPRIGHT", -14, -26)
+			stBody:SetHeight(20)
+			stFeed:SetJustifyH("LEFT")
+			stFeed:SetPoint("BOTTOMLEFT", statusCard, "BOTTOMLEFT", 14, 6)
+			stFeed:SetPoint("BOTTOMRIGHT", statusCard, "BOTTOMRIGHT", -14, 6)
+			tsmCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -80)
+			tsmCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -80)
+			setButtonLabel(advToggleBtn, "Terminal / Advanced v")
+			advPanel:Show()
+		else
+			statusCard:SetHeight(272)
+			orbWrap:Show()
+			installBtn:Show()
+			stTitle:SetJustifyH("CENTER")
+			applyFont(stTitle, 20, "semibold")
+			stTitle:SetPoint("TOP", orbWrap, "BOTTOM", 0, -6)
+			stTitle:SetSize(680, 26)
+			stBody:SetJustifyH("CENTER")
+			stBody:SetPoint("TOP", stTitle, "BOTTOM", 0, -4)
+			stBody:SetSize(680, 26)
+			stFeed:SetJustifyH("CENTER")
+			stFeed:SetPoint("BOTTOMLEFT", statusCard, "BOTTOMLEFT", 14, 10)
+			stFeed:SetPoint("BOTTOMRIGHT", statusCard, "BOTTOMRIGHT", -14, 10)
+			tsmCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -280)
+			tsmCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -280)
+			setButtonLabel(advToggleBtn, "Terminal / Advanced >")
+			advPanel:Hide()
+		end
+	end
+
+	advToggleBtn:SetScript("OnClick", function()
+		v2.advExpanded = not v2.advExpanded
+		v2.retheme()
+	end)
 
 	function v2.layout()
 		local w = (frame.GetWidth and frame:GetWidth()) or 1000
@@ -1884,43 +2048,98 @@ local function buildSetupV2View(parent)
 		end
 	end
 
+	local function tintOrb(r, g, b)
+		if v2.orbHalo and v2.orbHalo.SetVertexColor then
+			v2.orbHalo:SetVertexColor(r, g, b, 0.22)
+		end
+		if v2.orbRing and v2.orbRing.SetVertexColor then
+			v2.orbRing:SetVertexColor(r, g, b, 0.48)
+		end
+		if v2.orbDot and v2.orbDot.SetVertexColor then
+			v2.orbDot:SetVertexColor(r, g, b, 1.0)
+		end
+		if v2.heroAccent and v2.heroAccent.SetColorTexture then
+			v2.heroAccent:SetColorTexture(r, g, b, 0.90)
+		end
+	end
+
 	function v2.retheme()
 		local CE = getCE()
 		if not CE then return end
 		local pal = getPal()
+		applyDrawerLayout()
 		v2.updateTsmStatus(pal)
 		local installed = hasSnapshotExt()
 		local addonState = type(CE.GetAddonState) == "function" and CE.GetAddonState("MerchantMaster_Snapshots") or (installed and "loaded" or "absent")
 		local bgMode = (type(ns.GetBackgroundPriceMode) == "function" and ns.GetBackgroundPriceMode()) or "none"
 		local suppressed = type(ns.IsLocalSnapshotSuppressed) == "function" and ns.IsLocalSnapshotSuppressed()
 
+		local statusTag
 		if not installed then
 			if addonState == "disabled" then
-				v2.stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - Enable Pack in WoW)")
+				tintOrb(0.96, 0.62, 0.14)
+				v2.stTitle:SetText(colorHex("hexWarning", "Enable Pack in WoW", pal))
 				v2.stBody:SetText("SnapshotData.lua is on disk, but MerchantMaster_Snapshots is unchecked in Esc -> AddOns. Check it and click Reload UI.")
+				setButtonLabel(v2.installBtn, "Download App")
+				if v2.installBtn.SetVariant then v2.installBtn:SetVariant("secondary") end
+				statusTag = colorHex("hexWarning", "Unchecked in Esc -> AddOns", pal)
 			else
-				v2.stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - Zero API Key)")
-				v2.stBody:SetText("Copy 1 command below -> auto-installs Python sync, detects WoW Forever, pulls GitHub deltas & exports SnapshotData.lua -> /reload in WoW.")
+				tintOrb(0.24, 0.64, 0.98)
+				v2.stTitle:SetText("MerchantMasterSync")
+				v2.stBody:SetText("Automatic hourly Auction House prices - no API key, no terminal needed.")
+				setButtonLabel(v2.installBtn, "Install")
+				if v2.installBtn.SetVariant then v2.installBtn:SetVariant("primary") end
+				statusTag = colorHex("hexBlue", "Ready to Install", pal)
 			end
 		elseif suppressed and bgMode == "tsm" then
-			v2.stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - Paused by TSM Light)")
-			v2.stBody:SetText("Snapshot pack is ready on disk. Click Local Snapshot above to switch back from TSM Light.")
+			tintOrb(0.96, 0.62, 0.14)
+			v2.stTitle:SetText(colorHex("hexWarning", "Paused (TSM Light)", pal))
+			v2.stBody:SetText("Snapshot pack is ready on disk. Click Local Snapshot below to resume.")
+			setButtonLabel(v2.installBtn, "Download App")
+			if v2.installBtn.SetVariant then v2.installBtn:SetVariant("secondary") end
+			statusTag = colorHex("hexWarning", "Paused (TSM Light)", pal)
 		elseif suppressed and bgMode == "none" then
-			v2.stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - OFF / Manual AH)")
-			v2.stBody:SetText("Snapshot pack is ready on disk, currently paused. Click Local Snapshot above to resume or run Rebuild (--force) below.")
+			tintOrb(0.62, 0.65, 0.72)
+			v2.stTitle:SetText("Paused (Manual AH Only)")
+			v2.stBody:SetText("Snapshot pack is ready on disk. Click Local Snapshot below to resume.")
+			setButtonLabel(v2.installBtn, "Download App")
+			if v2.installBtn.SetVariant then v2.installBtn:SetVariant("secondary") end
+			statusTag = colorHex("hexMuted", "OFF (Manual AH)", pal)
 		else
-			v2.stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - Active)")
+			tintOrb(0.19, 0.82, 0.35)
+			v2.stTitle:SetText(colorHex("hexGreen", "In Sync", pal))
 			local sys = v2._lastSys
 			if sys then
 				local diskTotal = max(((tonumber(sys.dbBytes) or 0) + (tonumber(sys.walBytes) or 0) + (tonumber(sys.shmBytes) or 0) + (tonumber(sys.logBytes) or 0)), tonumber(sys.localDataDirBytes) or 0) + (tonumber(sys.exportBytes) or 0)
-				v2.stBody:SetText(format("GitHub Auto-Sync Active | Disk: %s | Snapshots: %s | Every %dm | Last Sync: %s",
-					CE.FormatBytes(diskTotal), CE.FormatInt(sys.totalRuns or 0), sys.intervalMin or 15, CE.FormatTimestamp(sys.exportedAt)))
+				v2.stBody:SetText(format("Snapshots: %s  |  Disk: %s  |  Every %dm  |  Last Sync: %s",
+					CE.FormatInt(sys.totalRuns or 0), CE.FormatBytes(diskTotal), sys.intervalMin or 15, CE.FormatTimestamp(sys.exportedAt)))
 			else
-				v2.stBody:SetText("GitHub Auto-Sync Ready | Local Snapshot mode active. Run 1 command below on a fresh PC to auto-install and sync.")
+				v2.stBody:SetText("Automatic hourly Auction House prices are active.")
+			end
+			setButtonLabel(v2.installBtn, "Download App")
+			if v2.installBtn.SetVariant then v2.installBtn:SetVariant("secondary") end
+			statusTag = colorHex("hexGreen", "In Sync", pal)
+		end
+
+		if not v2.advExpanded then
+			if v2.showDownloadRow then
+				v2.stepRow:Hide()
+				v2.downloadRow:Show()
+			elseif not installed and addonState ~= "disabled" then
+				v2.downloadRow:Hide()
+				v2.stepRow:SetText("1. Click Install    ->    2. Download & open MerchantMasterSync    ->    3. Type /reload in WoW")
+				v2.stepRow:Show()
+			elseif installed and not suppressed then
+				v2.downloadRow:Hide()
+				v2.stepRow:SetText("Checks GitHub every 15m and updates prices automatically when WoW reloads.")
+				v2.stepRow:Show()
+			else
+				v2.downloadRow:Hide()
+				v2.stepRow:Hide()
 			end
 		end
 
-		v2.stFeed:SetText("Public Feed: JustBenji/MerchantMaster-SnapshotData (tag: snapshots-live)  |  Mode: " .. (bgMode == "local" and colorHex("hexGreen", "Local Snapshot Active", pal) or colorHex("hexWarning", bgMode == "none" and "OFF (Manual AH)" or "Paused (TSM Light)", pal)))
+		v2.stFeed:SetText("Public Feed: JustBenji/MerchantMaster-SnapshotData (tag: snapshots-live)  |  " .. statusTag)
 	end
 
 	function v2.refresh()
@@ -1931,6 +2150,9 @@ local function buildSetupV2View(parent)
 			and ns.Pricing.GetSnapshotSystemMeta() or nil
 
 		local cmds = CE.INSTALL_COMMANDS_V2 or {}
+		if v2.downloadUrlBox and v2.downloadUrlBox.SetText then
+			v2.downloadUrlBox:SetText(cmds.desktopAppUrl or cmds.guideUrl or "")
+		end
 		if v2.winInstallBox and v2.winInstallBox.SetText then v2.winInstallBox:SetText(cmds.windows or "") end
 		if v2.winAltBox and v2.winAltBox.SetText then v2.winAltBox:SetText(cmds.windowsAlt or "") end
 		if v2.winCheckBox and v2.winCheckBox.SetText then v2.winCheckBox:SetText(cmds.windowsCheck or "") end
@@ -4593,7 +4815,7 @@ local function buildSubTabBar(root)
 		{ key = "console_overview", label = "Overview", width = 60, hint = "Addon RAM, SavedVariables, Live AH scans & health" },
 		{ key = "console_database", label = "Database", width = 62, hint = "WoW SavedVariables schema inspector" },
 		{ key = "console_perf", label = "Perf & Debug", width = 80, hint = "Opt-in runtime profiler & support debug bundle" },
-		{ key = "console_setup2", label = "Snapshot Sync", width = 96, hint = "GitHub Auto-Sync & 3-way Price Refresh Mode - zero API key" },
+		{ key = "console_setup2", label = "MerchantMasterSync", width = 132, hint = "MerchantMasterSync desktop app & Price Refresh Mode" },
 		{ key = "console_settings", label = "Settings", width = 56, hint = "Market, inventory scope, Leveling filter & item tooltips" },
 		{ key = "console_mail", label = "Mail", width = 38, hint = "Saved mail recipients, mailbox quick-pick buttons & send safety net" },
 		{ key = "console_tooltips", label = "Tooltip Setup", width = 80, hint = "Customize item tooltip sections, price format & live example preview" },

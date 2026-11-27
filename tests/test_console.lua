@@ -70,8 +70,8 @@ do
 	assertCheck(setupTabBtn == nil and UI._state.setupView == nil,
 		"Standalone Console completely removes legacy Snapshot Builder sub-tab and view")
 	local setup2TabBtn = UI._state.subTabBar and UI._state.subTabBar.buttons.console_setup2
-	assertCheck(setup2TabBtn and setup2TabBtn:IsShown() and setup2TabBtn.fs and setup2TabBtn.fs:GetText() == "Snapshot Sync",
-		"Standalone Console exposes primary Snapshot Sync sub-tab button")
+	assertCheck(setup2TabBtn and setup2TabBtn:IsShown() and setup2TabBtn.fs and setup2TabBtn.fs:GetText() == "MerchantMasterSync",
+		"Standalone Console exposes primary MerchantMasterSync sub-tab button")
 	-- Console -> Settings no longer exposes legacyBuilderCheck
 	app.setTab("console_settings")
 	assertCheck(UI._state.settingsControls and UI._state.settingsControls.legacyBuilderCheck == nil,
@@ -96,17 +96,29 @@ do
 	assertCheck(UI.GetActiveSubTab() == "console_setup2" and app.activeTab == "console_setup2",
 		"Legacy console_setup route redirects cleanly to console_setup2")
 	local su2Standalone = UI._state.setupV2View
-	assertCheck(su2Standalone and su2Standalone.winCard and su2Standalone.winCard:IsShown()
-		and su2Standalone.unixCard and su2Standalone.unixCard:IsShown(),
-		"Standalone console_setup2 displays split Left Windows and Right Linux/macOS sync cards")
-	assertCheck((su2Standalone.stTitle:GetText() or ""):find("GitHub Auto-Sync", 1, true) ~= nil
-		and (su2Standalone.stTitle:GetText() or ""):find("Zero API Key", 1, true) ~= nil,
-		"Standalone Snapshot Sync title shows GitHub Auto-Sync - Zero API Key")
+	assertCheck(su2Standalone and su2Standalone.statusCard and su2Standalone.statusCard:IsShown()
+		and su2Standalone.orbWrap and su2Standalone.orbWrap:IsShown()
+		and su2Standalone.installBtn and su2Standalone.installBtn:IsShown()
+		and su2Standalone.installBtn.fs and su2Standalone.installBtn.fs:GetText() == "Install"
+		and su2Standalone.advPanel and not su2Standalone.advPanel:IsShown(),
+		"Standalone console_setup2 shows Apple hero Install card with collapsed Terminal/Advanced drawer")
+	assertCheck((su2Standalone.stTitle:GetText() or ""):find("MerchantMasterSync", 1, true) ~= nil,
+		"Standalone MerchantMasterSync title shows MerchantMasterSync before install")
+	su2Standalone.installBtn:Click("LeftButton")
+	assertCheck(su2Standalone.downloadRow and su2Standalone.downloadRow:IsShown()
+		and (su2Standalone.downloadUrlBox:GetText() or ""):find("MerchantMaster-Snapshots/releases/latest", 1, true) ~= nil,
+		"Clicking Install reveals desktop app release download URL")
+	su2Standalone.advToggleBtn:Click("LeftButton")
+	assertCheck(su2Standalone.advPanel:IsShown() and su2Standalone.winCard:IsShown() and su2Standalone.unixCard:IsShown(),
+		"Expanding Terminal / Advanced reveals split Left Windows and Right Linux/macOS sync cards")
 	assertCheck((su2Standalone.winInstallBox:GetText() or ""):find("py -m pip install", 1, true) ~= nil
 		and (su2Standalone.winAltBox:GetText() or ""):find("python -m pip install", 1, true) ~= nil
 		and (su2Standalone.linuxInstallBox:GetText() or ""):find("install_linux.py --sync-mode github", 1, true) ~= nil
 		and (su2Standalone.macInstallBox:GetText() or ""):find("python3 -m pip install", 1, true) ~= nil,
-		"Standalone Snapshot Sync populates Windows, Linux/Steam Deck, and macOS 1-line GitHub install boxes")
+		"Expanded Terminal / Advanced drawer populates Windows, Linux/Steam Deck, and macOS commands")
+	su2Standalone.advToggleBtn:Click("LeftButton")
+	assertCheck(not su2Standalone.advPanel:IsShown(),
+		"Clicking Terminal / Advanced again collapses the drawer cleanly")
 
 	-- Disabled addon state (present in AddOns folder, unchecked for current character) shows clear Esc -> AddOns guidance
 	hostEnv.setMockAddon("MerchantMaster_Snapshots", { enabled = false, loaded = false, memKB = 0, version = "1.1.0" })
@@ -523,15 +535,14 @@ do
 	SlashCmdList.MERCHANTMASTER("builder")
 	assertCheck(app.activeTab == "console_setup2", "/mm builder redirects to console_setup2")
 
-	-- Connected Snapshot Sync: live Disk & Snapshot count summary + OS command boxes + 3-way Price Refresh Mode
+	-- Connected MerchantMasterSync: In Sync hero + live Disk & Snapshot summary + OS command boxes + 3-way Price Refresh Mode
 	local su2Conn = UI._state.setupV2View
 	assertCheck(UI._state.setupView == nil and su2Conn ~= nil and su2Conn.frame and su2Conn.frame:IsShown(),
 		"Connected console_setup2 is active and setupView is removed")
-	assertCheck(su2Conn.winCard and su2Conn.winCard:IsShown()
-		and su2Conn.unixCard and su2Conn.unixCard:IsShown(),
-		"Connected console_setup2 shows split Left Windows and Right Linux/macOS command cards")
-	assertCheck((su2Conn.stTitle:GetText() or ""):find("GitHub Auto-Sync - Active", 1, true) ~= nil,
-		"Connected status title shows GitHub Auto-Sync - Active")
+	assertCheck(su2Conn.advPanel and not su2Conn.advPanel:IsShown() and su2Conn.winCard and su2Conn.unixCard,
+		"Connected console_setup2 keeps Terminal / Advanced collapsed by default while keeping CLI cards built")
+	assertCheck((su2Conn.stTitle:GetText() or ""):find("In Sync", 1, true) ~= nil,
+		"Connected status title shows In Sync")
 	assertCheck((su2Conn.stBody:GetText() or ""):find("Snapshots: 19", 1, true) ~= nil
 		and (su2Conn.stBody:GetText() or ""):find("Disk: " .. CE.FormatBytes(5448576), 1, true) ~= nil,
 		"Connected stBody summarizes live snapshot count and total disk size")
@@ -746,23 +757,24 @@ do
 	SlashCmdList.MERCHANTMASTER("builder")
 	local su2Lazy = UI._state.setupV2View
 	assertCheck(app.activeTab == "console_setup2" and UI.GetActiveSubTab() == "console_setup2"
-		and su2Lazy and (su2Lazy.stTitle:GetText() or ""):find("GitHub Auto-Sync - Active", 1, true) ~= nil,
-		"Connected /mm builder redirects to console_setup2 showing Active status")
+		and su2Lazy and (su2Lazy.stTitle:GetText() or ""):find("In Sync", 1, true) ~= nil,
+		"Connected /mm builder redirects to console_setup2 showing In Sync status")
 
 	-- Part B: Late RegisterSnapshotExtension while console_setup2 is already open standalone
 	if _G.C_AddOns then _G.C_AddOns.LoadAddOn = function() return false end end
 	_G.LoadAddOn = function() return false end
 	app.snapshotExtension = nil
 	UI.SyncExtensions()
-	assertCheck((su2Lazy.stTitle:GetText() or ""):find("Zero API Key", 1, true) ~= nil,
-		"SyncExtensions switches open Snapshot Sync back to Zero API Key status when extension is cleared")
+	assertCheck((su2Lazy.stTitle:GetText() or ""):find("MerchantMasterSync", 1, true) ~= nil
+		and su2Lazy.installBtn and su2Lazy.installBtn.fs and su2Lazy.installBtn.fs:GetText() == "Install",
+		"SyncExtensions switches open MerchantMasterSync back to Install state when extension is cleared")
 	MerchantMasterAPI.RegisterSnapshotExtension({
 		apiVersion = 1,
 		version = "1.1.0",
 		supportsOsMode = true,
 	})
-	assertCheck((su2Lazy.stTitle:GetText() or ""):find("GitHub Auto-Sync - Active", 1, true) ~= nil,
-		"RegisterSnapshotExtension calls consoleProvider.SyncExtensions and flips open Snapshot Sync to Active")
+	assertCheck((su2Lazy.stTitle:GetText() or ""):find("In Sync", 1, true) ~= nil,
+		"RegisterSnapshotExtension calls consoleProvider.SyncExtensions and flips open MerchantMasterSync to In Sync")
 
 	-- Restore environment
 	if _G.C_AddOns then _G.C_AddOns.LoadAddOn = savedCLoad end
@@ -919,11 +931,16 @@ do
 	assertCheck(su.tsmCard:GetHeight() == 72,
 		"tsmCard height is 72px (got " .. tostring(su.tsmCard:GetHeight()) .. ")")
 	local _, _, _, _, tsmY = su.tsmCard:GetPoint(1)
-	local _, _, _, _, winY = su.winCard:GetPoint(1)
-	local _, _, _, _, unixY = su.unixCard:GetPoint(2)
-	assertCheck(tsmY == -80 and winY == -160 and unixY == -160,
-		"tsmCard sits at -80 and winCard/unixCard sit at -160 (got "
-			.. tostring(tsmY) .. ", " .. tostring(winY) .. ", " .. tostring(unixY) .. ")")
+	assertCheck(tsmY == -280 and not su.advPanel:IsShown(),
+		"tsmCard sits below hero at -280 with advPanel collapsed by default (got " .. tostring(tsmY) .. ")")
+	su.advToggleBtn:Click("LeftButton")
+	local _, _, _, _, tsmExpY = su.tsmCard:GetPoint(1)
+	assertCheck(tsmExpY == -80 and su.advPanel:IsShown(),
+		"When Terminal / Advanced expands, tsmCard slides to -80 and advPanel reveals winCard/unixCard (got " .. tostring(tsmExpY) .. ")")
+	su.advToggleBtn:Click("LeftButton")
+	local _, _, _, _, tsmColY = su.tsmCard:GetPoint(1)
+	assertCheck(tsmColY == -280 and not su.advPanel:IsShown(),
+		"When Terminal / Advanced collapses, tsmCard returns cleanly to -280")
 
 	-- Standalone default (no snapshots, no TSM) -> Manual AH Only (Local OFF)
 	assertCheck((su.tsmStatusFs:GetText() or ""):find("Manual AH Only (Local OFF)", 1, true) ~= nil,
@@ -971,20 +988,20 @@ do
 	su.modeBtns["local"]:Click("LeftButton")
 	assertCheck((su.tsmStatusFs:GetText() or ""):find("Local Snapshot Active", 1, true) ~= nil,
 		"Status shows Local Snapshot Active when extension is installed on disk")
-	assertCheck((su.stTitle:GetText() or ""):find("GitHub Auto-Sync - Active", 1, true) ~= nil,
-		"stTitle shows GitHub Auto-Sync - Active in Local Snapshot mode")
+	assertCheck((su.stTitle:GetText() or ""):find("In Sync", 1, true) ~= nil,
+		"stTitle shows In Sync in Local Snapshot mode")
 
 	su.modeBtns["tsm"]:Click("LeftButton")
 	assertCheck((su.tsmStatusFs:GetText() or ""):find("TSM Light Active (Local OFF)", 1, true) ~= nil,
 		"Status shows TSM Light Active (Local OFF) even with extension on disk")
-	assertCheck((su.stTitle:GetText() or ""):find("GitHub Auto-Sync - Paused by TSM Light", 1, true) ~= nil,
-		"stTitle shows GitHub Auto-Sync - Paused by TSM Light when suppressed by TSM")
+	assertCheck((su.stTitle:GetText() or ""):find("Paused (TSM Light)", 1, true) ~= nil,
+		"stTitle shows Paused (TSM Light) when suppressed by TSM")
 
 	su.modeBtns["none"]:Click("LeftButton")
 	assertCheck((su.tsmStatusFs:GetText() or ""):find("Manual AH Only (Local OFF)", 1, true) ~= nil,
 		"Status shows Manual AH Only (Local OFF) with extension on disk")
-	assertCheck((su.stTitle:GetText() or ""):find("GitHub Auto-Sync - OFF / Manual AH", 1, true) ~= nil,
-		"stTitle shows GitHub Auto-Sync - OFF / Manual AH when suppressed by None mode")
+	assertCheck((su.stTitle:GetText() or ""):find("Paused (Manual AH Only)", 1, true) ~= nil,
+		"stTitle shows Paused (Manual AH Only) when suppressed by None mode")
 
 	-- Verify ConsoleEngine settings fields documents backgroundPriceMode & useTSMPrices and keeps savedTables == 13
 	local stTsm = CE.CollectStorageSnapshot()

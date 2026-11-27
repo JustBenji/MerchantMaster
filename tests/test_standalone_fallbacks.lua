@@ -299,8 +299,8 @@ do
 	check(setupBtn == nil and UIConsole._state.setupView == nil,
 		"Console -> Legacy Snapshot Builder sub-tab and view are completely removed")
 	local setup2Btn = UIConsole._state.subTabBar and UIConsole._state.subTabBar.buttons.console_setup2
-	check(setup2Btn and setup2Btn:IsShown() and setup2Btn.fs and setup2Btn.fs:GetText() == "Snapshot Sync",
-		"Console -> Snapshot Sync sub-tab is visible standalone")
+	check(setup2Btn and setup2Btn:IsShown() and setup2Btn.fs and setup2Btn.fs:GetText() == "MerchantMasterSync",
+		"Console -> MerchantMasterSync sub-tab is visible standalone")
 	check(UIConsole._state.overviewView and UIConsole._state.overviewView.kpis[2]
 		and not UIConsole._state.overviewView.kpis[2].frame:IsShown(),
 		"Console -> Overview Snapshot Storage card is hidden standalone")
