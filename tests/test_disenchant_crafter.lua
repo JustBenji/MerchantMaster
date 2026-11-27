@@ -1959,6 +1959,86 @@ do
 		_G.ProfessionsBookFrame_Update = origProfBookUpdate
 	end
 
+	-- 8G. Disenchant Helper Smart Spawning Beside ProfessionsFrame + Saved Position Persistence
+	do
+		ns.Window.ClearSavedPosition(nil)
+		DH.Hide()
+		inCombatFlag = false
+		local mockProfSpawn = makeWidget("Frame", "ProfessionsFrame", UIParent)
+		setBoxX(mockProfSpawn, 100, 600) -- left=100, right=700, fits DH (496w + 12 gap = 1208 <= 1920)
+		mockProfSpawn:SetHeight(600)
+		mockProfSpawn:Show()
+		_G.ProfessionsFrame = mockProfSpawn
+		_G.CraftFrame = nil
+		_G.TradeSkillFrame = nil
+		_G.SpellBookFrame = nil
+
+		check(DH.Show() == true, "DisenchantHelper.Show() opens cleanly for spawn/persistence check")
+		local dhFrame = DH.GetState().frame
+		check(dhFrame ~= nil and dhFrame.header ~= nil, "DisenchantHelper frame and draggable header exist")
+		local pt1, rel1, rpt1, x1, y1 = dhFrame:GetPoint(1)
+		check(pt1 == "TOPLEFT" and rel1 == mockProfSpawn and rpt1 == "TOPRIGHT" and x1 == 12 and y1 == 0,
+			string.format("DisenchantHelper smart-spawns beside open ProfessionsFrame when no saved position exists (got %s -> %s, x=%s)",
+				tostring(pt1), tostring(rpt1), tostring(x1)))
+
+		-- Simulate user dragging DisenchantHelper header to custom screen position
+		check(dhFrame.dockModeBtn ~= nil and ns.Window.GetMode("disenchant_helper", "snap") == "snap",
+			"DisenchantHelper starts in Snap mode with dockModeBtn exposed")
+		local origGetLeft, origGetTop = dhFrame.GetLeft, dhFrame.GetTop
+		dhFrame.GetLeft = function() return 410 end
+		dhFrame.GetTop = function() return 760 end
+		dhFrame.header:GetScript("OnDragStart")(dhFrame.header)
+		dhFrame.header:GetScript("OnDragStop")(dhFrame.header)
+		check(ns.Window.GetMode("disenchant_helper", "snap") == "free"
+			and ns.Window.HasSavedPosition("disenchant_helper")
+			and MerchantMasterDB.windowPositions
+			and MerchantMasterDB.windowPositions.disenchant_helper
+			and MerchantMasterDB.windowPositions.disenchant_helper.x == 410
+			and MerchantMasterDB.windowPositions.disenchant_helper.y == 760,
+			"Dragging DisenchantHelper from Snap switches to Free and saves disenchant_helper position")
+
+		-- Hide + Show in Free mode restores saved coordinates instead of snapping to ProfessionsFrame or CENTER
+		DH.Hide()
+		DH.Show()
+		local rpt, rrel, rrp, rx, ry = dhFrame:GetPoint(1)
+		check(rpt == "TOPLEFT" and rrel == UIParent and rrp == "BOTTOMLEFT"
+			and math.abs((rx or 0) - 410) < 1 and math.abs((ry or 0) - 760) < 1,
+			string.format("DisenchantHelper restores saved Free position across Hide/Show (got %s -> %s %s,%s)",
+				tostring(rpt), tostring(rrp), tostring(rx), tostring(ry)))
+
+		-- Clicking dockModeBtn in Free -> Snap re-docks beside ProfessionsFrame; Snap -> Lock blocks drag
+		dhFrame.dockModeBtn:Click("LeftButton")
+		check(ns.Window.GetMode("disenchant_helper", "snap") == "snap",
+			"Clicking dockModeBtn in Free switches back to Snap")
+		local dpt, drel, drp = dhFrame:GetPoint(1)
+		check(dpt == "TOPLEFT" and drel == mockProfSpawn and drp == "TOPRIGHT",
+			"Switching Free -> Snap immediately re-docks DisenchantHelper beside ProfessionsFrame")
+
+		dhFrame.dockModeBtn:Click("LeftButton")
+		check(ns.Window.GetMode("disenchant_helper", "snap") == "lock",
+			"Clicking dockModeBtn in Snap switches to Lock")
+		dhFrame.GetLeft = function() return 700 end
+		dhFrame.header:GetScript("OnDragStart")(dhFrame.header)
+		dhFrame.header:GetScript("OnDragStop")(dhFrame.header)
+		local lpt, lrel = dhFrame:GetPoint(1)
+		check(ns.Window.GetMode("disenchant_helper", "snap") == "lock" and lpt == "TOPLEFT" and lrel == mockProfSpawn,
+			"Dragging DisenchantHelper in Lock mode keeps it locked to ProfessionsFrame")
+
+		-- Clearing saved position restores smart default beside ProfessionsFrame
+		ns.Window.ClearSavedPosition(nil)
+		DH.ApplyPosition()
+		local rpt2, rrel2, drp2 = dhFrame:GetPoint(1)
+		check(rpt2 == "TOPLEFT" and rrel2 == mockProfSpawn and drp2 == "TOPRIGHT"
+			and ns.Window.GetMode("disenchant_helper", "snap") == "snap",
+			"Resetting positions returns DisenchantHelper beside ProfessionsFrame in Snap mode")
+
+		dhFrame.GetLeft = origGetLeft
+		dhFrame.GetTop = origGetTop
+		mockProfSpawn:Hide()
+		DH.Hide()
+		ns.Window.ClearSavedPosition(nil)
+	end
+
 	-- Restore ALL local mocks & theme cleanly
 	sbProf:Hide()
 	craftF:Hide()

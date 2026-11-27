@@ -4947,7 +4947,9 @@ function MP.SolveProfessionPath(profKey, opts)
 		local cp = liveProfs and liveProfs[profKey]
 		local sSkill = tonumber(opts.startSkill) or (cp and cp.rank) or profInfo.defaultStart or 1
 		local tSkill = tonumber(opts.targetSkill) or 300
-		local pVer = (mns.GetEffectivePriceVersion and mns.GetEffectivePriceVersion()) or mns.priceCacheEpoch or 0
+		local pVer = (mns.GetPriceDataRevision and mns.GetPriceDataRevision())
+			or (mns.GetEffectivePriceVersion and mns.GetEffectivePriceVersion())
+			or mns.priceCacheEpoch or 0
 		local appRef = mns.app
 		local solveRev = appRef and appRef.profSolveRev or 0
 		local ownRev = (db.useOwned ~= false) and (appRef and appRef.ownershipRev or 0) or 0
@@ -4978,6 +4980,7 @@ function MP.SolveProfessionPath(profKey, opts)
 			tostring(mmdb and mmdb.economy or "auto"),
 			tostring(mmdb and mmdb.priceSource or "auto"),
 			tostring(mmdb and mmdb.subCraftMode or ""),
+			serializeOverrides(mmdb and mmdb.outlierPrices),
 			tostring(pVer), tostring(solveRev), tostring(ownRev),
 			tostring(liveThresholdsRev),
 		}, "|")

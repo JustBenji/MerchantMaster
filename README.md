@@ -33,11 +33,12 @@ When you want to push past standard crafting margins, MerchantMaster includes fo
 
 ## Visual Feature Showcase (Goblin Baron)
 
-### 1. Morning Brief & Hourly Wealth
-Open `/mm dashboard` to check what sold overnight, how your total gold moved hour by hour, and whether key crafting reagents just dipped below their 7-day average.
+### 1. GoblinTV Desk, Morning Brief & Hourly Wealth
+Open `/mm dashboard` to switch across three Today's Overview views: the **GoblinTV** multi-pane workstation (broadcast chart stage, live headlines, spotlight, most active movers, and ticker rail), **Morning Brief** (session profit, hourly wealth, and reagent alerts), and **Market Pulse** (classic KPI and bento overview).
 
 ![Morning Brief and Hourly Wealth](.previews/01-baron-dashboard.png)
 
+*   Personalized with your character's full WoW Forever name (`First Surname`) and an identical upper-right **GoblinTV | Morning Brief | Market Pulse** switcher across all three Today's Overview views.
 *   Side-by-side **Profit** and **Hourly / Daily Wealth** charts with `24h`, `7d`, `14d`, and `30d` range selectors.
 *   Strict `AH_SELL` KPI cards paired with a scrollable recent Auction House sales feed.
 *   **Reagent Price-Drop Alerts** flagging reagents for your top crafts that dropped 10% or more below their 7-day baseline (Left-click for the recipe, Right-click for the reagent, Shift-click to add to cart).
@@ -149,9 +150,10 @@ Collect AH proceeds in batches and send mail between your characters without typ
 
 ![Mail Helper and Preset Recipients](.previews/13-baron-mail-helper.png)
 
-*   Uses a unified `280px` right-side dock alongside the Mailbox across both **Inbox** and **Send Mail** (removing any obstructed bar beneath Blizzard's Mail tabs).
-*   Batch-loots AH sales, buyouts, and gold on the **Inbox** tab while skipping C.O.D. mail and pausing safely if bags fill up.
-*   Widens **Mail Recipients** to `280px` with a strictly bounded `Saved:` pill, quick-pick **Preset Recipients** (`Bank`, `Auction`, `Main Crafter`, and profession roles, configured in **Console -> Mail** `/mm mail`), WoW Forever `First Surname` handling, and a confirmation prompt before mailing items to a character outside your saved presets (gold-only mail keeps Blizzard's built-in confirmation).
+*   Uses a unified `280px` right-side dock alongside Blizzard's Mailbox across **Inbox** (`Mail Items`) and **Send Mail** (`Mail Recipients`), keeping Mail tabs unobstructed.
+*   Categorizes your inbox inside the **Mail Items** dock (`All`, `Mats`, `Gear`, `Cons`, `Other`) and adds a top **Gold** row so you can collect mail gold even when your bags are full without touching item attachments.
+*   Click any row to take a single stack (or gold from one letter), use per-row **Get All** / **Stop** to batch-loot matching items or gold while skipping C.O.D. mail, or click **Get All** inside Blizzard's **Open Mail** window to collect every attachment on an open letter; **Refresh** resets back to the ready summary automatically if the server does not respond.
+*   Provides quick-pick **Mail Recipients** presets (`Bank`, `Auction`, `Main Crafter`, and profession alts) with a gear settings shortcut to **Console -> Mail** (`/mm mail`), a bounded `Saved:` pill, WoW Forever `First Surname` handling, and a confirmation prompt before mailing items to an unlisted character (gold-only mail keeps Blizzard's built-in confirmation).
 
 ### 14. Sell Helper (`MM Sell` AH Tab)
 Post auctions from a spacious native tab built directly into the WoW Forever Auction House frame.
@@ -159,8 +161,9 @@ Post auctions from a spacious native tab built directly into the WoW Forever Auc
 ![Sell Helper MM Sell AH Tab](.previews/14-baron-sell-helper.png)
 
 *   Automatically refreshes live AH prices whenever you open `MM Sell` or load an item, with guarded retry if the Auction House is throttled or busy.
-*   Arranges the top panel into 3 balanced zones with larger `Deposit` and `Total Price` readouts, side-by-side `[Match] [-1c] [-1s] [-1%]` undercut rule buttons, and auction duration toggles (`2h`, `8h`, `24h`).
-*   Pairs a categorized bag grid with live competition rows, recent price history, and a sequential posting queue tied to MerchantMaster's ledger and inventory tracking.
+*   Streamlines the 3-zone top workstation around **Post** and **Refresh** (with a context-only **Cancel** button shown only while confirming or posting), alongside larger `Deposit` and `Total Price` readouts, side-by-side `[Match] [-1c] [-1s] [-1%]` undercut rule buttons, and `2h` / `8h` / `24h` duration toggles.
+*   Displays a live per-item **Vendor Value** readout and compares it against your 95% net AH payout after the 5% Auction House cut, showing a visual alert and a confirmation warning before posting if selling to an NPC vendor pays more.
+*   Pairs a categorized bag grid with an Auctionator-style **Current Prices** table (`Buyout Price | Bid Price | Avail | iLvl | Owned?` for equipment and `Unit Price | Avail | Owned?` for commodities, with coin icons, column dividers, and auto-refresh after posting), recent price history, a Sell Queue, and lightweight scrollbars for smooth scrolling.
 
 ### 15. Buy Auction House Helper
 Work through a multi-item Shopping List at the Auction House without typing item names one by one.
@@ -178,6 +181,7 @@ Spot mispriced auctions quickly after a scan, whether you want historical-gap fl
 
 *   **Gap Sniper** filters across `All AH Items`, `Commodities`, or `Equipment` using configurable minimum gap %, ROI %, gold profit, daily sales, and max spend caps.
 *   **Vendor Sniper** surfaces listings posted below NPC vendor sell price with configurable minimum profit.
+*   **Disenchant Sniper** covers all `3,438` disenchantable WoW Forever DB2 weapons/armor (plus craftables and live `Browse` scaling synthesis) using **Scan All Equipment** (server-filtered Weapons + Armor in Uncommon/Rare/Epic) and a light O(1) Stage-1 EV pre-filter before Stage-2 Buy Moat calculation.
 *   Synchronous click-to-buy workflow with live price ladders for WoW Forever compliance.
 
 ### 17. Console & Snapshot Settings
@@ -185,8 +189,8 @@ Inspect addon storage, switch themes, configure Mail presets, generate redacted 
 
 ![Console and Snapshot Settings](.previews/17-baron-console-snapshots.png)
 
-*   **Snapshot Settings (`/mm snapshots`):** Side-by-side **Windows** (PowerShell) and **Linux / Steam Deck** (`install_linux.py`) / macOS setup cards, live database and WoW AddOn folder status when connected, and an optional **TSM Light Mode** switch. Turning on **TSM Light Mode** writes hourly refreshed prices straight into MerchantMaster's tables with zero local snapshot files (7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth stay off unless `MerchantMaster_Snapshots` is installed), and requires both the **TradeSkillMaster** addon and the **TSM Desktop App** installed locally (see TSM's setup instructions).
-*   **Top Header Freshness Pill:** Displays the active market data source and age without clipping: `TSM <time>` (TSM Light Mode), `Snap <time>` (`MerchantMaster_Snapshots`), or `AH <time>` (manual in-game scan), with both Snapshot and Manual AH timestamps shown on hover.
+*   **Snapshot Settings (`/mm snapshots`):** Includes a mutually exclusive 3-way **Price Refresh Mode** selector (`Local Snapshot` | `TSM Light` | `None (Manual AH)`) alongside **Windows** (PowerShell), **Linux / Steam Deck** (`install_linux.py`), and **macOS** setup cards plus live database and WoW AddOn folder status. `Local Snapshot` and `TSM Light` are mutually exclusive: switching to **TSM Light** writes hourly refreshed prices into MerchantMaster's tables (requiring both the **TradeSkillMaster** addon and **TSM Desktop App** locally) while pausing local snapshot reads, 7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth; switching to **None (Manual AH)** pauses both external feeds cleanly.
+*   **Top Header Freshness Pill:** Displays the active market data source and age without clipping: `TSM <time>` (`TSM Light`), `Snap <time>` (`Local Snapshot`), or `AH <time>` (manual in-game scan), with the active refresh mode and timestamps shown on hover.
 *   **Database (`/mm db`):** Inspects WoW SavedVariables alongside the dedicated **AH Snapshot Storage (On Disk)** card (`SQLite DB`, `WAL`, `SHM`, `Sync Log`, row counts, active DB path, and combined total).
 *   Reports clearly if `MerchantMaster_Snapshots` is installed on disk but unchecked in **Esc -> AddOns**, with a manual **Refresh** button to retry loading.
 
@@ -223,27 +227,34 @@ On a fresh install, the top status capsule shows **No AH Scan Yet** and Today's 
 
 ## Optional: Automatic AH Snapshots & 7x24 Heatmaps
 
-MerchantMaster works 100% standalone from in-game Auction House scans. If you also want automatic Auction House pulls every 15 minutes while WoW is closed, 30 days of price history, 7x24 demand heatmaps, and 7-day sales speed, install the free optional companion [JustBenji/MerchantMaster-Snapshots](https://github.com/JustBenji/MerchantMaster-Snapshots).
+MerchantMaster works 100% standalone from in-game Auction House scans. If you also want automatic Auction House updates, 30 days of price history, 7x24 demand heatmaps, and 7-day sales speed while WoW is closed, install the free optional companion [JustBenji/MerchantMaster-Snapshots](https://github.com/JustBenji/MerchantMaster-Snapshots) (**no Battle.net API key required**).
 
-You can copy the exact command for your OS anytime inside WoW under **Console -> Snapshot Settings** (`/mm snapshots`).
+You can copy the exact command for your OS anytime inside WoW under **Console -> Snapshot Sync** (`/mm snapshots`):
 
-*   **What you need:** A free [Battle.net API key](https://develop.battle.net/access/clients) (for reading Blizzard's public Auction House data) and **Python 3.11+** on Windows or macOS.
-*   **Windows (PowerShell):**
+*   **Windows (PowerShell, Python 3.11+):**
     ```powershell
-    py -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; py -m snapshot_builder setup-gui
+    py -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; py -m snapshot_builder configure --sync-mode github --apply-task --sync-now
     ```
     *(If Windows says `py` is not recognized, replace both `py` words with `python`.)*
-*   **Linux & Steam Deck (Terminal):**
+*   **Linux & Steam Deck (Terminal, Python 3.11+):**
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py -o install_linux.py && python3 install_linux.py
+    curl -fsSL https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py -o install_linux.py && python3 install_linux.py --sync-mode github
     ```
-    You can inspect or download the [Linux installer script (`install_linux.py`)](https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py) directly. It creates its own isolated Python folder, locates your WoW AddOns folder, and configures background updates automatically.
-*   **macOS (Terminal):**
+    You can inspect or download [`install_linux.py`](https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py) directly. It creates its own isolated virtualenv under `~/.local/share/merchantmaster-snapshots`, locates your Wine/Lutris/Steam Deck/Bottles WoW `_forever_\Interface\AddOns` folder, pulls the GitHub snapshot bundle, and enables a `systemd --user` timer (or cron fallback).
+*   **macOS (Terminal, Python 3.11+):**
     ```bash
-    python3 -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip && python3 -m snapshot_builder setup-gui
+    python3 -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip && python3 -m snapshot_builder configure --sync-mode github --apply-task --sync-now
     ```
-*   **Zero in-game folder config:** The helper writes the sibling `MerchantMaster_Snapshots` addon straight into `<WoW>/_forever_/Interface/AddOns`. Paste your API key, choose your server, click **Save & Sync**, and run `/reload` in WoW. Check active database paths and disk usage anytime under **Console -> Snapshot Settings** or **Console -> Database**.
-*   **Optional TSM Light Mode (Hourly Table Prices, Zero Local Files):** MerchantMaster stays 100% standalone by default with no third-party requirement. Flipping on **TSM Light Mode** under **Console -> Snapshot Settings** (`/mm snapshots`) writes hourly refreshed prices directly into MerchantMaster's tables with zero local snapshot files, while 7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth stay off unless `MerchantMaster_Snapshots` is installed. Using TSM Light Mode requires both the **TradeSkillMaster** addon and the **TSM Desktop App** installed locally (follow TSM's setup instructions). In the top header, the freshness badge distinguishes your active feed at a glance: `TSM <time>` for TSM Light Mode, `Snap <time>` for `MerchantMaster_Snapshots`, and `AH <time>` for manual in-game AH scans (hovering shows both Snapshot and Manual AH timestamps).
+*   **Preview / Rebuild / Turn Off:**
+    *   Preview pending deltas: `py -m snapshot_builder pull-github --check-only` (Linux: `~/.local/bin/mm-snapshots pull-github --check-only`)
+    *   Force clean rebuild: `py -m snapshot_builder sync --source github --force` (Linux: `~/.local/bin/mm-snapshots sync --source github --force`)
+    *   Turn off background sync: `py -m snapshot_builder uninstall-task` (Linux: `~/.local/bin/mm-snapshots uninstall-task`)
+*   **Zero in-game folder config:** The sync helper verifies SHA256 checksums, ingests only missing hourly/daily deltas into local SQLite, and writes `MerchantMaster_Snapshots\SnapshotData.lua` straight into `<WoW>/_forever_/Interface/AddOns`. Run `/reload` in WoW after setup, and check active database paths and disk usage anytime under **Console -> Snapshot Sync** or **Console -> Database**.
+*   **3-Way Price Refresh Mode (`Local Snapshot` | `TSM Light` | `None (Manual AH)`):** Under **Console -> Snapshot Sync** (`/mm snapshots`), choose one mutually exclusive background feed:
+    *   **Local Snapshot:** Reads synced `MerchantMaster_Snapshots` pulls, 30-day price history, 7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth (while keeping TSM off).
+    *   **TSM Light:** Writes hourly refreshed prices straight into MerchantMaster's tables with zero local snapshot files, and cleanly pauses local snapshot reads, 7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth. Requires both the **TradeSkillMaster** addon and the **TSM Desktop App** installed locally (follow TSM's setup instructions).
+    *   **None (Manual AH):** Pauses both `Local Snapshot` and `TSM Light` so MerchantMaster uses only your in-game `/mm scan` data.
+    *   In the top header, the freshness badge shows your active feed at a glance: `Snap <time>` for `Local Snapshot`, `TSM <time>` for `TSM Light`, and `AH <time>` for manual in-game scans (hovering shows the active refresh mode and timestamps).
 
 ---
 

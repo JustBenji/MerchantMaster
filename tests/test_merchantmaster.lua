@@ -3473,6 +3473,155 @@ do
 		_G.issecretvalue, _G.print, app.ui.toast = oldSecret, oldPrint, oldToast
 	end
 	checkBrowseQuoteFreshness()
+
+	local function checkEquipmentBrowseScan()
+		local market, seller, db = ns.MarketScan, ns.SellerStats, MerchantMasterDB
+		local prices = db.ahPrices[econ]
+		local oldEnum = _G.Enum
+		local oldSecret = _G.issecretvalue
+		local oldSendBrowse = ah.SendBrowseQuery
+		local oldGetBrowse = ah.GetBrowseResults
+		local oldHasFull = ah.HasFullBrowseResults
+		local oldGetKeyInfo = ah.GetItemKeyInfo
+		local oldToast = app.ui.toast
+		local oldSniper = ns.SniperEngine
+		local oldScannedAt = prices._scannedAt
+		local oldLastRefreshAt = db.lastRefreshAt
+		local oldPeacebloom = prices[2447]
+		local unpricedCatalogID
+		for cid in pairs(ns.ALL_CATALOG_IDS) do
+			if cid ~= 2447 and prices[cid] == nil then
+				unpricedCatalogID = cid
+				break
+			end
+		end
+		if not unpricedCatalogID then
+			unpricedCatalogID = scroll
+			prices[unpricedCatalogID] = nil
+		end
+
+		local sentQueries = {}
+		local toasts = {}
+		local batches = {}
+		local completedCalls = {}
+		local secretVal = {}
+
+		_G.Enum = _G.Enum or {}
+		local savedAHFilter = _G.Enum.AuctionHouseFilter
+		_G.Enum.AuctionHouseFilter = {
+			UncommonQuality = 3,
+			RareQuality = 4,
+			EpicQuality = 5,
+		}
+		_G.issecretvalue = function(v) return v == secretVal end
+		ah.SendBrowseQuery = function(q)
+			sentQueries[#sentQueries + 1] = q
+			return oldSendBrowse(q)
+		end
+		ah.HasFullBrowseResults = function() return true end
+		app.ui.toast = { ShowToast = function(msg) toasts[#toasts + 1] = msg end }
+		ns.SniperEngine = {
+			OnBrowseBatch = function(rows, econArg)
+				batches[#batches + 1] = { rows = rows, economy = econArg }
+			end,
+			OnBrowseScanComplete = function(econArg, partialArg)
+				completedCalls[#completedCalls + 1] = { economy = econArg, partial = partialArg }
+			end,
+		}
+
+		local peacebloomBefore = { price = 420, qty = 19, absent = false, at = now - 60, itemWide = true }
+		prices[2447] = peacebloomBefore
+		prices._scannedAt = now - 120
+		db.lastRefreshAt = now - 120
+
+		-- 1) StartEquipmentBrowseScan sends classID 2/4 and quality filters
+		local okStart, reasonStart = market.StartEquipmentBrowseScan()
+		check(okStart == true and reasonStart == "started", "StartEquipmentBrowseScan starts cleanly")
+		check(#sentQueries == 1, "StartEquipmentBrowseScan dispatches one SendBrowseQuery")
+		local eqQ = sentQueries[1]
+		check(eqQ and type(eqQ.itemClassFilters) == "table" and #eqQ.itemClassFilters == 2
+			and eqQ.itemClassFilters[1].classID == 2 and eqQ.itemClassFilters[2].classID == 4,
+			"StartEquipmentBrowseScan sends itemClassFilters = { { classID = 2 }, { classID = 4 } }")
+		check(eqQ and type(eqQ.filters) == "table" and #eqQ.filters == 3
+			and eqQ.filters[1] == 3 and eqQ.filters[2] == 4 and eqQ.filters[3] == 5,
+			"StartEquipmentBrowseScan includes UncommonQuality, RareQuality, and EpicQuality filters")
+		local okAgain, reasonAgain = market.StartEquipmentBrowseScan()
+		check(okAgain == true and reasonAgain == "already_active" and #sentQueries == 1,
+			"Calling StartEquipmentBrowseScan while active returns already_active without resending")
+
+		-- 2) handleMarketBrowseResults enriches quality, isCommodity (including false), and itemLevel
+		local equipKey1 = { itemID = 900101, itemLevel = 142, itemSuffix = 7, battlePetSpeciesID = 0 }
+		local equipKey2 = { itemID = 900102, itemLevel = 155, itemSuffix = 0, battlePetSpeciesID = 0 }
+		local equipKey3 = { itemID = 900103, itemLevel = 160, itemSuffix = 0, battlePetSpeciesID = 0 }
+		ah.GetItemKeyInfo = function(k, includeDesc)
+			check(includeDesc == true, "GetItemKeyInfo is invoked with includeDesc=true")
+			if k.itemID == 900101 then
+				return { quality = 3, isCommodity = false }
+			elseif k.itemID == 900102 then
+				return { quality = secretVal, isCommodity = secretVal }
+			end
+			error("simulated GetItemKeyInfo error")
+		end
+		ah.GetBrowseResults = function()
+			return {
+				{ itemKey = equipKey1, totalQuantity = 2, minPrice = 25000, itemLink = "|cff0070dd|Hitem:900101|h[Test Blade]|h|r" },
+				{ itemKey = equipKey2, totalQuantity = 1, minPrice = 50000, quality = 4, isCommodity = false },
+				{ itemKey = equipKey3, totalQuantity = 4, minPrice = 12000, quality = 2, isCommodity = true },
+			}
+		end
+		events("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+
+		check(#batches == 1 and #batches[1].rows == 3,
+			"handleMarketBrowseResults forwards enriched equipment rows to SniperEngine.OnBrowseBatch")
+		local r1, r2, r3 = batches[1].rows[1], batches[1].rows[2], batches[1].rows[3]
+		check(r1.itemID == 900101 and r1.quality == 3 and r1.isCommodity == false
+			and r1.itemKey.itemLevel == 142 and r1.itemKey.itemSuffix == 7,
+			"Row 1 forwards GetItemKeyInfo quality=3, isCommodity=false, and itemKey.itemLevel=142")
+		check(r2.itemID == 900102 and r2.quality == 4 and r2.isCommodity == false and r2.itemKey.itemLevel == 155,
+			"Row 2 ignores secret GetItemKeyInfo fields and falls back to readable entry.quality/isCommodity")
+		check(r3.itemID == 900103 and r3.quality == 2 and r3.isCommodity == true and r3.itemKey.itemLevel == 160,
+			"Row 3 catches GetItemKeyInfo error via pcall and falls back to entry fields")
+
+		-- 3) Finishing an equipmentOnly scan preserves catalog items (no absent=true / qty=0)
+		check(not market.GetState().active, "Equipment scan finishes cleanly after full browse results")
+		check(prices[2447] == peacebloomBefore and prices[2447].qty == 19 and prices[2447].absent == false,
+			"Equipment scan finish preserves existing consumable/herb prices without marking absent=true or qty=0")
+		check(prices[unpricedCatalogID] == nil,
+			"Equipment scan finish does not write absent=true / qty=0 for unpriced catalog items")
+		check(prices._scannedAt == now - 120 and db.lastRefreshAt == now - 120,
+			"Equipment scan finish does not overwrite full-scan freshness timestamps")
+		check(#completedCalls == 1 and completedCalls[1].economy == econ and completedCalls[1].partial == false,
+			"Equipment scan finish notifies SniperEngine.OnBrowseScanComplete")
+		check(toasts[1] == "Scanning All Equipment on AH..."
+			and toasts[2] and toasts[2]:find("Equipment AH Scan Complete", 1, true) ~= nil
+			and toasts[2]:find("3 items scanned", 1, true) ~= nil,
+			"Equipment scan shows start and completion toasts with scanned count")
+
+		-- 4) Starting Equipment scan cancels an active normal browse scan first, and normal scan clears equipmentOnly
+		ah.HasFullBrowseResults = function() return false end
+		ah.GetBrowseResults = function() return {} end
+		local normalStarted = app.refreshAllMarketValues()
+		check(normalStarted == true and market.GetState().active, "Normal browse scan starts for preemption test")
+		local eqOverrideOk, eqOverrideReason = market.StartEquipmentBrowseScan()
+		check(eqOverrideOk == true and eqOverrideReason == "started" and #sentQueries == 3,
+			"StartEquipmentBrowseScan cancels an active non-equipment scan before starting")
+		app.cancelMarketScan(false)
+		check(not market.GetState().active, "cancelMarketScan cleanly resets active state after equipment scan")
+
+		prices[2447] = oldPeacebloom
+		prices._scannedAt = oldScannedAt
+		db.lastRefreshAt = oldLastRefreshAt
+		_G.Enum.AuctionHouseFilter = savedAHFilter
+		_G.Enum = oldEnum
+		_G.issecretvalue = oldSecret
+		ah.SendBrowseQuery = oldSendBrowse
+		ah.GetBrowseResults = oldGetBrowse
+		ah.HasFullBrowseResults = oldHasFull
+		ah.GetItemKeyInfo = oldGetKeyInfo
+		app.ui.toast = oldToast
+		ns.SniperEngine = oldSniper
+	end
+	checkEquipmentBrowseScan()
 	_G.GetTime = priorGetTime
 	_G.C_AuctionHouse, _G.time = oldAH, oldTime
 	app.refresh, app.warmSuperListCache = refresh, warm

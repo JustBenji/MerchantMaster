@@ -1582,9 +1582,12 @@ local function ensureCrateClearHook(tooltip)
 end
 
 local function crateMoneyText(val, signed)
+	if ns.TooltipPrefs and ns.TooltipPrefs.FormatMoney then
+		return ns.TooltipPrefs.FormatMoney(val, false, signed == true)
+	end
 	local pal = (ns.Theme and ns.Theme.PALETTE) or {}
 	if type(val) ~= "number" or val ~= val then
-		return "|cff" .. (pal.hexMuted or "98989d") .. "—|r"
+		return "|cff" .. (pal.hexMuted or "98989d") .. "-|r"
 	end
 	if ns.Theme and ns.Theme.FormatMoneyText then
 		return ns.Theme.FormatMoneyText(val, signed or "cost")
@@ -1595,7 +1598,7 @@ end
 local function crateRateText(val)
 	local pal = (ns.Theme and ns.Theme.PALETTE) or {}
 	if type(val) ~= "number" or val ~= val then
-		return "|cff" .. (pal.hexMuted or "98989d") .. "—|r"
+		return "|cff" .. (pal.hexMuted or "98989d") .. "-|r"
 	end
 	if val ~= 0 and math.abs(val) < 10 then
 		local numHex = (val < 0) and (pal.hexPositive or "30d158") or (pal.hexText or "ffffff")
@@ -1638,7 +1641,7 @@ local function appendCrateBundleLines(tooltip, info, skipFillTotal)
 	for _, b in ipairs(info.bundles or {}) do
 		local readySuffix = ((b.owned or 0) > 0 and (b.missing or 0) == 0) and " (Ready)" or ""
 		local left = string.format("%s%dx %s%s%s",
-			b.isBest and "* " or "  ",
+			b.isBest and "  * " or "    ",
 			b.qty or 1,
 			b.name or "Item",
 			b.mode == "Craft" and " [Craft]" or "",
@@ -1649,156 +1652,444 @@ local function appendCrateBundleLines(tooltip, info, skipFillTotal)
 		else
 			right = "Unlisted"
 		end
-		local lr = b.isBest and 1 or 0.85
-		tooltip:AddDoubleLine(left, right, lr, lr, lr, 1, 1, 1)
+		if b.isBest then
+			tooltip:AddDoubleLine(left, right, 0.90, 0.92, 0.95, 0.96, 0.97, 0.99)
+		else
+			tooltip:AddDoubleLine(left, right, 0.86, 0.72, 0.54, 0.62, 0.66, 0.72)
+		end
 	end
 	if not skipFillTotal then
-		tooltip:AddDoubleLine("Fill Cost", crateMoneyText(info.fillCost), 1, 0.82, 0, 1, 1, 1)
+		tooltip:AddDoubleLine("  Fill Cost", crateMoneyText(info.fillCost), 0.90, 0.92, 0.95, 0.96, 0.97, 0.99)
 	end
 end
 
 local function appendCrateRepLines(tooltip, info)
-	tooltip:AddDoubleLine("Reputation", string.format("+%d Rep", info.forgedRep or 50), 0.85, 0.85, 0.85, 0.4, 0.85, 1)
-	local incLabel = (info.forgedMode == "banked") and "Cost / Rep (inc. crate, Banked)" or "Cost / Rep (inc. crate)"
-	local exLabel = (info.forgedMode == "banked") and "Cost / Rep (ex. crate, Banked)" or "Cost / Rep (ex. crate)"
-	tooltip:AddDoubleLine(incLabel, crateRateText(info.activeCostPerRep), 0.85, 0.85, 0.85, 1, 1, 1)
-	tooltip:AddDoubleLine(exLabel, crateRateText(info.activeCostPerRepExCrate), 0.85, 0.85, 0.85, 1, 1, 1)
+	tooltip:AddDoubleLine("  Reputation", string.format("+%d Rep", info.forgedRep or 50), 0.90, 0.92, 0.95, 0.40, 0.85, 1.00)
+	local incLabel = (info.forgedMode == "banked") and "  Cost / Rep (inc. crate, Banked)" or "  Cost / Rep (inc. crate)"
+	local exLabel = (info.forgedMode == "banked") and "  Cost / Rep (ex. crate, Banked)" or "  Cost / Rep (ex. crate)"
+	tooltip:AddDoubleLine(incLabel, crateRateText(info.activeCostPerRep), 0.90, 0.92, 0.95, 0.96, 0.97, 0.99)
+	tooltip:AddDoubleLine(exLabel, crateRateText(info.activeCostPerRepExCrate), 0.90, 0.92, 0.95, 0.96, 0.97, 0.99)
 end
 
-function ns.AppendCrateTooltip(tooltip, explicitItemID, opts)
-	if not tooltip or isSecretVal(tooltip) or isSecretTbl(tooltip) then return false end
-	if not ns.IsCrateTooltipEnabled() then return false end
-	if not ns.BuildCrateTooltipData then return false end
+do
+	local seenMarketTooltip = setmetatable({}, { __mode = "k" })
+	local clearHookedMarketTooltip = setmetatable({}, { __mode = "k" })
+	local origInvalidateCrateTooltipCache = ns.InvalidateCrateTooltipCache
 
-	local id, itemName, itemLink = discoverTooltipItem(tooltip, explicitItemID)
-	local knownCrate = id and ((ns.CRATE_BY_ID and ns.CRATE_BY_ID[id]) or (ns.SEALED_CRATE_BY_ID and ns.SEALED_CRATE_BY_ID[id]))
-	local isWaylaidText = (type(itemName) == "string" and itemName:find("Waylaid", 1, true) ~= nil)
-		or (type(itemLink) == "string" and itemLink:find("Waylaid", 1, true) ~= nil)
-	if not knownCrate and not isWaylaidText then
-		return false
-	end
-
-	ensureCrateClearHook(tooltip)
-	local dedupKey = id or itemLink or itemName
-	local saved = dedupKey and seenCrateTooltip[tooltip]
-	local curLines = tooltip.NumLines and tooltip:NumLines() or 0
-	if saved and saved.key == dedupKey and curLines >= saved.afterLines and saved.afterLines > 1 then
-		return false
-	end
-
-	local target = knownCrate and id or nil
-	if not target then
-		local rawBundles = tooltipBundles(tooltip)
-		if #rawBundles == 0 then return false end
-		local dynBundles = {}
-		for _, b in ipairs(rawBundles) do
-			dynBundles[#dynBundles + 1] = {
-				count = b.count,
-				name = b.name,
-				itemID = lookupID(b.name),
-			}
+	local function ttPref(key, fallback)
+		local tp = ns.TooltipPrefs
+		if tp and tp.Get then
+			return tp.Get(key)
 		end
-		target = { itemID = id, name = itemName, bundles = dynBundles }
-	end
-
-	local info = buildCrateTooltipInfo(target, opts)
-	if not info then return false end
-
-	tooltip:AddLine(" ")
-	if info.kind == "sealed" then
-		tooltip:AddDoubleLine("Sealed Waylaid Crate", string.format("+%d Favor", info.tokens or 0), 1, 0.82, 0, 0.4, 1, 0.6)
-		tooltip:AddDoubleLine("Cashback", crateMoneyText(info.rewardCopper or 0), 0.85, 0.85, 0.85, 0.4, 1, 0.6)
-		tooltip:AddDoubleLine("Reputation", string.format("+%s Rep", formatEquivRep(info.equivRepFromFavor)), 0.85, 0.85, 0.85, 0.4, 0.85, 1)
-	else
-		tooltip:AddDoubleLine("Waylaid Crate", string.format("+%d Favor", info.tokens or 0), 1, 0.82, 0, 0.4, 1, 0.6)
-		appendCrateBundleLines(tooltip, info)
-		local netCost = (info.netFilledCost ~= nil) and info.netFilledCost or info.fillOnlyNetCost
-		if netCost ~= nil then
-			tooltip:AddDoubleLine("Net Cost", crateMoneyText(netCost), 0.85, 0.85, 0.85, 1, 1, 1)
+		local db = MerchantMasterDB
+		if type(db) == "table" and db[key] ~= nil then
+			return db[key]
 		end
-		if info.pricePerToken ~= nil then
-			tooltip:AddDoubleLine("Price / Favor", crateRateText(info.pricePerToken), 1, 0.82, 0, 1, 1, 1)
+		return fallback
+	end
+
+	local function ttAllowed()
+		local tp = ns.TooltipPrefs
+		if tp then
+			if tp.Get and tp.Get("ttEnabled") == false then return false end
+			if tp.IsModifierSatisfied and not tp.IsModifierSatisfied() then return false end
+			return true
 		end
-		appendCrateRepLines(tooltip, info)
+		local db = MerchantMasterDB
+		if type(db) == "table" and db.ttEnabled == false then return false end
+		return true
 	end
 
-	if dedupKey then
-		seenCrateTooltip[tooltip] = { key = dedupKey, afterLines = tooltip.NumLines and tooltip:NumLines() or 0 }
+	local function formatMarketAge(ts, fallbackLabel)
+		local stamp = safeTipNum(ts)
+		local now = (type(time) == "function") and safeTipNum(time()) or 0
+		if stamp and stamp > 0 and now and now > 0 then
+			local delta = math.max(0, math.floor(now - stamp))
+			if delta < 60 then return "just now" end
+			if delta < 3600 then return tostring(math.floor(delta / 60)) .. "m ago" end
+			if delta < 86400 then return tostring(math.floor(delta / 3600)) .. "h ago" end
+			return tostring(math.floor(delta / 86400)) .. "d ago"
+		end
+		if type(fallbackLabel) == "string" and fallbackLabel ~= "" then
+			return fallbackLabel
+		end
+		return ""
 	end
-	if ns.Theme and ns.Theme.LiftTooltip then ns.Theme.LiftTooltip(tooltip) end
-	if tooltip.Show then tooltip:Show() end
-	return true
-end
 
-function ns.AppendEconTooltip(tooltip, explicitItemID)
-	if not tooltip or isSecretVal(tooltip) or isSecretTbl(tooltip) then return false end
-	local showCraft = ns.IsTooltipCraftCostEnabled()
-	local showDE = ns.IsTooltipDEValueEnabled()
-	if not showCraft and not showDE then return false end
-	local itemID, _, link = discoverTooltipItem(tooltip, explicitItemID)
-	if not itemID or itemID <= 0 then return false end
-	if not clearHookedEconTooltip[tooltip] and tooltip.HookScript then
-		clearHookedEconTooltip[tooltip] = true
-		pcall(tooltip.HookScript, tooltip, "OnTooltipCleared", function(self)
-			seenEconTooltip[self] = nil
-		end)
+	function ns.InvalidateMarketTooltipCache()
+		wipe(seenMarketTooltip)
 	end
-	local showDEBreakdown = ns.IsTooltipDEBreakdownEnabled and ns.IsTooltipDEBreakdownEnabled() or false
-	local obsVer = (ns.GetDEObservationVersion and ns.GetDEObservationVersion()) or 0
-	local dedupKey = tostring(link or ("item:" .. tostring(itemID))) .. ":" .. tostring(ns.priceCacheEpoch or 0) .. ":" .. tostring(obsVer) .. ":" .. (showCraft and "1" or "0") .. ":" .. (showDE and "1" or "0") .. ":" .. (showDEBreakdown and "1" or "0")
-	local prev = seenEconTooltip[tooltip]
-	local curLines = tooltip.NumLines and tooltip:NumLines() or 0
-	if prev and prev.key == dedupKey and curLines >= (prev.afterLines or 0) then
-		return false
+
+	function ns.InvalidateEconTooltipCache()
+		wipe(seenEconTooltip)
 	end
-	local craftUnit = showCraft and ns.GetTooltipCraftCost and ns.GetTooltipCraftCost(itemID) or nil
-	local applyCut = not MerchantMasterDB or MerchantMasterDB.applyAHCut ~= false
-	local deBD = showDE and ns.GetItemDEBreakdown and ns.GetItemDEBreakdown(itemID, link, applyCut) or nil
-	local hasDE = deBD and type(deBD.outcomes) == "table" and #deBD.outcomes > 0
-	local deNet = hasDE and deBD.netCopper or nil
-	if not hasDE and showDE and ns.GetItemDEValue then
-		deNet = ns.GetItemDEValue(itemID, link, applyCut)
+
+	function ns.InvalidateCrateTooltipCache()
+		wipe(seenCrateTooltip)
+		if origInvalidateCrateTooltipCache then
+			origInvalidateCrateTooltipCache()
+		end
 	end
-	if not craftUnit and not hasDE and not deNet then return false end
-	if craftUnit then
-		tooltip:AddDoubleLine("Craft Cost (est.)", crateMoneyText(craftUnit), 0.95, 0.82, 0.25, 1, 1, 1)
-	end
-	if hasDE or deNet then
-		local rightVal
-		if deNet then
-			rightVal = crateMoneyText(deNet) .. ((deBD and (deBD.missingPriceCount or 0) > 0) and " |cff98989d(partial)|r" or "")
+
+	function ns.AppendMarketTooltip(tooltip, explicitItemID)
+		if not tooltip or isSecretVal(tooltip) or isSecretTbl(tooltip) then return false end
+		if not ttAllowed() then return false end
+		if ttPref("ttMarketEnabled", true) == false then return false end
+
+		local showMin = ttPref("ttMinBuyout", true) ~= false
+		local showMkt = ttPref("ttMarketValue", true) ~= false
+		local showListed = ttPref("ttListedCount", true) ~= false
+		local showVendor = ttPref("ttVendorSell", false) == true
+		if not showMin and not showMkt and not showListed and not showVendor then
+			return false
+		end
+
+		local itemID, _, link = discoverTooltipItem(tooltip, explicitItemID)
+		if not itemID or itemID <= 0 then return false end
+
+		if not clearHookedMarketTooltip[tooltip] and tooltip.HookScript then
+			clearHookedMarketTooltip[tooltip] = true
+			pcall(tooltip.HookScript, tooltip, "OnTooltipCleared", function(self)
+				seenMarketTooltip[self] = nil
+			end)
+		end
+
+		local priceFmt = ttPref("ttPriceFormat", "colored")
+		local priceRev = (ns.GetPriceDataRevision and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
+		local dedupKey = tostring(link or ("item:" .. tostring(itemID)))
+			.. ":" .. tostring(priceRev)
+			.. ":" .. tostring(priceFmt)
+			.. ":" .. (showMin and "1" or "0")
+			.. ":" .. (showMkt and "1" or "0")
+			.. ":" .. (showListed and "1" or "0")
+			.. ":" .. (showVendor and "1" or "0")
+		local prev = seenMarketTooltip[tooltip]
+		local curLines = tooltip.NumLines and tooltip:NumLines() or 0
+		if prev and prev.key == dedupKey and curLines >= (prev.afterLines or 0) and (prev.afterLines or 0) > 0 then
+			return false
+		end
+
+		local can = (type(ns.GetCanonicalItemPrice) == "function") and ns.GetCanonicalItemPrice(itemID) or nil
+		local minBuyout, srcLabel, stockCount, latestAt
+		if can and (can.price ~= nil or can.source ~= nil or can.listed ~= nil or can.isAbsent) then
+			minBuyout = safeTipNum(can.price)
+			srcLabel = safeTipStr(can.source)
+			stockCount = safeTipNum(can.listed)
+			latestAt = safeTipNum(can.timestamp) or 0
 		else
-			rightVal = "|cff98989dUnpriced|r"
-		end
-		tooltip:AddDoubleLine("DE Value (est.)", rightVal, 0.95, 0.82, 0.25, 1, 1, 1)
-		if deBD and deBD.asNetCopper then
-			tooltip:AddDoubleLine("DE Value (AS +20%)", crateMoneyText(deBD.asNetCopper), 0.78, 0.62, 1.0, 1, 1, 1)
-		end
-		if deBD and (deBD.learnedCasts or 0) > 0 then
-			tooltip:AddDoubleLine("DE Learning", string.format("Learned: %d casts", deBD.learnedCasts), 0.72, 0.86, 0.72, 0.30, 0.90, 0.45)
-		end
-		if showDEBreakdown and deBD and deBD.outcomes then
-			for _, o in ipairs(deBD.outcomes) do
-				local pctStr = ns.FormatDEChancePct and ns.FormatDEChancePct(o.matRate) or tostring(math.floor((o.matRate or 0) * 100 + 0.5))
-				local qtyStr = ns.FormatDEAmount and ns.FormatDEAmount(o.amountOfMats) or tostring(o.amountOfMats or 1)
-				local rangeStr = (o.minAmount == o.maxAmount)
-					and ("[" .. tostring(o.minAmount) .. "]")
-					or ("[" .. tostring(o.minAmount) .. "-" .. tostring(o.maxAmount) .. "]")
-				local matLabel = (o.colorHex or "|cffffffff") .. (o.name or "Material") .. "|r"
-				local left = "  " .. pctStr .. "% " .. matLabel .. " x" .. qtyStr .. " |cffffd100" .. rangeStr .. "|r"
-				local right = o.evNetRounded and crateMoneyText(o.evNetRounded) or "|cff98989d-|r"
-				tooltip:AddDoubleLine(left, right, 0.88, 0.88, 0.90, 1, 1, 1)
+			if type(ns.GetPrice) == "function" then
+				local okP, p, s, q = pcall(ns.GetPrice, itemID)
+				if okP then
+					minBuyout, srcLabel, stockCount = safeTipNum(p), safeTipStr(s), safeTipNum(q)
+				end
+			elseif type(ns.GetItemMarketPrice) == "function" then
+				local okP, p, s, q = pcall(ns.GetItemMarketPrice, itemID)
+				if okP then
+					minBuyout, srcLabel, stockCount = safeTipNum(p), safeTipStr(s), safeTipNum(q)
+				end
 			end
 		end
+
+		local liveRec, snapRec
+		if (not can or latestAt == nil or latestAt == 0 or (showMkt and type(ns.GetItemMarketValue7d) ~= "function")) then
+			if type(ns.QueryLiveAH) == "function" then
+				local okL, _, rec = pcall(ns.QueryLiveAH, itemID)
+				if okL and type(rec) == "table" and not isSecretTbl(rec) then liveRec = rec end
+			end
+			if type(ns.QueryLocalSnapshot) == "function" then
+				local okS, _, rec = pcall(ns.QueryLocalSnapshot, itemID)
+				if okS and type(rec) == "table" and not isSecretTbl(rec) then snapRec = rec end
+			end
+			if not latestAt or latestAt == 0 then
+				local liveAt = safeTipNum(safeTipField(liveRec, "at")) or 0
+				local snapAt = safeTipNum(safeTipField(snapRec, "updatedAt")) or 0
+				latestAt = (liveAt >= snapAt) and liveAt or snapAt
+			end
+		end
+
+		local marketVal7d, trendPct
+		if showMkt then
+			local trend
+			if ns.MarketScan and type(ns.MarketScan.GetItemTrend7d) == "function" then
+				local okT, res = pcall(ns.MarketScan.GetItemTrend7d, itemID)
+				if okT and type(res) == "table" and not isSecretTbl(res) then
+					trend = res
+				end
+			end
+			if type(ns.GetItemMarketValue7d) == "function" then
+				local ok7, mv7 = pcall(ns.GetItemMarketValue7d, itemID)
+				if ok7 then marketVal7d = safeTipNum(mv7) end
+			end
+			if not marketVal7d then
+				local snapMV = safeTipNum(safeTipField(snapRec, "marketValue"))
+				if snapMV and snapMV > 0 then
+					marketVal7d = snapMV
+				end
+			end
+			if not marketVal7d and trend and type(trend.points) == "table" and #trend.points > 0 then
+				local sum, cnt = 0, 0
+				for _, pt in ipairs(trend.points) do
+					local ptP = safeTipNum(safeTipField(pt, "price"))
+					if ptP and ptP > 0 then
+						sum = sum + ptP
+						cnt = cnt + 1
+					end
+				end
+				if cnt > 0 then
+					marketVal7d = math.floor(sum / cnt + 0.5)
+				end
+			end
+			if not marketVal7d and trend then
+				local curP = safeTipNum(safeTipField(trend, "currentPrice"))
+				if curP and curP > 0 then marketVal7d = curP end
+			end
+			if not marketVal7d and type(ns.QueryTSMMarketBundle) == "function" then
+				local okB, bundle = pcall(ns.QueryTSMMarketBundle, itemID)
+				if okB and type(bundle) == "table" then
+					local tsmMV = safeTipNum(bundle.marketValue)
+					if tsmMV and tsmMV > 0 then marketVal7d = tsmMV end
+				end
+			end
+			if trend then
+				trendPct = safeTipNum(safeTipField(trend, "trendPct"))
+			end
+		end
+
+		local listedCount
+		if showListed then
+			if stockCount ~= nil and stockCount >= 0 then
+				listedCount = stockCount
+			elseif can and can.isAbsent then
+				listedCount = 0
+			elseif type(ns.GetNumListed) == "function" then
+				local okN, n = pcall(ns.GetNumListed, itemID)
+				if okN then listedCount = safeTipNum(n) end
+			end
+			if listedCount == nil and not (can and can.isAbsent) then
+				listedCount = safeTipNum(safeTipField(liveRec, "qty")) or safeTipNum(safeTipField(snapRec, "qty"))
+			end
+		end
+
+		local vendorSell
+		if showVendor then
+			local getInfo = (_G.C_Item and _G.C_Item.GetItemInfo) or _G.GetItemInfo
+			if type(getInfo) == "function" then
+				local okI, _, _, _, _, _, _, _, _, _, _, sellPrice = pcall(getInfo, itemID)
+				if okI then
+					local sp = safeTipNum(sellPrice)
+					if sp and sp > 0 then vendorSell = sp end
+				end
+			end
+		end
+
+		local rows = {}
+		if showMin and minBuyout and minBuyout > 0 then
+			rows[#rows + 1] = { "  Min Buyout", crateMoneyText(minBuyout) }
+		end
+		if showMkt and marketVal7d and marketVal7d > 0 then
+			local right = crateMoneyText(marketVal7d)
+			if trendPct ~= nil then
+				if trendPct > 0.05 then
+					right = right .. string.format(" |cff47e073(+%.1f%%)|r", trendPct)
+				elseif trendPct < -0.05 then
+					right = right .. string.format(" |cffff615c(%.1f%%)|r", trendPct)
+				else
+					right = right .. " |cff9ea8b8(0.0%)|r"
+				end
+			end
+			rows[#rows + 1] = { "  Market Value (7d)", right }
+		end
+		if showListed and listedCount ~= nil and listedCount >= 0 then
+			local unitWord = (listedCount == 1) and "auction" or "auctions"
+			rows[#rows + 1] = { "  Listed Supply", string.format("%d %s", math.floor(listedCount + 0.5), unitWord) }
+		end
+		if showVendor and vendorSell and vendorSell > 0 then
+			rows[#rows + 1] = { "  Vendor Sell Price", crateMoneyText(vendorSell) }
+		end
+
+		if #rows == 0 then return false end
+
+		local ageText = formatMarketAge(latestAt, srcLabel)
+		tooltip:AddDoubleLine("MerchantMaster Market", ageText, 1.00, 0.82, 0.00, 0.62, 0.66, 0.72)
+		for _, r in ipairs(rows) do
+			tooltip:AddDoubleLine(r[1], r[2], 0.90, 0.92, 0.95, 0.96, 0.97, 0.99)
+		end
+
+		seenMarketTooltip[tooltip] = { key = dedupKey, afterLines = tooltip.NumLines and tooltip:NumLines() or 0 }
+		return true
 	end
-	seenEconTooltip[tooltip] = { key = dedupKey, afterLines = tooltip.NumLines and tooltip:NumLines() or 0 }
-	return true
+
+	function ns.AppendCrateTooltip(tooltip, explicitItemID, opts)
+		if not tooltip or isSecretVal(tooltip) or isSecretTbl(tooltip) then return false end
+		if not ttAllowed() then return false end
+		if not ns.IsCrateTooltipEnabled() then return false end
+		if not ns.BuildCrateTooltipData then return false end
+
+		local id, itemName, itemLink = discoverTooltipItem(tooltip, explicitItemID)
+		local knownCrate = id and ((ns.CRATE_BY_ID and ns.CRATE_BY_ID[id]) or (ns.SEALED_CRATE_BY_ID and ns.SEALED_CRATE_BY_ID[id]))
+		local isWaylaidText = (type(itemName) == "string" and itemName:find("Waylaid", 1, true) ~= nil)
+			or (type(itemLink) == "string" and itemLink:find("Waylaid", 1, true) ~= nil)
+		if not knownCrate and not isWaylaidText then
+			return false
+		end
+
+		ensureCrateClearHook(tooltip)
+		local priceFmt = ttPref("ttPriceFormat", "colored")
+		local baseKey = id or itemLink or itemName
+		local dedupKey = baseKey and (tostring(baseKey) .. ":" .. tostring(priceFmt)) or nil
+		local saved = dedupKey and seenCrateTooltip[tooltip]
+		local curLines = tooltip.NumLines and tooltip:NumLines() or 0
+		if saved and saved.key == dedupKey and curLines >= saved.afterLines and saved.afterLines > 1 then
+			return false
+		end
+
+		local target = knownCrate and id or nil
+		if not target then
+			local rawBundles = tooltipBundles(tooltip)
+			if #rawBundles == 0 then return false end
+			local dynBundles = {}
+			for _, b in ipairs(rawBundles) do
+				dynBundles[#dynBundles + 1] = {
+					count = b.count,
+					name = b.name,
+					itemID = lookupID(b.name),
+				}
+			end
+			target = { itemID = id, name = itemName, bundles = dynBundles }
+		end
+
+		local info = buildCrateTooltipInfo(target, opts)
+		if not info then return false end
+
+		tooltip:AddLine(" ")
+		if info.kind == "sealed" then
+			tooltip:AddDoubleLine("MerchantMaster Sealed Waylaid Crate", string.format("+%d Favor", info.tokens or 0), 1.00, 0.82, 0.00, 0.28, 0.88, 0.45)
+			tooltip:AddDoubleLine("  Cashback", crateMoneyText(info.rewardCopper or 0), 0.90, 0.92, 0.95, 0.28, 0.88, 0.45)
+			tooltip:AddDoubleLine("  Reputation", string.format("+%s Rep", formatEquivRep(info.equivRepFromFavor)), 0.90, 0.92, 0.95, 0.40, 0.85, 1.00)
+		else
+			tooltip:AddDoubleLine("MerchantMaster Waylaid Crate", string.format("+%d Favor", info.tokens or 0), 1.00, 0.82, 0.00, 0.28, 0.88, 0.45)
+			appendCrateBundleLines(tooltip, info)
+			local netCost = (info.netFilledCost ~= nil) and info.netFilledCost or info.fillOnlyNetCost
+			if netCost ~= nil then
+				tooltip:AddDoubleLine("  Net Cost", crateMoneyText(netCost), 0.90, 0.92, 0.95, 0.96, 0.97, 0.99)
+			end
+			if info.pricePerToken ~= nil then
+				tooltip:AddDoubleLine("  Price / Favor", crateRateText(info.pricePerToken), 1.00, 0.82, 0.00, 0.96, 0.97, 0.99)
+			end
+			appendCrateRepLines(tooltip, info)
+		end
+
+		if dedupKey then
+			seenCrateTooltip[tooltip] = { key = dedupKey, afterLines = tooltip.NumLines and tooltip:NumLines() or 0 }
+		end
+		if ns.Theme and ns.Theme.LiftTooltip then ns.Theme.LiftTooltip(tooltip) end
+		if tooltip.Show then tooltip:Show() end
+		return true
+	end
+
+	function ns.AppendEconTooltip(tooltip, explicitItemID)
+		if not tooltip or isSecretVal(tooltip) or isSecretTbl(tooltip) then return false end
+		if not ttAllowed() then return false end
+		local showCraft = ns.IsTooltipCraftCostEnabled()
+		local showDE = ns.IsTooltipDEValueEnabled()
+		if not showCraft and not showDE then return false end
+		local itemID, _, link = discoverTooltipItem(tooltip, explicitItemID)
+		if not itemID or itemID <= 0 then return false end
+		if not clearHookedEconTooltip[tooltip] and tooltip.HookScript then
+			clearHookedEconTooltip[tooltip] = true
+			pcall(tooltip.HookScript, tooltip, "OnTooltipCleared", function(self)
+				seenEconTooltip[self] = nil
+			end)
+		end
+		local showCraftProfit = ttPref("ttCraftProfit", true) ~= false
+		local showDEAS = ttPref("ttDEArcaneSalvager", true) ~= false
+		local showDEBreakdown = ns.IsTooltipDEBreakdownEnabled and ns.IsTooltipDEBreakdownEnabled() or false
+		local priceFmt = ttPref("ttPriceFormat", "colored")
+		local obsVer = (ns.GetDEObservationVersion and ns.GetDEObservationVersion()) or 0
+		local priceRev = (ns.GetPriceDataRevision and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
+		local dedupKey = tostring(link or ("item:" .. tostring(itemID)))
+			.. ":" .. tostring(priceRev)
+			.. ":" .. tostring(obsVer)
+			.. ":" .. tostring(priceFmt)
+			.. ":" .. (showCraft and "1" or "0")
+			.. ":" .. (showCraftProfit and "1" or "0")
+			.. ":" .. (showDE and "1" or "0")
+			.. ":" .. (showDEAS and "1" or "0")
+			.. ":" .. (showDEBreakdown and "1" or "0")
+		local prev = seenEconTooltip[tooltip]
+		local curLines = tooltip.NumLines and tooltip:NumLines() or 0
+		if prev and prev.key == dedupKey and curLines >= (prev.afterLines or 0) and (prev.afterLines or 0) > 0 then
+			return false
+		end
+		local craftUnit = showCraft and ns.GetTooltipCraftCost and ns.GetTooltipCraftCost(itemID) or nil
+		local applyCut = not MerchantMasterDB or MerchantMasterDB.applyAHCut ~= false
+		local craftProfit
+		if craftUnit and showCraftProfit and type(ns.GetItemMarketPrice) == "function" then
+			local okM, mkt = pcall(ns.GetItemMarketPrice, itemID)
+			mkt = okM and safeTipNum(mkt) or nil
+			if mkt and mkt > 0 then
+				local netSale = applyCut and math.floor(mkt * 0.95 + 0.5) or mkt
+				craftProfit = netSale - craftUnit
+			end
+		end
+		local deBD = showDE and ns.GetItemDEBreakdown and ns.GetItemDEBreakdown(itemID, link, applyCut) or nil
+		local hasDE = deBD and type(deBD.outcomes) == "table" and #deBD.outcomes > 0
+		local deNet = hasDE and deBD.netCopper or nil
+		if not hasDE and showDE and ns.GetItemDEValue then
+			deNet = ns.GetItemDEValue(itemID, link, applyCut)
+		end
+		if not craftUnit and not hasDE and not deNet then return false end
+
+		tooltip:AddDoubleLine("MerchantMaster Crafting & DE", "", 1.00, 0.82, 0.00, 0.62, 0.66, 0.72)
+
+		if craftUnit then
+			tooltip:AddDoubleLine("  Craft Cost (est.)", crateMoneyText(craftUnit), 0.90, 0.92, 0.95, 0.96, 0.97, 0.99)
+			if craftProfit ~= nil then
+				local pr, pg, pb = 0.28, 0.88, 0.45
+				if craftProfit < 0 then pr, pg, pb = 1.00, 0.38, 0.36 end
+				tooltip:AddDoubleLine("  Craft Profit (est.)", crateMoneyText(craftProfit, true), 0.90, 0.92, 0.95, pr, pg, pb)
+			end
+		end
+		if hasDE or deNet then
+			local rightVal
+			if deNet then
+				rightVal = crateMoneyText(deNet) .. ((deBD and (deBD.missingPriceCount or 0) > 0) and " |cff98989d(partial)|r" or "")
+			else
+				rightVal = "|cff98989dUnpriced|r"
+			end
+			tooltip:AddDoubleLine("  DE Value (est.)", rightVal, 0.90, 0.92, 0.95, 0.96, 0.97, 0.99)
+			if showDEAS and deBD and deBD.asNetCopper then
+				tooltip:AddDoubleLine("  DE Value (AS +20%)", crateMoneyText(deBD.asNetCopper), 0.78, 0.64, 1.00, 0.78, 0.64, 1.00)
+			end
+			if deBD and (deBD.learnedCasts or 0) > 0 then
+				tooltip:AddDoubleLine("  DE Learning", string.format("Learned: %d casts", deBD.learnedCasts), 0.90, 0.92, 0.95, 0.28, 0.88, 0.45)
+			end
+			if showDEBreakdown and deBD and deBD.outcomes then
+				for _, o in ipairs(deBD.outcomes) do
+					local pctStr = ns.FormatDEChancePct and ns.FormatDEChancePct(o.matRate) or tostring(math.floor((o.matRate or 0) * 100 + 0.5))
+					local qtyStr = ns.FormatDEAmount and ns.FormatDEAmount(o.amountOfMats) or tostring(o.amountOfMats or 1)
+					local rangeStr = (o.minAmount == o.maxAmount)
+						and ("[" .. tostring(o.minAmount) .. "]")
+						or ("[" .. tostring(o.minAmount) .. "-" .. tostring(o.maxAmount) .. "]")
+					local matLabel = (o.colorHex or "|cffffffff") .. (o.name or "Material") .. "|r"
+					local left = "    " .. pctStr .. "% " .. matLabel .. " x" .. qtyStr .. " |cffffd100" .. rangeStr .. "|r"
+					local right = o.evNetRounded and crateMoneyText(o.evNetRounded) or "|cff98989d-|r"
+					tooltip:AddDoubleLine(left, right, 0.84, 0.86, 0.90, 0.96, 0.97, 0.99)
+				end
+			end
+		end
+		seenEconTooltip[tooltip] = { key = dedupKey, afterLines = tooltip.NumLines and tooltip:NumLines() or 0 }
+		return true
+	end
 end
 
 local function onTooltipItem(tooltip, explicitItemID)
 	if isSecretVal(tooltip) or isSecretTbl(tooltip) then return end
 	if not suppressCratePostCall and ns.AppendCrateTooltip then
 		ns.AppendCrateTooltip(tooltip, explicitItemID)
+	end
+	if ns.AppendMarketTooltip then
+		ns.AppendMarketTooltip(tooltip, explicitItemID)
 	end
 	if ns.AppendEconTooltip then
 		ns.AppendEconTooltip(tooltip, explicitItemID)
@@ -1885,7 +2176,7 @@ local TAB_GROUP_OF = {
 	an_overview = "analytics", an_ledger = "analytics", an_items = "analytics",
 	an_portfolio = "analytics", an_invest = "analytics", an_writs = "analytics",
 	prof_path = "professor", prof_shop = "professor", prof_browse = "professor",
-	sniper_gap = "sniper", sniper_vendor = "sniper",
+	sniper_gap = "sniper", sniper_vendor = "sniper", sniper_de = "sniper",
 }
 app.TAB_GROUP_OF = TAB_GROUP_OF
 
@@ -1896,8 +2187,8 @@ panel:SetPoint("CENTER")
 panel:SetMovable(true)
 panel:SetClampedToScreen(true)
 panel:EnableMouse(true)
-panel:RegisterForDrag("LeftButton")
-panel:SetScript("OnDragStart", panel.StartMoving)
+if panel.SetDontSavePosition then panel:SetDontSavePosition(true) end
+if panel.SetUserPlaced then panel:SetUserPlaced(false) end
 panel:SetToplevel(true)
 panel:Hide()
 tinsert(UISpecialFrames, panel:GetName())
@@ -1912,6 +2203,7 @@ local winChrome = ns.Theme.DecorateMainWindow(panel, {
 	defaultH = PANEL_H,
 	adaptiveLargeDefault = true,
 	comfortableZoom = true,
+	positionKey = "main",
 	title = "MerchantMaster",
 	icon = ns.ADDON_ICON,
 })
@@ -1922,11 +2214,23 @@ if ns.AHRefresh and ns.AHRefresh.Create then
 	winChrome.ahRefresh = ns.AHRefresh.Create(panel, nil)
 end
 
-panel:SetScript("OnDragStop", function(self)
-	self:StopMovingOrSizing()
+function app._finishPanelDrag(self)
+	if self and self.StopMovingOrSizing then self:StopMovingOrSizing() end
+	if panel.SetUserPlaced then panel:SetUserPlaced(false) end
 	panel.userMoved = true
 	if winChrome and winChrome.snapToPixels then winChrome.snapToPixels() end
-end)
+	if ns.Window and ns.Window.SavePosition then
+		ns.Window.SavePosition(panel, "main")
+	end
+end
+
+if ns.Window and ns.Window.MakeDragHandle then
+	ns.Window.MakeDragHandle(panel, panel, app._finishPanelDrag)
+else
+	panel:RegisterForDrag("LeftButton")
+	panel:SetScript("OnDragStart", panel.StartMoving)
+	panel:SetScript("OnDragStop", app._finishPanelDrag)
+end
 
 local function setPortrait(icon)
 	if winChrome and winChrome.crestIcon then
@@ -2730,28 +3034,11 @@ do
 	app.ui._updateTopTaskListBadge()
 
 	taskBtn:SetScript("OnClick", function()
-		if app.hasUnifiedShoppingItems and app.hasUnifiedShoppingItems() and app.syncUnifiedShoppingList then
-			app.syncUnifiedShoppingList()
-		end
-		local hasQueue = app.hasUnifiedShoppingItems and app.hasUnifiedShoppingItems()
-		local cartSig = (hasQueue and app.getOrderFlowCartSignature) and app.getOrderFlowCartSignature() or nil
-		local hasSession = app.orderFlow and app.orderFlow.HasAnyItems and app.orderFlow.HasAnyItems()
-			and (not cartSig or (app.orderFlow.HasActiveSessionForSig and app.orderFlow.HasActiveSessionForSig(cartSig)))
-		local srcRows = app.rawUnifiedShoppingRows or app.activeShoppingRows
-		if not hasSession and app.orderFlow and app.orderFlow.LoadFromShoppingRows and type(srcRows) == "table" and #srcRows > 0 then
-			app.orderFlow.LoadFromShoppingRows(srcRows, {
-				title = "Shopping List",
-				preserveProgress = true,
-				cartSig = cartSig,
-			})
-		end
-		local ofSt = app.orderFlow and app.orderFlow.GetState and app.orderFlow.GetState() or nil
-		if app.ui.cartBuyerModal and app.ui.cartBuyerModal:IsShown() and ofSt and ofSt.activeStage == "craft" then
-			if app.exitAHBuyingMode then app.exitAHBuyingMode(true) else app.ui.cartBuyerModal:Hide() end
+		if app.openCraftingTaskStrip then
+			app.openCraftingTaskStrip(true)
 		elseif app.enterOrderFlowMode then
 			app.enterOrderFlowMode("craft")
 		end
-		if app.ui._updateTopTaskListBadge then app.ui._updateTopTaskListBadge() end
 	end)
 	taskBtn:SetScript("OnEnter", function(self)
 		self._hovered = true
@@ -2862,6 +3149,9 @@ toolbar:SetHeight(48)
 toolbar.surface = ns.Theme.NineApple(toolbar, "pill", getPal().toolbarBg, getPal().glassBorder or getPal().border, {
 	cornerSize = 24,
 })
+if ns.Window and ns.Window.MakeDragHandle then
+	ns.Window.MakeDragHandle(toolbar, panel, app._finishPanelDrag)
+end
 app.ui.toolbar = toolbar
 
 local viewTitleFs = toolbar:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
@@ -3027,14 +3317,25 @@ statusCapsule:EnableMouse(true)
 statusCapsule:SetScript("OnEnter", function(self)
 	if not _G.GameTooltip then return end
 	local now = (type(_G.time) == "function") and _G.time() or nil
+	local bgMode = (type(ns.GetBackgroundPriceMode) == "function" and ns.GetBackgroundPriceMode()) or "none"
+	local modeName = (bgMode == "local" and "Local Snapshot")
+		or (bgMode == "tsm" and "TSM Light")
+		or "None (Manual AH)"
 	_G.GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
 	_G.GameTooltip:AddLine(app.ui._statusEconStr or "Active Economy", 1, 1, 1)
+	_G.GameTooltip:AddLine("Refresh Mode: " .. modeName, 0.85, 0.90, 0.96)
 	_G.GameTooltip:AddLine("Active Source: " .. (app.ui._statusSyncStr or "AH Ready"), 0.85, 0.90, 0.96)
 	if app.ui._statusUsingTSM then
 		local tsmStamp = app.ui._statusTsmAt and app.ui._formatStatusStamp(app.ui._statusTsmAt, now) or "Hourly"
 		_G.GameTooltip:AddLine("TSM Light Mode: " .. tsmStamp, 0.60, 0.88, 0.68)
 	end
-	_G.GameTooltip:AddLine("Last Snapshot (Snap): " .. app.ui._formatStatusStamp(app.ui._statusSnapAt, now), 0.78, 0.82, 0.88)
+	local snapSuppressed = type(ns.IsLocalSnapshotSuppressed) == "function" and ns.IsLocalSnapshotSuppressed()
+	local hasRawSnaps = type(ns.HasRawSnapshots) == "function" and ns.HasRawSnapshots()
+	if snapSuppressed and hasRawSnaps then
+		_G.GameTooltip:AddLine("Last Snapshot (Snap): Paused (" .. modeName .. ")", 0.78, 0.82, 0.88)
+	else
+		_G.GameTooltip:AddLine("Last Snapshot (Snap): " .. app.ui._formatStatusStamp(app.ui._statusSnapAt, now), 0.78, 0.82, 0.88)
+	end
 	_G.GameTooltip:AddLine("Last Manual AH Scan (AH): " .. app.ui._formatStatusStamp(app.ui._statusLiveAt, now), 0.78, 0.82, 0.88)
 	if app.ui._statusUsingTSM then
 		_G.GameTooltip:AddLine("TSM Light Mode supplies hourly refreshed prices without local snapshot files. 7x24 heatmaps and buyout depth stay off.", 0.60, 0.88, 0.68, true)
@@ -3810,6 +4111,7 @@ do
 			items = {
 				{ key = "sniper_gap", label = "Gap Sniper", icon = "bolt", tab = "sniper_gap" },
 				{ key = "sniper_vendor", label = "Vendor Sniper", icon = "coins", tab = "sniper_vendor" },
+				{ key = "sniper_de", label = "Disenchant Sniper", icon = "star", tab = "sniper_de" },
 			},
 		},
 		{
@@ -3848,7 +4150,7 @@ do
 
 		for _, item in ipairs(grp.items) do
 			local btn = CreateFrame("Button", nil, sidebar)
-			btn:SetSize(SB_SIDEBAR_W, 22)
+			btn:SetSize(SB_SIDEBAR_W, 21)
 			btn:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 12, navY)
 			btn.key = item.key
 			btn.targetTab = item.tab
@@ -3895,7 +4197,7 @@ do
 			end)
 			app.ui.navOrder[#app.ui.navOrder + 1] = btn
 			app.ui.navBtns[item.key] = btn
-			navY = navY - 23
+			navY = navY - 22
 		end
 	end
 
@@ -7883,7 +8185,9 @@ do
 		shopModal._mmApplyingSize = true
 		if shopModal.SetScale then shopModal:SetScale(fitScale) end
 		shopModal:SetSize(targetW, targetH)
-		if not shopModal._mmUserPositioned then
+		if ns.Window and ns.Window.RestorePosition and ns.Window.RestorePosition(shopModal, "shopping_list") then
+			shopModal._mmUserPositioned = true
+		elseif not shopModal._mmUserPositioned then
 			shopModal:ClearAllPoints()
 			shopModal:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
 		end
@@ -7904,6 +8208,7 @@ do
 		titleMaxWidth = 340,
 		centerY = 0,
 		dontSaveLayout = true,
+		positionKey = "shopping_list",
 		resizable = true,
 		resizeTitle = "Resize Shopping List",
 		minW = SHOP_MIN_W,
@@ -7924,6 +8229,9 @@ do
 			shopModal._mmUserPositioned = false
 			saveShopWindowSize(w, h)
 			applyShopWindowGeometry()
+			if ns.Window and ns.Window.HasSavedPosition and ns.Window.HasSavedPosition("shopping_list") then
+				ns.Window.ClampToScreen(shopModal)
+			end
 			if shopPanel and shopPanel.layoutColumns then shopPanel.layoutColumns() end
 		end,
 		onResize = function(w, h, isUser)
@@ -8048,12 +8356,28 @@ do
 	local CB_VISIBLE_DESTS = 5
 	local CB_DEST_H = 45
 
-	local cartBuyerModal = ns.Theme.CreateFloatingWindow(ADDON .. "CartBuyerWindow", "AH TRADE STRIP", CB_COMPACT_W, CB_WIN_H, {
+	local ui = {}
+	local cartBuyerModal
+	cartBuyerModal = ns.Theme.CreateFloatingWindow(ADDON .. "CartBuyerWindow", "AH TRADE STRIP", CB_COMPACT_W, CB_WIN_H, {
 		warcraftChrome = true,
 		compactChrome = true,
 		headerHeight = 46,
 		showPortrait = true,
 		titleMaxWidth = 144,
+		positionKey = "order_flow",
+		combatSafeDrag = true,
+		canDrag = function()
+			return (not ns.Window or not ns.Window.GetMode)
+				or ns.Window.GetMode("order_flow", "snap") ~= "lock"
+		end,
+		onDragStart = function(win)
+			if ns.Window and ns.Window.GetMode and ns.Window.GetMode("order_flow", "snap") == "snap" then
+				ns.Window.SetMode("order_flow", "free")
+				if ui.updateDockModeButton then ui.updateDockModeButton() end
+				local modalRef = win or cartBuyerModal
+				if modalRef and modalRef.Render then modalRef.Render() end
+			end
+		end,
 	})
 	app.ui.cartBuyerModal = cartBuyerModal
 	local cbHdr = cartBuyerModal.header
@@ -8061,7 +8385,6 @@ do
 	local cbExtended = false
 	local cbScrollOffset = 0
 	local cbDestScrollOffset = 0
-	local ui = {}
 
 	-- Reusable visual primitives (real NineApple 9-slices, socket.blp gold sockets, rounded pills)
 	local function makeFramedBtn(parent, w, h, label, fontSize, opts)
@@ -8250,6 +8573,10 @@ do
 		if cartBuyerModal.Render then cartBuyerModal.Render() end
 	end)
 	cartBuyerModal.clearBtn = cbClearBtn
+	local cbDockModeBtn = makeFramedBtn(cbHdr, 48, 26, "Snap", 10)
+	cbDockModeBtn:SetPoint("RIGHT", cbClearBtn, "LEFT", -4, 0)
+	cartBuyerModal.dockModeBtn = cbDockModeBtn
+	ui.dockModeBtn = cbDockModeBtn
 	if cartBuyerModal.closeBtn then
 		cartBuyerModal.closeBtn:SetScript("OnClick", function()
 			if app.exitAHBuyingMode then app.exitAHBuyingMode(false) else cartBuyerModal:Hide() end
@@ -8946,7 +9273,7 @@ do
 			if app.orderFlow then app.orderFlow.BuyVendorItem() end
 		elseif sk == "collect" then
 			if app.orderFlow then
-				local ofSt = app.orderFlow.GetState()
+				local ofSt = app.orderFlow.GetState and app.orderFlow.GetState()
 				local cSt = ofSt and ofSt.stages and ofSt.stages.collect
 				local cur = cSt and cSt.items and cSt.items[cSt.activeIndex]
 				if cur and cur.source == "bank" then
@@ -8981,9 +9308,9 @@ do
 			local cSt = ofSt and ofSt.stages and ofSt.stages.collect
 			local cur = cSt and cSt.items and cSt.items[cSt.activeIndex]
 			if cur and cur.source == "bank" then
-				return "Withdraw the needed quantity of this item from your open Bank."
+				return "Withdraw 1 stack of this item from your open Bank per click."
 			elseif cur and cur.source == "mail" then
-				return "Take the needed quantity of this item from your open Mailbox."
+				return "Collect 1 stack of this item from your open Mailbox per click."
 			elseif cur and cur.source == "alt" then
 				return "This item is stored on another character (log into that alt to mail it)."
 			end
@@ -9018,10 +9345,10 @@ do
 			if app.orderFlow then app.orderFlow.BuyAllAtCurrentVendor() end
 		elseif sk == "collect" then
 			if app.orderFlow then
-				if app.orderFlow.IsCollectAllActive and app.orderFlow.IsCollectAllActive() then
+				if app.orderFlow.GetCollectAllMode and app.orderFlow.GetCollectAllMode() == "item" then
 					app.orderFlow.StopCollectAll("user_stop")
-				elseif app.orderFlow.CollectAllAtCurrentSource then
-					app.orderFlow.CollectAllAtCurrentSource()
+				elseif app.orderFlow.CollectAllForItem then
+					app.orderFlow.CollectAllForItem()
 				end
 			end
 		elseif sk == "craft" then
@@ -9038,10 +9365,10 @@ do
 		elseif sk == "vendor" then
 			return "Buy all stocked, affordable vendor items available at this NPC in one click."
 		elseif sk == "collect" then
-			if app.orderFlow and app.orderFlow.IsCollectAllActive and app.orderFlow.IsCollectAllActive() then
-				return "Stop the active Collect All batch."
+			if app.orderFlow and app.orderFlow.GetCollectAllMode and app.orderFlow.GetCollectAllMode() == "item" then
+				return "Stop collecting this item."
 			end
-			return "Automatically collect all needed pending items from the open Bank or Mailbox."
+			return "Automatically collect all needed stacks of this selected item only from your open Mailbox or Bank."
 		elseif sk == "craft" then
 			return "Highlight and select this recipe in your open profession window."
 		end
@@ -9058,7 +9385,9 @@ do
 		elseif sk == "vendor" then
 			if app.orderFlow then app.orderFlow.MarkVendorBought() end
 		elseif sk == "collect" then
-			if app.orderFlow then app.orderFlow.MarkCollected() end
+			if app.orderFlow and app.orderFlow.MarkCollected then
+				app.orderFlow.MarkCollected()
+			end
 		elseif sk == "craft" then
 			if app.orderFlow then app.orderFlow.MarkCraftDone() end
 		end
@@ -9080,7 +9409,7 @@ do
 	cbExtraBtn:Hide()
 	ui.extraBtn = cbExtraBtn
 	cartBuyerModal.extraBtn = cbExtraBtn
-	addSellTip(cbNextBtn, "Next / Done", function()
+	addSellTip(cbNextBtn, "Next / Skip", function()
 		local sk = getFlowStage()
 		if sk == "ah" then
 			return "Jump to the next pending Auction House item."
@@ -9198,6 +9527,76 @@ do
 	cartBuyerModal.filterFs = cbFilterFs
 	cartBuyerModal.filterClearBtn = cbFilterClearBtn
 
+	-- Big Bottom-Left General Collect All Button (Stage 2 Overview footer)
+	local cbCollectAllBtn = makeFramedBtn(cbStripPane, 356, 34, "Collect All", 12, { useSkinArt = true, withDot = false })
+	cbCollectAllBtn:SetPoint("BOTTOMLEFT", cbStripPane, "BOTTOMLEFT", 2, 2)
+	cbCollectAllBtn:SetPoint("BOTTOMRIGHT", cbStripPane, "BOTTOMRIGHT", -2, 2)
+	cbCollectAllBtn:SetHeight(34)
+	cbCollectAllBtn:SetScript("OnClick", function()
+		if not app.orderFlow then return end
+		if app.orderFlow.IsCollectAllActive and app.orderFlow.IsCollectAllActive() then
+			app.orderFlow.StopCollectAll("user_stop")
+		elseif app.orderFlow.CollectAllAtCurrentSource then
+			app.orderFlow.CollectAllAtCurrentSource()
+		end
+	end)
+	addSellTip(cbCollectAllBtn, "Collect All Overview Items", function()
+		if app.orderFlow and app.orderFlow.IsCollectAllActive and app.orderFlow.IsCollectAllActive() then
+			return "Stop the active Collect All batch."
+		end
+		return "Collect all needed pending items in this overview from your open Mailbox or Bank."
+	end)
+	cbCollectAllBtn:Hide()
+	ui.collectAllBtn = cbCollectAllBtn
+	cartBuyerModal.collectAllBtn = cbCollectAllBtn
+
+	function ui.updateDockModeButton()
+		if not cbDockModeBtn then return end
+		local pal = getPal()
+		local isCustom = ns.Theme and ns.Theme.IsCustomSkin and ns.Theme.IsCustomSkin()
+		local isLight = (pal.mode == "light")
+		local mode = (ns.Window and ns.Window.GetMode) and ns.Window.GetMode("order_flow", "snap") or "snap"
+		local lbl = (mode == "lock" and "Lock") or (mode == "free" and "Free") or "Snap"
+		cbDockModeBtn:SetText(lbl)
+		if mode == "lock" then
+			local lf = isLight and { 0.78, 0.56, 0.08, 0.18 } or { 0.34, 0.24, 0.06, 0.96 }
+			local ls = isLight and { 0.68, 0.45, 0.02, 0.88 } or { 0.97, 0.84, 0.49, 0.96 }
+			local lt = isLight and { 0.46, 0.28, 0.00, 1.0 } or { 1.00, 0.92, 0.62, 1.0 }
+			cbDockModeBtn:PaintStyle(lf, ls, lt, isLight and 0.12 or 0.24)
+		elseif mode == "free" then
+			local ff = isLight and { 0.04, 0.48, 0.24, 0.16 } or (isCustom and { 0.08, 0.30, 0.18, 0.95 } or { 0.10, 0.24, 0.16, 0.95 })
+			local fs = isLight and { 0.02, 0.38, 0.18, 0.82 } or { 0.18, 0.95, 0.56, 0.88 }
+			local ft = isLight and { 0.00, 0.38, 0.16, 1.0 } or { 0.72, 1.00, 0.84, 1.0 }
+			cbDockModeBtn:PaintStyle(ff, fs, ft, isLight and 0.10 or 0.20)
+		else
+			local sf = isLight and { 0.04, 0.46, 0.58, 0.14 } or (isCustom and { 0.05, 0.20, 0.26, 0.95 } or { 0.10, 0.18, 0.24, 0.95 })
+			local ss = isLight and { 0.04, 0.46, 0.58, 0.78 } or { 0.34, 0.83, 0.91, 0.88 }
+			local st = isLight and { 0.02, 0.34, 0.46, 1.0 } or { 0.72, 0.94, 1.00, 1.0 }
+			cbDockModeBtn:PaintStyle(sf, ss, st, isLight and 0.10 or 0.20)
+		end
+	end
+	cbDockModeBtn:SetScript("OnClick", function()
+		if not (ns.Window and ns.Window.CycleMode) then return end
+		local nextMode = ns.Window.CycleMode("order_flow", "snap")
+		if nextMode == "free" then
+			if ns.Window.DetachToUIParent then ns.Window.DetachToUIParent(cartBuyerModal) end
+			if ns.Window.SavePosition then ns.Window.SavePosition(cartBuyerModal, "order_flow") end
+		elseif app.dockCartBuyerModal then
+			app.dockCartBuyerModal(false)
+		end
+		ui.updateDockModeButton()
+		if cartBuyerModal.Render then cartBuyerModal.Render() end
+	end)
+	addSellTip(cbDockModeBtn, "Window Dock Mode", function()
+		local mode = (ns.Window and ns.Window.GetMode) and ns.Window.GetMode("order_flow", "snap") or "snap"
+		if mode == "snap" then
+			return "Snap: Attached to the open game window and moves with it. Drag this strip to switch to Free mode, or click to Lock."
+		elseif mode == "lock" then
+			return "Lock: Locked beside the open game window so they stay together (strip dragging disabled). Click to switch to Free mode."
+		end
+		return "Free: Moves freely and remembers its saved screen position. Click to snap back beside the open game window."
+	end)
+
 	-- 3. Scrollable 1-Line Buying List (36px crisp cards, 3px gap, NO "For ..." subtitle, visible Baron scrollbar!)
 	local cbListFrame = CreateFrame("Frame", nil, cbStripPane)
 	cbListFrame:SetPoint("TOPLEFT", cbStripPane, "TOPLEFT", 2, -164)
@@ -9211,11 +9610,15 @@ do
 		return (app.cartBuyer and app.cartBuyer.GetVisibleItems) and app.cartBuyer.GetVisibleItems() or {}
 	end
 
-	local function getVisCap(hasFilterFlag, hasCapFlag, hasNoticeFlag)
+	local function getVisCap(hasFilterFlag, hasCapFlag, hasNoticeFlag, hasFooterFlag)
 		if hasNoticeFlag == nil then
 			hasNoticeFlag = (cbNoticeBar and cbNoticeBar.IsShown and cbNoticeBar:IsShown()) and true or false
 		end
+		if hasFooterFlag == nil then
+			hasFooterFlag = (cbCollectAllBtn and cbCollectAllBtn.IsShown and cbCollectAllBtn:IsShown()) and true or false
+		end
 		local noticeDeduct = (hasNoticeFlag == true) and 1 or 0
+		local footerDeduct = (hasFooterFlag == true) and 1 or 0
 		if hasCapFlag == nil then
 			local sk = getFlowStage()
 			if sk == "ah" then
@@ -9228,7 +9631,7 @@ do
 				hasCapFlag = false
 			end
 		end
-		return math.max(1, CB_VISIBLE_ROWS - (hasFilterFlag and 1 or 0) - (hasCapFlag and 1 or 0) - noticeDeduct)
+		return math.max(1, CB_VISIBLE_ROWS - (hasFilterFlag and 1 or 0) - (hasCapFlag and 1 or 0) - noticeDeduct - footerDeduct)
 	end
 	cartBuyerModal.getVisCap = getVisCap
 
@@ -9637,6 +10040,9 @@ do
 			MerchantMasterDB.ahBuyerExtended = cbExtended
 		end
 		applyCartBuyerLayout()
+		if ns.Window and ns.Window.HasSavedPosition and ns.Window.HasSavedPosition("order_flow") and ns.Window.ClampToScreen then
+			ns.Window.ClampToScreen(cartBuyerModal)
+		end
 		if cartBuyerModal.Render then cartBuyerModal.Render() end
 	end
 
@@ -9659,16 +10065,33 @@ do
 			cartBuyerModal.hdrPortraitWrap:SetPoint("LEFT", cbHdr, "LEFT", 16, 0)
 		end
 		if cartBuyerModal.titleFs and cbRestoreBtn and cartBuyerModal.closeBtn then
+			local mode = (ns.Window and ns.Window.GetMode) and ns.Window.GetMode("order_flow", "snap") or "snap"
+			if cbExtended then
+				cbRestoreBtn:SetWidth(88)
+				cbRestoreBtn:SetText("Restore Full")
+				if cbClearBtn then cbClearBtn:SetWidth(48) end
+				if cbDockModeBtn then cbDockModeBtn:SetWidth(48) end
+			else
+				cbRestoreBtn:SetWidth(46)
+				cbRestoreBtn:SetText("Full")
+				if cbClearBtn then cbClearBtn:SetWidth(40) end
+				if cbDockModeBtn then cbDockModeBtn:SetWidth(42) end
+			end
 			cbRestoreBtn:ClearAllPoints()
 			cbRestoreBtn:SetPoint("RIGHT", cartBuyerModal.closeBtn, "LEFT", -6, 0)
 			if cbClearBtn then
 				cbClearBtn:ClearAllPoints()
 				cbClearBtn:SetPoint("RIGHT", cbRestoreBtn, "LEFT", -4, 0)
 			end
+			if cbDockModeBtn then
+				cbDockModeBtn:ClearAllPoints()
+				cbDockModeBtn:SetPoint("RIGHT", cbClearBtn or cbRestoreBtn, "LEFT", -4, 0)
+			end
+			cartBuyerModal._mmTitleRightAnchor = cbDockModeBtn or cbClearBtn or cbRestoreBtn
 			local tLeft = isCustom and 50 or 14
 			cartBuyerModal.titleFs:ClearAllPoints()
 			cartBuyerModal.titleFs:SetPoint("TOPLEFT", cbHdr, "TOPLEFT", tLeft, -7)
-			cartBuyerModal.titleFs:SetPoint("RIGHT", cbClearBtn or cbRestoreBtn, "LEFT", -6, 0)
+			cartBuyerModal.titleFs:SetPoint("RIGHT", cartBuyerModal._mmTitleRightAnchor, "LEFT", -6, 0)
 			local env = ofState and ofState.env or {}
 			local hdrTitle, hdrSub
 			if stageKey == "vendor" then
@@ -9692,13 +10115,19 @@ do
 				hdrTitle = "AH TRADE STRIP"
 				hdrSub = inAH and "MINIMIZED - DOCKED TO AH" or "MINIMIZED - WAITING FOR AH"
 			end
+			if mode == "free" then
+				hdrSub = "FREE POSITION"
+			elseif mode == "lock" and type(hdrSub) == "string" then
+				hdrSub = hdrSub:gsub("DOCKED TO ", "LOCKED TO ")
+			end
 			cartBuyerModal.titleFs:SetText(hdrTitle)
 			if cartBuyerModal.hdrSubFs then
 				cartBuyerModal.hdrSubFs:ClearAllPoints()
 				cartBuyerModal.hdrSubFs:SetPoint("TOPLEFT", cartBuyerModal.titleFs, "BOTTOMLEFT", 0, -2)
-				cartBuyerModal.hdrSubFs:SetPoint("RIGHT", cbRestoreBtn, "LEFT", -6, 0)
+				cartBuyerModal.hdrSubFs:SetPoint("RIGHT", cartBuyerModal._mmTitleRightAnchor, "LEFT", -6, 0)
 				cartBuyerModal.hdrSubFs:SetText(hdrSub)
 			end
+			if ui.updateDockModeButton then ui.updateDockModeButton() end
 		end
 		local rFill = isLight and { 0.94, 0.95, 0.97, 1 } or (isCustom and { 0.06, 0.17, 0.12, 0.95 } or { 0.16, 0.17, 0.20, 0.94 })
 		local rStroke = isLight and { 0.68, 0.45, 0.02, 0.72 } or ((isCustom and pal.frameBorder) or pal.cartMainAccent or { 0.83, 0.64, 0.24, 0.88 })
@@ -9767,28 +10196,33 @@ do
 		cbOpenAHBtn:Show()
 		cbMarkBtn:Show()
 		cbNextBtn:Show()
-		local w1, w2, w3, w4 = 114, 108, 98, nil
+		local w1, w2, w3, w4, gap = 114, 108, 98, nil, 6
 		if mode == "ah_confirm" then
 			w1, w2, w3, w4 = 148, 94, 78, nil
 		elseif mode == "vendor" then
 			w1, w2, w3, w4 = 116, 94, 58, 46
 		elseif mode == "collect" then
-			w1, w2, w3, w4 = 126, 74, 70, 44
+			w1, w2, w3, w4, gap = 94, 104, 72, 47, 5
 		elseif mode == "craft" then
 			w1, w2, w3, w4 = 118, 68, 66, 62
 		end
+		local btnFontSz = (mode == "collect") and 10 or 11
+		for _, b in ipairs({ cbOpenAHBtn, cbMarkBtn, cbNextBtn }) do
+			if b and b.fs then applySafeFont(b.fs, btnFontSz, "semibold") end
+		end
+		if cbExtraBtn and cbExtraBtn.fs then applySafeFont(cbExtraBtn.fs, 10, "semibold") end
 		cbOpenAHBtn:ClearAllPoints()
 		cbOpenAHBtn:SetPoint("BOTTOMLEFT", cbSpotlight, "BOTTOMLEFT", 10, 10)
 		cbOpenAHBtn:SetSize(w1, 30)
 		cbMarkBtn:ClearAllPoints()
-		cbMarkBtn:SetPoint("LEFT", cbOpenAHBtn, "RIGHT", 6, 0)
+		cbMarkBtn:SetPoint("LEFT", cbOpenAHBtn, "RIGHT", gap, 0)
 		cbMarkBtn:SetSize(w2, 30)
 		cbNextBtn:ClearAllPoints()
-		cbNextBtn:SetPoint("LEFT", cbMarkBtn, "RIGHT", 6, 0)
+		cbNextBtn:SetPoint("LEFT", cbMarkBtn, "RIGHT", gap, 0)
 		cbNextBtn:SetSize(w3, 30)
 		if w4 then
 			cbExtraBtn:ClearAllPoints()
-			cbExtraBtn:SetPoint("LEFT", cbNextBtn, "RIGHT", 6, 0)
+			cbExtraBtn:SetPoint("LEFT", cbNextBtn, "RIGHT", gap, 0)
 			cbExtraBtn:SetSize(w4, 30)
 			cbExtraBtn:Show()
 			cbExtraBtn:PaintStyle(secFill, goldBorder, secText, isLight and 0.08 or 0.18)
@@ -9810,7 +10244,18 @@ do
 				0.22,
 				nil)
 		end
-		cbMarkBtn:PaintStyle(secFill, goldBorder, secText, isLight and 0.08 or 0.18)
+		if mode == "collect" and cbMarkBtn:GetText() == "Stop" then
+			local sf = isLight and { 0.80, 0.14, 0.18, 1.00 } or { 0.56, 0.08, 0.12, 0.96 }
+			local ss = isLight and { 0.72, 0.08, 0.10, 0.90 } or { 0.97, 0.84, 0.49, 0.96 }
+			cbMarkBtn:PaintStyle(sf, ss, { 1.00, 0.97, 0.90, 1.00 }, 0.24)
+		elseif mode == "collect" then
+			local af = isLight and { 0.04, 0.46, 0.30, 0.14 } or { 0.07, 0.28, 0.18, 0.96 }
+			local as = isLight and { 0.04, 0.46, 0.30, 0.78 } or { 0.22, 0.88, 0.52, 0.88 }
+			local at = isLight and { 0.02, 0.36, 0.20, 1.00 } or { 0.86, 1.00, 0.90, 1.00 }
+			cbMarkBtn:PaintStyle(af, as, at, isLight and 0.10 or 0.22)
+		else
+			cbMarkBtn:PaintStyle(secFill, goldBorder, secText, isLight and 0.08 or 0.18)
+		end
 		cbNextBtn:PaintStyle(secFill, goldBorder, secText, isLight and 0.08 or 0.18)
 	end
 
@@ -10747,9 +11192,8 @@ do
 				ui.mColExp.lblFs:SetText("LOCATION")
 				ui.mColLive.lblFs:SetText("AVAILABLE")
 				ui.mColDiff.lblFs:SetText("REMAINING")
-				local isCollectAll = (app.orderFlow and app.orderFlow.IsCollectAllActive and app.orderFlow.IsCollectAllActive()) and true or false
-				local canCollectAll = isCollectAll or ((app.orderFlow and app.orderFlow.HasCollectableAtCurrentSource and app.orderFlow.HasCollectableAtCurrentSource()) and true or false)
-				cbMarkBtn:SetText(isCollectAll and "Stop" or "Collect All")
+				local collectAllMode = (app.orderFlow and app.orderFlow.GetCollectAllMode and app.orderFlow.GetCollectAllMode()) or nil
+				cbMarkBtn:SetText(collectAllMode == "item" and "Stop" or "All This Item")
 				cbNextBtn:SetText("Mark Done")
 				cbExtraBtn:SetText("Skip")
 				if not cur then
@@ -10758,8 +11202,8 @@ do
 					ui.mColExp.valFs:SetText(palHex("hexMuted", "98989d") .. "-|r")
 					ui.mColLive.valFs:SetText(palHex("hexMuted", "98989d") .. "-|r")
 					ui.mColDiff.valFs:SetText(palHex("hexMuted", "98989d") .. "-|r")
-					cbOpenAHBtn:SetText("Withdraw from Bank")
-					cbOpenAHBtn:SetEnabled(false); cbMarkBtn:SetEnabled(canCollectAll); cbNextBtn:SetEnabled(false); cbExtraBtn:SetEnabled(false)
+					cbOpenAHBtn:SetText("Collect 1x")
+					cbOpenAHBtn:SetEnabled(false); cbMarkBtn:SetEnabled(false); cbNextBtn:SetEnabled(false); cbExtraBtn:SetEnabled(false)
 				else
 					positionSpotlightTitle(true)
 					local srcBadge = (cur.source == "bank" and "BANK") or (cur.source == "mail" and "MAIL") or (cur.source == "alt" and "ALT") or "BAGS"
@@ -10793,34 +11237,34 @@ do
 						local avB = cur.availableHere or 0
 						local avBHex = (avB > 0) and palHex("hexPositive", "30d158") or palHex("hexWarning", "ffd60a")
 						ui.mColLive.valFs:SetText(env.atBank and (avBHex .. tostring(avB) .. " in Bank|r") or (palHex("hexMuted", "98989d") .. "Bank Closed|r"))
-						cbOpenAHBtn:SetText("Withdraw from Bank")
+						cbOpenAHBtn:SetText("Take 1x")
 					elseif cur.source == "mail" then
 						local avM = cur.availableHere or 0
 						local avMHex = (avM > 0) and palHex("hexPositive", "30d158") or palHex("hexWarning", "ffd60a")
 						ui.mColLive.valFs:SetText(env.atMail and (avMHex .. tostring(avM) .. " in Mail|r") or (palHex("hexMuted", "98989d") .. "Mail Closed|r"))
-						cbOpenAHBtn:SetText("Collect from Mail")
+						cbOpenAHBtn:SetText("Collect 1x")
 					elseif cur.source == "alt" then
 						ui.mColLive.valFs:SetText(palHex("hexCartSub", "d4b3ff") .. "On Alt|r")
 						cbOpenAHBtn:SetText("On Alt")
 					else
 						ui.mColLive.valFs:SetText(palHex("hexPositive", "30d158") .. "In Bags|r")
-						cbOpenAHBtn:SetText("Ready in Bags")
+						cbOpenAHBtn:SetText("In Bags")
 					end
 					local isCurDone = (cur.status == "done" or cur.status == "skipped" or (cur.remaining or 0) <= 0)
 					ui.mColDiff.valFs:SetText(isCurDone and (palHex("hexPositive", "30d158") .. "Done|r") or (palHex("hexText", "ffffff") .. string.format("%dx|r", cur.remaining or 0)))
 					if isCurDone then
 						cbActiveFs:SetText(palHex("hexPositive", "30d158") .. tostring(cur.name or "") .. " - Ready!|r")
 						ui.spotQtyPill:Show(); ui.spotQtyPill:Paint(qtyFill, qtyStroke, qtyHex, "[OK]")
-						cbOpenAHBtn:SetEnabled(false); cbMarkBtn:SetEnabled(canCollectAll); cbNextBtn:SetEnabled(false); cbExtraBtn:SetEnabled(false)
+						cbOpenAHBtn:SetEnabled(false); cbMarkBtn:SetEnabled(collectAllMode == "item"); cbNextBtn:SetEnabled(false); cbExtraBtn:SetEnabled(false)
 					else
 						cbActiveFs:SetText(palHex("hexText", "ffffff") .. tostring(cur.name or "") .. "|r")
 						ui.spotQtyPill:Show(); ui.spotQtyPill:Paint(qtyFill, qtyStroke, qtyHex, string.format("%dx", cur.remaining or 0))
 						local canAct = (cur.source == "bank" and env.atBank and (cur.availableHere or 0) > 0)
 							or (cur.source == "mail" and env.atMail and (cur.availableHere or 0) > 0)
-						cbOpenAHBtn:SetEnabled(canAct)
-						cbMarkBtn:SetEnabled(canCollectAll)
-						cbNextBtn:SetEnabled(cur.source ~= "alt")
-						cbExtraBtn:SetEnabled(true)
+						cbOpenAHBtn:SetEnabled(collectAllMode == nil and canAct)
+						cbMarkBtn:SetEnabled((collectAllMode == "item") or (collectAllMode == nil and canAct))
+						cbNextBtn:SetEnabled(collectAllMode == nil and cur.source ~= "alt")
+						cbExtraBtn:SetEnabled(collectAllMode == nil)
 					end
 				end
 				if stageDonePrompt then
@@ -10972,7 +11416,47 @@ do
 			cbFilterBar:Hide()
 			cbListFrame:SetPoint("TOPLEFT", cbStripPane, "TOPLEFT", 2, topBelowCard - 2)
 		end
-		cbListFrame:SetPoint("BOTTOMRIGHT", cbStripPane, "BOTTOMRIGHT", -2, 0)
+		local showCollectAllFooter = (stageKey == "collect" and stats and not stats.empty and not stats.complete) and true or false
+		if showCollectAllFooter then
+			local collectAllMode = (app.orderFlow and app.orderFlow.GetCollectAllMode and app.orderFlow.GetCollectAllMode()) or nil
+			local canCollectAll = (app.orderFlow and app.orderFlow.HasCollectableAtCurrentSource and app.orderFlow.HasCollectableAtCurrentSource()) and true or false
+			local sum = (app.orderFlow and app.orderFlow.GetCollectAllSummary and app.orderFlow.GetCollectAllSummary()) or nil
+			local btnLabel
+			if collectAllMode == "all" then
+				btnLabel = "Stop Collect All"
+			elseif sum and sum.source == "mail" then
+				btnLabel = (sum.itemCount or 0) > 0
+					and string.format("Collect All from Mail (%d)", sum.itemCount)
+					or "Collect All from Mail"
+			elseif sum and sum.source == "bank" then
+				btnLabel = (sum.itemCount or 0) > 0
+					and string.format("Collect All from Bank (%d)", sum.itemCount)
+					or "Collect All from Bank"
+			else
+				btnLabel = "Collect All (Open Mail/Bank)"
+			end
+			cbCollectAllBtn:SetText(btnLabel)
+			local btnEnabled = (collectAllMode == "all") or (collectAllMode == nil and canCollectAll)
+			cbCollectAllBtn:SetEnabled(btnEnabled)
+			if collectAllMode == "all" then
+				local sf = isLight and { 0.80, 0.14, 0.18, 1.00 } or { 0.56, 0.08, 0.12, 0.96 }
+				local ss = isLight and { 0.72, 0.08, 0.10, 0.90 } or { 0.97, 0.84, 0.49, 0.96 }
+				cbCollectAllBtn:PaintStyle(sf, ss, { 1.00, 0.97, 0.90, 1.00 }, 0.24, nil)
+			elseif btnEnabled then
+				local bf = isLight and { 0.04, 0.48, 0.24, 1.00 } or (isCustom and { 0.08, 0.44, 0.25, 0.96 } or { 0.06, 0.42, 0.24, 0.96 })
+				local bs = isLight and { 0.02, 0.36, 0.18, 0.90 } or { 0.97, 0.84, 0.49, 0.95 }
+				cbCollectAllBtn:PaintStyle(bf, bs, { 1.00, 0.98, 0.90, 1.00 }, 0.24, nil)
+			else
+				local df = isLight and { 0.93, 0.94, 0.96, 1.00 } or (isCustom and { 0.04, 0.10, 0.07, 0.86 } or { 0.12, 0.13, 0.16, 0.88 })
+				local dt = isLight and (pal.textMuted or { 0.45, 0.45, 0.48, 1 }) or { 0.58, 0.62, 0.60, 1 }
+				cbCollectAllBtn:PaintStyle(df, subtleBorder, dt, 0.08, nil)
+			end
+			cbCollectAllBtn:Show()
+			cbListFrame:SetPoint("BOTTOMRIGHT", cbStripPane, "BOTTOMRIGHT", -2, 42)
+		else
+			cbCollectAllBtn:Hide()
+			cbListFrame:SetPoint("BOTTOMRIGHT", cbStripPane, "BOTTOMRIGHT", -2, 0)
+		end
 
 		local ctx = {
 			pal = pal, isCustom = isCustom, skinKey = skinKey, isLight = isLight, inAH = inAH,
@@ -10981,7 +11465,7 @@ do
 			hasFilter = hasFilter, activeDestKey = activeDestKey,
 		}
 		local visItems = getActiveVisibleEntries()
-		local visCap = getVisCap(hasFilter, hasCap or hasCraftBar, hasNotice)
+		local visCap = getVisCap(hasFilter, hasCap or hasCraftBar, hasNotice, showCollectAllFooter)
 		renderStageRows(stageKey, activeIdx, visItems, visCap, ofState, ctx)
 
 		if cbExtended then
@@ -11035,21 +11519,492 @@ do
 		return nil
 	end
 
-	function app.dockCartBuyerModal()
-		cartBuyerModal:ClearAllPoints()
+	local function getSafeScreenRight(frameObj, fallbackScale)
+		if not frameObj or isSecretVal(frameObj) then return nil, fallbackScale end
+		if type(frameObj.IsShown) == "function" then
+			local okS, shown = pcall(frameObj.IsShown, frameObj)
+			if not okS or isSecretVal(shown) or not shown then return nil, fallbackScale end
+		end
+		if type(frameObj.GetRight) ~= "function" then return nil, fallbackScale end
+		local okR, rawR = pcall(frameObj.GetRight, frameObj)
+		if not okR or isSecretVal(rawR) or type(rawR) ~= "number" then return nil, fallbackScale end
+		local effScale = fallbackScale or 1
+		if type(frameObj.GetEffectiveScale) == "function" then
+			local okSc, sc = pcall(frameObj.GetEffectiveScale, frameObj)
+			if okSc and not isSecretVal(sc) and type(sc) == "number" and sc > 0 then
+				effScale = sc
+			end
+		end
+		return rawR * effScale, effScale
+	end
+
+	local function getDockGapForAnchor(anchorFrame)
+		local profFrame = _G.ProfessionsFrame
+		if not anchorFrame or anchorFrame ~= profFrame then
+			return 12
+		end
+		local uiScale = 1
+		if _G.UIParent and type(_G.UIParent.GetEffectiveScale) == "function" then
+			local okU, us = pcall(_G.UIParent.GetEffectiveScale, _G.UIParent)
+			if okU and not isSecretVal(us) and type(us) == "number" and us > 0 then
+				uiScale = us
+			end
+		end
+		local anchorScreenRight, anchorEffScale = getSafeScreenRight(anchorFrame, uiScale)
+		local maxProtrusion = 0
+		local foundMeasuredTab = false
+		if anchorScreenRight then
+			anchorEffScale = anchorEffScale or uiScale
+			local seen = {}
+			local function considerTab(cand)
+				if not cand or seen[cand] or isSecretVal(cand) then return end
+				seen[cand] = true
+				local tabScreenRight = getSafeScreenRight(cand, anchorEffScale)
+				if tabScreenRight then
+					local deltaPx = (tabScreenRight - anchorScreenRight) / uiScale
+					if deltaPx >= 16 and deltaPx <= 96 then
+						foundMeasuredTab = true
+						if deltaPx > maxProtrusion then
+							maxProtrusion = deltaPx
+						end
+					end
+				end
+			end
+			considerTab(anchorFrame.ProfessionsOverviewTab)
+			considerTab(anchorFrame.OverviewTab)
+			considerTab(_G.ProfessionsOverviewTab)
+			for i = 1, 8 do
+				considerTab(anchorFrame["Professions" .. i .. "Tab"])
+				considerTab(_G["Professions" .. i .. "Tab"])
+				considerTab(anchorFrame["SecondaryProfessions" .. i .. "Tab"])
+			end
+			if type(anchorFrame.TabSystem) == "table" and type(anchorFrame.TabSystem.tabs) == "table" then
+				for _, tabBtn in ipairs(anchorFrame.TabSystem.tabs) do
+					considerTab(tabBtn)
+				end
+			end
+			considerTab(app.ui and app.ui.profMMTab)
+			considerTab(_G.MerchantMasterProfTabBtn)
+			if type(anchorFrame.GetChildren) == "function" then
+				local okC, children = pcall(function() return { anchorFrame:GetChildren() } end)
+				if okC and type(children) == "table" then
+					for _, child in ipairs(children) do
+						considerTab(child)
+					end
+				end
+			end
+		end
+		if not foundMeasuredTab then
+			maxProtrusion = 44
+		end
+		return math.max(12, math.ceil(maxProtrusion) + 12)
+	end
+
+	function app.dockCartBuyerModal(forceDefault)
+		if forceDefault then
+			if ns.Window and ns.Window.SetMode then ns.Window.SetMode("order_flow", "snap") end
+			if ns.Window and ns.Window.ClearSavedPosition then ns.Window.ClearSavedPosition("order_flow") end
+		end
+		local mode = (ns.Window and ns.Window.GetMode) and ns.Window.GetMode("order_flow", "snap") or "snap"
+		if mode == "free" and ns.Window and ns.Window.HasSavedPosition and ns.Window.HasSavedPosition("order_flow") then
+			ns.Window.RestorePosition(cartBuyerModal, "order_flow")
+			if ui.updateDockModeButton then ui.updateDockModeButton() end
+			return
+		end
 		local stKey = getFlowStage()
 		local anchorFrame = getActiveDockAnchorFrame(stKey)
-		if anchorFrame then
-			local modalW = (cartBuyerModal.GetWidth and cartBuyerModal:GetWidth()) or (cbExtended and CB_EXTENDED_W or CB_COMPACT_W)
-			local screenW = (UIParent and UIParent.GetWidth and UIParent:GetWidth()) or 1920
-			local anchorRight = (anchorFrame.GetRight and anchorFrame:GetRight()) or nil
-			if anchorRight and (anchorRight + modalW + 12) > screenW then
-				cartBuyerModal:SetPoint("TOPRIGHT", anchorFrame, "TOPLEFT", -12, 0)
-			else
-				cartBuyerModal:SetPoint("TOPLEFT", anchorFrame, "TOPRIGHT", 12, 0)
-			end
+		local dockGap = getDockGapForAnchor(anchorFrame)
+		if ns.Window and ns.Window.PlaceBeside then
+			ns.Window.PlaceBeside(cartBuyerModal, anchorFrame, "CENTER", 0, 20, dockGap)
 		else
-			cartBuyerModal:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
+			cartBuyerModal:ClearAllPoints()
+			if anchorFrame then
+				local modalW = (cartBuyerModal.GetWidth and cartBuyerModal:GetWidth()) or (cbExtended and CB_EXTENDED_W or CB_COMPACT_W)
+				local screenW = (UIParent and UIParent.GetWidth and UIParent:GetWidth()) or 1920
+				local anchorRight = (anchorFrame.GetRight and anchorFrame:GetRight()) or nil
+				if anchorRight and (anchorRight + modalW + dockGap) > screenW then
+					cartBuyerModal:SetPoint("TOPRIGHT", anchorFrame, "TOPLEFT", -dockGap, 0)
+				else
+					cartBuyerModal:SetPoint("TOPLEFT", anchorFrame, "TOPRIGHT", dockGap, 0)
+				end
+			else
+				cartBuyerModal:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
+			end
+		end
+		if ui.updateDockModeButton then ui.updateDockModeButton() end
+	end
+
+	function app.openCraftingTaskStrip(allowToggle)
+		if app.hasUnifiedShoppingItems and app.hasUnifiedShoppingItems() and app.syncUnifiedShoppingList then
+			app.syncUnifiedShoppingList()
+		end
+		local hasQueue = app.hasUnifiedShoppingItems and app.hasUnifiedShoppingItems()
+		local cartSig = (hasQueue and app.getOrderFlowCartSignature) and app.getOrderFlowCartSignature() or nil
+		local hasSession = app.orderFlow and app.orderFlow.HasAnyItems and app.orderFlow.HasAnyItems()
+			and (not cartSig or (app.orderFlow.HasActiveSessionForSig and app.orderFlow.HasActiveSessionForSig(cartSig)))
+		local srcRows = app.rawUnifiedShoppingRows or app.activeShoppingRows
+		if not hasSession and app.orderFlow and app.orderFlow.LoadFromShoppingRows and type(srcRows) == "table" and #srcRows > 0 then
+			app.orderFlow.LoadFromShoppingRows(srcRows, {
+				title = "Shopping List",
+				preserveProgress = true,
+				cartSig = cartSig,
+			})
+		end
+		local ofSt = app.orderFlow and app.orderFlow.GetState and app.orderFlow.GetState() or nil
+		if allowToggle and cartBuyerModal and cartBuyerModal:IsShown() and ofSt and ofSt.activeStage == "craft" then
+			if app.exitAHBuyingMode then app.exitAHBuyingMode(true) else cartBuyerModal:Hide() end
+		elseif app.enterOrderFlowMode then
+			app.enterOrderFlowMode("craft")
+		end
+		if app.ui and app.ui._updateTopTaskListBadge then app.ui._updateTopTaskListBadge() end
+	end
+
+	do
+		local hookedProfFrames = setmetatable({}, { __mode = "k" })
+
+		local function applyProfMMTabAnchor(tab, pf)
+			if not (tab and pf and tab.ClearAllPoints and tab.SetPoint) then return end
+			local overviewTab = pf.ProfessionsOverviewTab or pf.OverviewTab or _G.ProfessionsOverviewTab
+			local firstSideTab = overviewTab or pf.Professions1Tab or _G.Professions1Tab
+			tab:ClearAllPoints()
+			if firstSideTab and firstSideTab ~= tab and not isSecretVal(firstSideTab) then
+				tab:SetPoint("BOTTOMLEFT", firstSideTab, "TOPLEFT", 0, 2)
+			else
+				tab:SetPoint("TOPLEFT", pf, "TOPRIGHT", -1, -2)
+			end
+		end
+
+		local function syncProfMMTabVisuals(tab, pf)
+			if not tab then return end
+			local host = pf or _G.ProfessionsFrame
+			if host and not isSecretVal(host) then
+				if type(host.GetFrameStrata) == "function" and type(tab.SetFrameStrata) == "function" then
+					local okS, strata = pcall(host.GetFrameStrata, host)
+					if okS and not isSecretVal(strata) and type(strata) == "string" and strata ~= "" then
+						pcall(tab.SetFrameStrata, tab, strata)
+					end
+				end
+				if type(tab.SetFrameLevel) == "function" then
+					local baseLvl = 1
+					if type(host.GetFrameLevel) == "function" then
+						local okL, l = pcall(host.GetFrameLevel, host)
+						if okL and not isSecretVal(l) and type(l) == "number" then baseLvl = l end
+					end
+					local refTab = host.ProfessionsOverviewTab or host.OverviewTab or _G.ProfessionsOverviewTab or host.Professions1Tab
+					if refTab and type(refTab.GetFrameLevel) == "function" then
+						local okTL, tl = pcall(refTab.GetFrameLevel, refTab)
+						if okTL and not isSecretVal(tl) and type(tl) == "number" and tl > baseLvl then
+							baseLvl = tl
+						end
+					end
+					pcall(tab.SetFrameLevel, tab, baseLvl + 2)
+				end
+			end
+			if tab.iconTex and tab.iconTex.SetPoint then
+				local off = tab._pressed and 1 or 0
+				tab.iconTex:ClearAllPoints()
+				tab.iconTex:SetPoint("CENTER", tab, "CENTER", off, -off)
+			end
+			if tab.hoverTex and tab.hoverTex.SetShown then
+				tab.hoverTex:SetShown(tab._hovered == true or tab._pressed == true)
+			end
+		end
+
+		function app.ensureProfessionsMMTab()
+			local pf = _G.ProfessionsFrame
+			if not pf or isSecretVal(pf) or type(pf) ~= "table" then return nil end
+			app.ui = app.ui or {}
+			local tab = app.ui.profMMTab or _G.MerchantMasterProfTabBtn
+			if not tab then
+				if type(_G.InCombatLockdown) == "function" then
+					local okC, inCombat = pcall(_G.InCombatLockdown)
+					if okC and not isSecretVal(inCombat) and inCombat then
+						return nil
+					end
+				end
+				tab = CreateFrame("Button", "MerchantMasterProfTabBtn", pf)
+				tab:SetSize(36, 34)
+				if tab.RegisterForClicks then
+					tab:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+				end
+				if ns.Theme and type(ns.Theme.NineApple) == "function" then
+					tab.plate = ns.Theme.NineApple(tab, "glass_r8", { 0.12, 0.10, 0.08, 0.96 }, { 0.72, 0.56, 0.20, 0.95 }, { cornerSize = 8, inset = 0 })
+				elseif type(tab.CreateTexture) == "function" then
+					local bg = tab:CreateTexture(nil, "BACKGROUND")
+					bg:SetAllPoints()
+					if bg.SetColorTexture then bg:SetColorTexture(0.12, 0.10, 0.08, 0.96) end
+					tab.plateBg = bg
+				end
+				local iconTex = tab:CreateTexture(nil, "ARTWORK")
+				iconTex:SetSize(24, 24)
+				iconTex:SetPoint("CENTER", tab, "CENTER", 0, 0)
+				local logoAsset = ns.ADDON_ICON or "Interface\\AddOns\\MerchantMaster\\Textures\\MerchantMasterLogo"
+				if iconTex.SetTexture then iconTex:SetTexture(logoAsset) end
+				tab.iconTex = iconTex
+
+				local hoverTex = tab:CreateTexture(nil, "OVERLAY")
+				hoverTex:SetAllPoints()
+				if hoverTex.SetColorTexture then hoverTex:SetColorTexture(0.98, 0.80, 0.28, 0.22) end
+				if hoverTex.SetBlendMode then hoverTex:SetBlendMode("ADD") end
+				hoverTex:Hide()
+				tab.hoverTex = hoverTex
+
+				tab:SetScript("OnEnter", function(self)
+					self._hovered = true
+					syncProfMMTabVisuals(self, self.GetParent and self:GetParent() or _G.ProfessionsFrame)
+					if GameTooltip and GameTooltip.SetOwner then
+						GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+						GameTooltip:AddLine("MerchantMaster Crafting", 1.0, 0.84, 0.24)
+						GameTooltip:AddLine("Left-click: Open Crafting Task Strip", 0.92, 0.92, 0.94)
+						GameTooltip:AddLine("Right-click: Open MerchantMaster Recipes", 0.68, 0.78, 0.92)
+						GameTooltip:Show()
+					end
+				end)
+				tab:SetScript("OnLeave", function(self)
+					self._hovered = false
+					self._pressed = false
+					syncProfMMTabVisuals(self, self.GetParent and self:GetParent() or _G.ProfessionsFrame)
+					if GameTooltip_Hide then GameTooltip_Hide() elseif GameTooltip and GameTooltip.Hide then GameTooltip:Hide() end
+				end)
+				tab:SetScript("OnMouseDown", function(self)
+					self._pressed = true
+					syncProfMMTabVisuals(self, self.GetParent and self:GetParent() or _G.ProfessionsFrame)
+				end)
+				tab:SetScript("OnMouseUp", function(self)
+					self._pressed = false
+					syncProfMMTabVisuals(self, self.GetParent and self:GetParent() or _G.ProfessionsFrame)
+				end)
+				tab:SetScript("OnClick", function(_, button)
+					if button == "RightButton" then
+						if app.togglePanel then app.togglePanel("recipes") end
+						return
+					end
+					if app.openCraftingTaskStrip then
+						app.openCraftingTaskStrip(false)
+					elseif app.enterOrderFlowMode then
+						app.enterOrderFlowMode("craft")
+					end
+				end)
+				app.ui.profMMTab = tab
+			end
+			app.ui.profMMTab = tab
+			if type(tab.GetParent) == "function" and tab:GetParent() ~= pf and type(tab.SetParent) == "function" then
+				pcall(tab.SetParent, tab, pf)
+			end
+			applyProfMMTabAnchor(tab, pf)
+			syncProfMMTabVisuals(tab, pf)
+			tab:Show()
+			if not hookedProfFrames[pf] and type(pf.HookScript) == "function" then
+				hookedProfFrames[pf] = true
+				pf:HookScript("OnShow", function()
+					if app.ensureProfessionsMMTab then app.ensureProfessionsMMTab() end
+					if ((app._ahBuyingMode == true) or (cartBuyerModal and cartBuyerModal:IsShown())) and app.dockCartBuyerModal then
+						app.dockCartBuyerModal()
+					end
+					if C_Timer and C_Timer.After then
+						C_Timer.After(0, function()
+							if ((app._ahBuyingMode == true) or (cartBuyerModal and cartBuyerModal:IsShown())) and _G.ProfessionsFrame and _G.ProfessionsFrame:IsShown() and app.dockCartBuyerModal then
+								app.dockCartBuyerModal()
+							end
+						end)
+					end
+				end)
+				pf:HookScript("OnHide", function()
+					if ((app._ahBuyingMode == true) or (cartBuyerModal and cartBuyerModal:IsShown())) and app.dockCartBuyerModal then
+						app.dockCartBuyerModal()
+					end
+				end)
+			end
+			return tab
+		end
+	end
+
+	-- Auction House bottom MerchantMaster Buying-List tab (mirror of Professions MM logo tab, placed beside MM Sell)
+	function app.openAHBuyingTaskStrip(allowToggle)
+		if app.hasUnifiedShoppingItems and app.hasUnifiedShoppingItems() and app.syncUnifiedShoppingList then
+			app.syncUnifiedShoppingList()
+		end
+		local hasQueue = app.hasUnifiedShoppingItems and app.hasUnifiedShoppingItems()
+		local cartSig = (hasQueue and app.getOrderFlowCartSignature) and app.getOrderFlowCartSignature() or nil
+		local hasSession = app.orderFlow and app.orderFlow.HasAnyItems and app.orderFlow.HasAnyItems()
+			and (not cartSig or (app.orderFlow.HasActiveSessionForSig and app.orderFlow.HasActiveSessionForSig(cartSig)))
+		local srcRows = app.rawUnifiedShoppingRows or app.activeShoppingRows
+		if not hasSession and app.orderFlow and app.orderFlow.LoadFromShoppingRows and type(srcRows) == "table" and #srcRows > 0 then
+			app.orderFlow.LoadFromShoppingRows(srcRows, {
+				title = "Shopping List",
+				preserveProgress = true,
+				cartSig = cartSig,
+			})
+		end
+		local ofSt = app.orderFlow and app.orderFlow.GetState and app.orderFlow.GetState() or nil
+		if allowToggle and cartBuyerModal and cartBuyerModal:IsShown() and ofSt and ofSt.activeStage == "ah" then
+			if app.exitAHBuyingMode then app.exitAHBuyingMode(false) else cartBuyerModal:Hide() end
+			return
+		end
+		if ns.AHSellTab and ns.AHSellTab.IsShown and ns.AHSellTab.IsShown() then
+			if _G.AuctionHouseFrame and _G.AuctionHouseFrame.SetDisplayMode
+				and _G.AuctionHouseFrameDisplayMode and _G.AuctionHouseFrameDisplayMode.Buy then
+				pcall(_G.AuctionHouseFrame.SetDisplayMode, _G.AuctionHouseFrame, _G.AuctionHouseFrameDisplayMode.Buy)
+			end
+			if ns.AHSellTab.HideTab then ns.AHSellTab.HideTab() end
+		end
+		if app.enterOrderFlowMode then
+			app.enterOrderFlowMode("ah")
+		end
+		if app.ui and app.ui._updateTopTaskListBadge then app.ui._updateTopTaskListBadge() end
+	end
+
+	do
+		local hookedAHFrames = setmetatable({}, { __mode = "k" })
+
+		local function applyAHMMTabAnchor(tab, ahf)
+			if not (tab and ahf and tab.ClearAllPoints and tab.SetPoint) then return end
+			local sellBtn = (ns.AHSellTab and ns.AHSellTab.tabButton) or _G["LibAHFrame-1.0-MerchantMasterSell"]
+			local refTab = (sellBtn and sellBtn ~= tab and not isSecretVal(sellBtn)) and sellBtn or nil
+			if not refTab and type(ahf.Tabs) == "table" then
+				for i = #ahf.Tabs, 1, -1 do
+					local t = ahf.Tabs[i]
+					if t and t ~= tab and not isSecretVal(t) and (not t.IsShown or t:IsShown()) then
+						refTab = t
+						break
+					end
+				end
+			end
+			tab:ClearAllPoints()
+			if refTab then
+				tab:SetPoint("TOPLEFT", refTab, "TOPRIGHT", 6, 0)
+			else
+				tab:SetPoint("TOPLEFT", ahf, "BOTTOMLEFT", 340, 0)
+			end
+		end
+
+		local function syncAHMMTabVisuals(tab, ahf)
+			if not tab then return end
+			local host = ahf or _G.AuctionHouseFrame
+			if host and not isSecretVal(host) then
+				if type(host.GetFrameStrata) == "function" and type(tab.SetFrameStrata) == "function" then
+					local okS, strata = pcall(host.GetFrameStrata, host)
+					if okS and not isSecretVal(strata) and type(strata) == "string" and strata ~= "" then
+						pcall(tab.SetFrameStrata, tab, strata)
+					end
+				end
+				if type(tab.SetFrameLevel) == "function" then
+					local baseLvl = 1
+					if type(host.GetFrameLevel) == "function" then
+						local okL, l = pcall(host.GetFrameLevel, host)
+						if okL and not isSecretVal(l) and type(l) == "number" then baseLvl = l end
+					end
+					local sellBtn = (ns.AHSellTab and ns.AHSellTab.tabButton) or _G["LibAHFrame-1.0-MerchantMasterSell"]
+					if sellBtn and type(sellBtn.GetFrameLevel) == "function" then
+						local okTL, tl = pcall(sellBtn.GetFrameLevel, sellBtn)
+						if okTL and not isSecretVal(tl) and type(tl) == "number" and tl > baseLvl then
+							baseLvl = tl
+						end
+					end
+					pcall(tab.SetFrameLevel, tab, baseLvl + 2)
+				end
+			end
+			if tab.iconTex and tab.iconTex.SetPoint then
+				local off = tab._pressed and 1 or 0
+				tab.iconTex:ClearAllPoints()
+				tab.iconTex:SetPoint("CENTER", tab, "CENTER", off, -off)
+			end
+			if tab.hoverTex and tab.hoverTex.SetShown then
+				tab.hoverTex:SetShown(tab._hovered == true or tab._pressed == true)
+			end
+		end
+
+		function app.ensureAuctionHouseMMTab()
+			local ahf = _G.AuctionHouseFrame
+			if not ahf or isSecretVal(ahf) or type(ahf) ~= "table" then return nil end
+			app.ui = app.ui or {}
+			local tab = app.ui.ahMMTab or _G.MerchantMasterAHTabBtn
+			if not tab then
+				if type(_G.InCombatLockdown) == "function" then
+					local okC, inCombat = pcall(_G.InCombatLockdown)
+					if okC and not isSecretVal(inCombat) and inCombat then
+						return nil
+					end
+				end
+				tab = CreateFrame("Button", "MerchantMasterAHTabBtn", ahf)
+				tab:SetSize(38, 28)
+				if tab.RegisterForClicks then
+					tab:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+				end
+				if ns.Theme and type(ns.Theme.NineApple) == "function" then
+					tab.plate = ns.Theme.NineApple(tab, "glass_r8", { 0.08, 0.08, 0.10, 0.96 }, { 0.83, 0.64, 0.24, 0.95 }, { cornerSize = 8, inset = 0 })
+				elseif type(tab.CreateTexture) == "function" then
+					local bg = tab:CreateTexture(nil, "BACKGROUND")
+					bg:SetAllPoints()
+					if bg.SetColorTexture then bg:SetColorTexture(0.08, 0.08, 0.10, 0.96) end
+					tab.plateBg = bg
+				end
+				local iconTex = tab:CreateTexture(nil, "ARTWORK")
+				iconTex:SetSize(22, 22)
+				iconTex:SetPoint("CENTER", tab, "CENTER", 0, 0)
+				local logoAsset = ns.ADDON_ICON or "Interface\\AddOns\\MerchantMaster\\Textures\\MerchantMasterLogo"
+				if iconTex.SetTexture then iconTex:SetTexture(logoAsset) end
+				tab.iconTex = iconTex
+
+				local hoverTex = tab:CreateTexture(nil, "OVERLAY")
+				hoverTex:SetAllPoints()
+				if hoverTex.SetColorTexture then hoverTex:SetColorTexture(0.98, 0.80, 0.28, 0.22) end
+				if hoverTex.SetBlendMode then hoverTex:SetBlendMode("ADD") end
+				hoverTex:Hide()
+				tab.hoverTex = hoverTex
+
+				tab:SetScript("OnEnter", function(self)
+					self._hovered = true
+					syncAHMMTabVisuals(self, self.GetParent and self:GetParent() or _G.AuctionHouseFrame)
+					if GameTooltip and GameTooltip.SetOwner then
+						GameTooltip:SetOwner(self, "ANCHOR_TOP")
+						GameTooltip:AddLine("MerchantMaster Buying List", 1.0, 0.84, 0.24)
+						GameTooltip:AddLine("Left-click: Open AH Buying Task Strip", 0.92, 0.92, 0.94)
+						GameTooltip:AddLine("Right-click: Open Shopping Basket", 0.68, 0.78, 0.92)
+						GameTooltip:Show()
+					end
+				end)
+				tab:SetScript("OnLeave", function(self)
+					self._hovered = false
+					self._pressed = false
+					syncAHMMTabVisuals(self, self.GetParent and self:GetParent() or _G.AuctionHouseFrame)
+					if GameTooltip_Hide then GameTooltip_Hide() elseif GameTooltip and GameTooltip.Hide then GameTooltip:Hide() end
+				end)
+				tab:SetScript("OnMouseDown", function(self)
+					self._pressed = true
+					syncAHMMTabVisuals(self, self.GetParent and self:GetParent() or _G.AuctionHouseFrame)
+				end)
+				tab:SetScript("OnMouseUp", function(self)
+					self._pressed = false
+					syncAHMMTabVisuals(self, self.GetParent and self:GetParent() or _G.AuctionHouseFrame)
+				end)
+				tab:SetScript("OnClick", function(_, button)
+					if button == "RightButton" then
+						if app.togglePanel then app.togglePanel("shopping") end
+						return
+					end
+					if app.openAHBuyingTaskStrip then
+						app.openAHBuyingTaskStrip(true)
+					elseif app.enterOrderFlowMode then
+						app.enterOrderFlowMode("ah")
+					end
+				end)
+				app.ui.ahMMTab = tab
+			end
+			app.ui.ahMMTab = tab
+			if type(tab.GetParent) == "function" and tab:GetParent() ~= ahf and type(tab.SetParent) == "function" then
+				pcall(tab.SetParent, tab, ahf)
+			end
+			applyAHMMTabAnchor(tab, ahf)
+			syncAHMMTabVisuals(tab, ahf)
+			tab:Show()
+			if not hookedAHFrames[ahf] and type(ahf.HookScript) == "function" then
+				hookedAHFrames[ahf] = true
+				ahf:HookScript("OnShow", function()
+					if app.ensureAuctionHouseMMTab then app.ensureAuctionHouseMMTab() end
+				end)
+			end
+			return tab
 		end
 	end
 
@@ -11082,6 +12037,7 @@ do
 		end
 		if not app.orderFlow then return false end
 		if app.ensureMerchantFrameHooked then app.ensureMerchantFrameHooked() end
+		if app.ensureProfessionsMMTab then app.ensureProfessionsMMTab() end
 		if app.orderFlow.SyncLiveEnvironment then
 			app.orderFlow.SyncLiveEnvironment()
 		end
@@ -11990,7 +12946,9 @@ end
 -- Wowhead Forever Recipe Source Popup + Reusable Clickable [WH] Able/How Cell Helper
 local createAbleCell, bindAbleCell
 do
-	local wowheadModal = ns.Theme.CreateFloatingWindow(ADDON .. "WowheadWindow", "Wowhead Forever — Where to Get Recipe", 520, 178)
+	local wowheadModal = ns.Theme.CreateFloatingWindow(ADDON .. "WowheadWindow", "Wowhead Forever — Where to Get Recipe", 520, 178, {
+		positionKey = "wowhead",
+	})
 	wowheadModal:SetFrameStrata("FULLSCREEN_DIALOG")
 	app.ui.wowheadModal = wowheadModal
 
@@ -12082,6 +13040,7 @@ do
 		sourceDetailFs:SetText("Where to get: " .. tostring(ca.howDetail or ca.howShort or "Trainer / Vendor / AH"))
 		ahRecipeBtn:SetShown(ca.recipeItemID ~= nil and ca.acqType ~= "camp")
 		urlBox:SetText(ca.wowheadURL)
+		if wowheadModal.ApplySavedOrDefaultPosition then wowheadModal:ApplySavedOrDefaultPosition() end
 		wowheadModal:Show()
 		if wowheadModal.Raise then wowheadModal:Raise() end
 		if urlBox.SetFocus then urlBox:SetFocus() end
@@ -12248,10 +13207,59 @@ do
 	dashClassicWrap:SetAllPoints(dashboardView)
 	app.ui.dashClassicWrap = dashClassicWrap
 
+	local dashClassicBanner = CreateFrame("Frame", nil, dashClassicWrap)
+	dashClassicBanner:SetPoint("TOPLEFT", dashClassicWrap, "TOPLEFT", 0, 0)
+	dashClassicBanner:SetPoint("TOPRIGHT", dashClassicWrap, "TOPRIGHT", 0, 0)
+	dashClassicBanner:SetHeight(32)
+	app.ui.dashClassicBanner = dashClassicBanner
+
+	local dashClassicTitle = dashClassicBanner:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	dashClassicTitle:SetPoint("LEFT", dashClassicBanner, "LEFT", 2, 0)
+	dashClassicTitle:SetJustifyH("LEFT")
+	dashClassicTitle:SetWordWrap(false)
+	dashClassicTitle:SetText("Market Pulse")
+	applySafeFont(dashClassicTitle, 15, "semibold")
+	do
+		local tc = getPal().text
+		if tc then dashClassicTitle:SetTextColor(tc[1], tc[2], tc[3], tc[4] or 1) end
+	end
+	app.ui.dashClassicTitle = dashClassicTitle
+
+	local dashClassicModeSeg = ns.Theme.CreateSegmentedControl(dashClassicBanner, {
+		{ key = "bloomberg", label = "GoblinTV",      width = 88 },
+		{ key = "brief",     label = "Morning Brief", width = 102 },
+		{ key = "classic",   label = "Market Pulse",  width = 96 },
+	}, {
+		height = 26,
+		fontSize = 11,
+		activeKey = "classic",
+		onChange = function(k)
+			if app.setDashboardMode then app.setDashboardMode(k) end
+		end,
+	})
+	dashClassicModeSeg.frame:SetPoint("RIGHT", dashClassicBanner, "RIGHT", -2, 0)
+	app.ui.dashClassicModeSeg = dashClassicModeSeg
+	app.ui.dashBriefReturnBtn = (dashClassicModeSeg.buttons and dashClassicModeSeg.buttons.brief) or dashClassicModeSeg.frame
+
+	ns.Theme.RegisterWidget(dashClassicBanner, function()
+		local pal = getPal()
+		if dashClassicTitle and pal.text then
+			dashClassicTitle:SetTextColor(pal.text[1], pal.text[2], pal.text[3], pal.text[4] or 1)
+		end
+		if dashClassicModeSeg and dashClassicModeSeg.UpdateTheme then
+			dashClassicModeSeg:UpdateTheme()
+		end
+	end)
+
+	local dashClassicBody = CreateFrame("Frame", nil, dashClassicWrap)
+	dashClassicBody:SetPoint("TOPLEFT", dashClassicWrap, "TOPLEFT", 0, -38)
+	dashClassicBody:SetPoint("BOTTOMRIGHT", dashClassicWrap, "BOTTOMRIGHT", 0, 0)
+	app.ui.dashClassicBody = dashClassicBody
+
 	local BENTO_GAP = 16
 
 	-- Row 1: 3 Equal 104px Borderless Apple HIG KPI Cards
-	local kpi1 = ns.Theme.CreateKpiCard(dashClassicWrap, {
+	local kpi1 = ns.Theme.CreateKpiCard(dashClassicBody, {
 		height = 104,
 		icon = "flask",
 		uppercase = false,
@@ -12261,7 +13269,7 @@ do
 		unit = "/ day",
 		sub = "Loading advice...",
 	})
-	kpi1.frame:SetPoint("TOPLEFT", dashClassicWrap, "TOPLEFT", 0, 0)
+	kpi1.frame:SetPoint("TOPLEFT", dashClassicBody, "TOPLEFT", 0, 0)
 	kpi1.frame:SetWidth(349)
 
 	app.ui.dashExpectedDailyFs = kpi1.valueFs
@@ -12275,7 +13283,7 @@ do
 	h1Roi:Hide()
 	app.ui.dashRoiFs = h1Roi
 
-	local kpi2 = ns.Theme.CreateKpiCard(dashClassicWrap, {
+	local kpi2 = ns.Theme.CreateKpiCard(dashClassicBody, {
 		height = 104,
 		icon = "basket",
 		uppercase = false,
@@ -12288,7 +13296,7 @@ do
 	kpi2.frame:SetWidth(349)
 	app.ui.dashStrategyFs = kpi2.subFs
 
-	local kpi3 = ns.Theme.CreateKpiCard(dashClassicWrap, {
+	local kpi3 = ns.Theme.CreateKpiCard(dashClassicBody, {
 		alignValue = "RIGHT",
 		height = 104,
 		icon = "crate",
@@ -12298,16 +13306,16 @@ do
 		sub = "Scanning crates & writs...",
 	})
 	kpi3.frame:SetPoint("TOPLEFT", kpi2.frame, "TOPRIGHT", BENTO_GAP, 0)
-	kpi3.frame:SetPoint("TOPRIGHT", dashClassicWrap, "TOPRIGHT", 0, 0)
+	kpi3.frame:SetPoint("TOPRIGHT", dashClassicBody, "TOPRIGHT", 0, 0)
 
 	app.ui.dashKpis = { kpi1, kpi2, kpi3 }
 
 	-- First-run dismissible 2-step onboarding card (hidden once first AH scan completes, snapshots load, or dismissed)
 	do
-		local onboardCard = CreateFrame("Frame", nil, dashClassicWrap)
+		local onboardCard = CreateFrame("Frame", nil, dashClassicBody)
 		onboardCard:SetHeight(82)
-		onboardCard:SetPoint("TOPLEFT", dashClassicWrap, "TOPLEFT", 0, -120)
-		onboardCard:SetPoint("TOPRIGHT", dashClassicWrap, "TOPRIGHT", 0, -120)
+		onboardCard:SetPoint("TOPLEFT", dashClassicBody, "TOPLEFT", 0, -120)
+		onboardCard:SetPoint("TOPRIGHT", dashClassicBody, "TOPRIGHT", 0, -120)
 		onboardCard.surface = ns.Theme.NineApple(onboardCard, "glass_r10", getPal().cardBg, false, {
 			noSpecular = true,
 		})
@@ -12486,7 +13494,7 @@ do
 	app.applyDashRowSkin = dashSkin.applyRow
 
 	local function createBentoCard(titleText, seeAllTab, seeAllLabel)
-		local card = CreateFrame("Frame", nil, dashClassicWrap)
+		local card = CreateFrame("Frame", nil, dashClassicBody)
 		card.surface = ns.Theme.NineApple(card, "glass_r10", getPal().cardBg, false, {
 			noSpecular = true,
 		})
@@ -12621,7 +13629,7 @@ do
 
 	-- Row 2: Side-by-Side Bento Cards (Daily Velocity Crafts vs Monopoly Opportunities)
 	local leftCard = createBentoCard("Daily Velocity Crafts", "profit_spread", "Guaranteed sellers")
-	leftCard:SetPoint("TOPLEFT", dashClassicWrap, "TOPLEFT", 0, -120)
+	leftCard:SetPoint("TOPLEFT", dashClassicBody, "TOPLEFT", 0, -120)
 	leftCard:SetSize(532, 240)
 	attachBentoSubheader(leftCard, true)
 	app.ui.dashLeftCard = leftCard
@@ -12634,22 +13642,11 @@ do
 	leftCard.hdrFs:SetPoint("RIGHT", dashFiltersBtn, "LEFT", -8, 0)
 
 	local rightCard = createBentoCard("Monopoly Opportunities", "outliers", "3 opportunities")
-	rightCard:SetPoint("TOPRIGHT", dashClassicWrap, "TOPRIGHT", 0, -120)
+	rightCard:SetPoint("TOPRIGHT", dashClassicBody, "TOPRIGHT", 0, -120)
 	rightCard:SetSize(532, 240)
 	attachBentoSubheader(rightCard, false)
 	app.ui.dashRightCard = rightCard
 	app.ui.dashRightHdrFs = rightCard.hdrFs
-	local dashBriefReturnBtn = ns.Theme.CreatePlateButton(rightCard.hdrBar, "Morning Brief", 96, 22, {
-		variant = "secondary",
-		pill = true,
-		fontSize = 10,
-		weight = "semibold",
-	})
-	dashBriefReturnBtn:SetPoint("RIGHT", rightCard.seeAllBtn, "LEFT", -8, 0)
-	dashBriefReturnBtn:SetScript("OnClick", function()
-		if app.setDashboardMode then app.setDashboardMode("brief") end
-	end)
-	app.ui.dashBriefReturnBtn = dashBriefReturnBtn
 
 	local function createDashNameHover(row, onEnter)
 		local hit = CreateFrame("Button", nil, row)
@@ -12958,8 +13955,8 @@ do
 
 	-- Row 3 Left: Best Crates & Writs (2-Section Mini-Table matching target-overview)
 	local turninCard = createBentoCard("Best Crates & Writs", "crates", "Favor & reputation")
-	turninCard:SetPoint("TOPLEFT", dashClassicWrap, "TOPLEFT", 0, -376)
-	turninCard:SetPoint("BOTTOMLEFT", dashClassicWrap, "BOTTOMLEFT", 0, 0)
+	turninCard:SetPoint("TOPLEFT", dashClassicBody, "TOPLEFT", 0, -376)
+	turninCard:SetPoint("BOTTOMLEFT", dashClassicBody, "BOTTOMLEFT", 0, 0)
 	turninCard:SetWidth(532)
 	app.ui.dashTurninCard = turninCard
 
@@ -13143,8 +14140,8 @@ do
 
 	-- Row 3 Right: Active Shopping Basket (4 ruled 5-col rows + Total + Shopping List / Buy on AH)
 	local basketCard = createBentoCard("Active Shopping Basket", nil, nil)
-	basketCard:SetPoint("TOPRIGHT", dashClassicWrap, "TOPRIGHT", 0, -376)
-	basketCard:SetPoint("BOTTOMRIGHT", dashClassicWrap, "BOTTOMRIGHT", 0, 0)
+	basketCard:SetPoint("TOPRIGHT", dashClassicBody, "TOPRIGHT", 0, -376)
+	basketCard:SetPoint("BOTTOMRIGHT", dashClassicBody, "BOTTOMRIGHT", 0, 0)
 	basketCard:SetWidth(532)
 	app.ui.dashBasketCard = basketCard
 
@@ -13440,18 +14437,16 @@ do
 		if customSkin and app.refreshDashRowIcons then app.refreshDashRowIcons() end
 	end
 
-	function app.getDashboardMode()
-		local db = MerchantMasterDB
-		if type(db) == "table" and db.dashboardMode == "classic" then
-			return "classic"
-		end
-		return "brief"
+	local function hasBloombergDashboard()
+		return ns.DashboardBloomberg and type(ns.DashboardBloomberg.Create) == "function"
 	end
 
-	function app.ensureDashboardBrief()
-		if app.ui.dashBriefView then return app.ui.dashBriefView end
-		if not (ns.DashboardBrief and type(ns.DashboardBrief.Create) == "function") then return nil end
-		local brief = ns.DashboardBrief.Create(dashboardView, {
+	local function buildDashboardViewOpts()
+		local function getEconKey()
+			local info = ns.CurrentEconomyInfo and ns.CurrentEconomyInfo()
+			return (info and info.effectiveKey) or (ns.DetectActiveEconomy and ns.DetectActiveEconomy()) or "Normal-Horde"
+		end
+		return {
 			onModeChange = function(mode)
 				if app.setDashboardMode then app.setDashboardMode(mode) end
 			end,
@@ -13465,43 +14460,111 @@ do
 				end
 				return false
 			end,
+			onOpenWatchlist = function()
+				if app.setTab then app.setTab("watchlist") end
+			end,
+			onScanAH = function()
+				if app.refreshAllMarketValues then return app.refreshAllMarketValues() end
+			end,
 			getPriceBank = function()
 				return app.getUIPriceBank and app.getUIPriceBank() or nil
 			end,
-			getEconKey = function()
-				local info = ns.CurrentEconomyInfo and ns.CurrentEconomyInfo()
-				return (info and info.effectiveKey) or (ns.DetectActiveEconomy and ns.DetectActiveEconomy()) or "Normal-Horde"
+			getEconKey = getEconKey,
+			getPlayerName = function()
+				if type(ns.GetPlayerFullName) == "function" then
+					local ok, full = pcall(ns.GetPlayerFullName)
+					if ok and type(full) == "string" and full ~= "" then return full end
+				end
+				return _G.UnitName and _G.UnitName("player") or nil
 			end,
-		})
+			getFreshnessText = function()
+				local econKey = getEconKey()
+				return (ns.Pricing and ns.Pricing.GetSnapshotFreshnessLabel and ns.Pricing.GetSnapshotFreshnessLabel(econKey)) or "Live"
+			end,
+		}
+	end
+
+	function app.getDashboardMode()
+		local db = MerchantMasterDB
+		local raw = type(db) == "table" and db.dashboardMode or nil
+		if raw == "classic" then
+			return "classic"
+		end
+		if raw == "brief" then
+			return "brief"
+		end
+		if (raw == "bloomberg" or raw == nil) and hasBloombergDashboard() then
+			return "bloomberg"
+		end
+		return "brief"
+	end
+
+	function app.ensureDashboardBrief()
+		if app.ui.dashBriefView then return app.ui.dashBriefView end
+		if not (ns.DashboardBrief and type(ns.DashboardBrief.Create) == "function") then return nil end
+		local brief = ns.DashboardBrief.Create(dashboardView, buildDashboardViewOpts())
 		app.ui.dashBriefView = brief
 		return brief
 	end
 
+	function app.ensureDashboardBloomberg()
+		if app.ui.dashBloombergView then return app.ui.dashBloombergView end
+		if not hasBloombergDashboard() then return nil end
+		local bloom = ns.DashboardBloomberg.Create(dashboardView, buildDashboardViewOpts())
+		app.ui.dashBloombergView = bloom
+		return bloom
+	end
+
 	function app.syncDashboardMode()
-		local brief = app.ensureDashboardBrief()
 		local mode = app.getDashboardMode()
-		local showBrief = (mode == "brief" and brief ~= nil)
+		local showBloomberg = (mode == "bloomberg")
+		local showBrief = (mode == "brief")
+		local bloom = app.ui.dashBloombergView
+		if showBloomberg and not bloom then
+			bloom = app.ensureDashboardBloomberg()
+		end
+		if showBloomberg and not bloom then
+			showBloomberg = false
+			showBrief = true
+			mode = "brief"
+		end
+		local brief = app.ui.dashBriefView
+		if showBrief and not brief then
+			brief = app.ensureDashboardBrief()
+		end
+		local showClassic = not showBloomberg and not showBrief
+
+		if bloom then
+			bloom:SetShown(showBloomberg)
+			if bloom.SetMode then bloom:SetMode(mode, true) end
+		end
 		if brief then
 			brief:SetShown(showBrief)
 			if brief.SetMode then brief:SetMode(mode, true) end
 		end
 		if app.ui.dashClassicWrap then
-			app.ui.dashClassicWrap:SetShown(not showBrief)
+			app.ui.dashClassicWrap:SetShown(showClassic)
+		end
+		if app.ui.dashClassicModeSeg and app.ui.dashClassicModeSeg.SetActive then
+			app.ui.dashClassicModeSeg:SetActive(mode, true)
 		end
 		return mode
 	end
 
 	function app.setDashboardMode(mode)
-		local nextMode = (mode == "classic") and "classic" or "brief"
+		local nextMode = (mode == "classic" or mode == "brief") and mode or "bloomberg"
+		if nextMode == "bloomberg" and not hasBloombergDashboard() then
+			nextMode = "brief"
+		end
 		if type(MerchantMasterDB) == "table" then
 			MerchantMasterDB.dashboardMode = nextMode
 		end
-		app.syncDashboardMode()
+		local activeMode = app.syncDashboardMode()
 		if panel:IsShown() and app.activeTab == "dashboard" then
 			if app.layoutWindow then app.layoutWindow() end
 			if app.refresh then app.refresh() end
 		end
-		return nextMode
+		return activeMode
 	end
 
 	ns.Theme.RegisterWidget(basketFooter, function()
@@ -16408,7 +17471,14 @@ function app.openDeepAnalysis(targetSpec, returnContext)
 
 	if app.activeTab == "deep_analysis" and app._deepAnalysisTarget then
 		app._deepAnalysisStack = app._deepAnalysisStack or {}
-		app._deepAnalysisStack[#app._deepAnalysisStack + 1] = app._deepAnalysisTarget
+		local pushed = app._deepAnalysisTarget
+		local daState = ns.DeepAnalysis and ns.DeepAnalysis.GetState and ns.DeepAnalysis.GetState()
+		if type(pushed) == "table" and type(daState) == "table" then
+			pushed._returnScrollOffset = tonumber(daState.scrollOffset) or 0
+			pushed._returnUsedInExpanded = (daState.usedInExpanded == true)
+			pushed._returnSection = daState.lastDrillSection
+		end
+		app._deepAnalysisStack[#app._deepAnalysisStack + 1] = pushed
 	else
 		app._deepAnalysisStack = {}
 		local ret = {}
@@ -16484,6 +17554,17 @@ function app.returnFromDeepAnalysis()
 	local stack = app._deepAnalysisStack
 	if stack and #stack > 0 then
 		local prev = table.remove(stack)
+		local restoreOpts
+		if type(prev) == "table" then
+			restoreOpts = {
+				scrollOffset = prev._returnScrollOffset,
+				usedInExpanded = prev._returnUsedInExpanded,
+				section = prev._returnSection,
+			}
+			prev._returnScrollOffset = nil
+			prev._returnUsedInExpanded = nil
+			prev._returnSection = nil
+		end
 		app._deepAnalysisTarget = prev
 		app._deepAnalysisKeepingStack = true
 		if app.activeTab ~= "deep_analysis" then
@@ -16491,7 +17572,7 @@ function app.returnFromDeepAnalysis()
 		end
 		app._deepAnalysisKeepingStack = false
 		if ns.DeepAnalysis and ns.DeepAnalysis.ShowTarget then
-			ns.DeepAnalysis.ShowTarget(prev)
+			ns.DeepAnalysis.ShowTarget(prev, restoreOpts)
 		end
 		return true
 	end
@@ -17849,7 +18930,7 @@ end
 local function resolveMenuForTab(t, calcMode)
 	if t == "deep_analysis" then return "deep_analysis" end
 	if t == "console" or (type(t) == "string" and t:sub(1, 8) == "console_") then return "console" end
-	if t == "sniper" or t == "sniper_gap" or t == "sniper_vendor" then return "sniper" end
+	if t == "sniper" or t == "sniper_gap" or t == "sniper_vendor" or t == "sniper_de" then return "sniper" end
 	if t == "analytics" or (type(t) == "string" and t:sub(1, 3) == "an_") then return "analytics" end
 	if t == "professor" or (type(t) == "string" and t:sub(1, 5) == "prof_") then return "professor" end
 	if t == "dashboard" then return "dashboard" end
@@ -17892,12 +18973,14 @@ local VIEW_TITLES = {
 	prof_browse   = "Leveling",
 	sniper_gap    = "Gap Sniper",
 	sniper_vendor = "Vendor Sniper",
+	sniper_de     = "Disenchant Sniper",
 	console_overview = "Console - Overview",
 	console_database = "Console - Database",
 	console_perf     = "Console - Performance & Debug",
-	console_setup    = "Console - Snapshot Settings",
+	console_setup2   = "Console - Snapshot Sync",
 	console_settings = "Console - Settings",
 	console_mail     = "Console - Mail",
+	console_tooltips = "Console - Tooltip Setup",
 	console_ui       = "Console - Addon UI",
 	console_data     = "Console - Data & Maintenance",
 	deep_analysis = "Deep Analysis",
@@ -18062,6 +19145,8 @@ local function applyPanelLayout()
 		activeNav = "sniper_gap"
 	elseif navTab == "sniper_vendor" then
 		activeNav = "sniper_vendor"
+	elseif navTab == "sniper_de" then
+		activeNav = "sniper_de"
 	elseif type(navTab) == "string" and navTab:sub(1, 8) == "console_" then
 		activeNav = "console"
 	end
@@ -18136,7 +19221,7 @@ local function applyPanelLayout()
 	app.ui.repView:SetShown(t == "rep")
 	app.ui.calcView:SetShown(isCalcView)
 	if app.ui.deepAnalysisView then app.ui.deepAnalysisView:SetShown(t == "deep_analysis") end
-	local showSniper = (t == "sniper_gap" or t == "sniper_vendor")
+	local showSniper = (t == "sniper_gap" or t == "sniper_vendor" or t == "sniper_de")
 	if app.sniperProvider then
 		if showSniper then
 			app.sniperProvider.Show(t)
@@ -18234,6 +19319,7 @@ local LEGACY_TAB_ROUTES = {
 	auction_house = "dashboard",
 	ah_sell = "dashboard",
 	ah_auctions = "dashboard",
+	console_setup = "console_setup2",
 }
 
 local VALID_LEAF_TABS = {
@@ -18258,12 +19344,14 @@ local VALID_LEAF_TABS = {
 	bags = true,
 	sniper_gap = true,
 	sniper_vendor = true,
+	sniper_de = true,
 	console_overview = true,
 	console_database = true,
 	console_perf = true,
-	console_setup = true,
+	console_setup2 = true,
 	console_settings = true,
 	console_mail = true,
+	console_tooltips = true,
 	console_ui = true,
 	console_data = true,
 	deep_analysis = true,
@@ -18277,6 +19365,12 @@ function app.setMinimized(minState, skipRefresh)
 		if not app._minimized then
 			app._savedPreMinHeight = (MerchantMasterDB and MerchantMasterDB.window and tonumber(MerchantMasterDB.window.height))
 				or math.max(730, math.floor((panel:GetHeight() or 730) + 0.5))
+		end
+		local pinL = panel.GetLeft and panel:GetLeft()
+		local pinT = panel.GetTop and panel:GetTop()
+		if type(pinL) == "number" and type(pinT) == "number" then
+			panel:ClearAllPoints()
+			panel:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", pinL, pinT)
 		end
 		app._minimized = true
 		ns.Theme.CloseDropDown()
@@ -18355,6 +19449,9 @@ do
 	local T = ns.Theme
 	local headerFrame = CreateFrame("Frame", nil, panel)
 	headerFrame:Hide()
+	if ns.Window and ns.Window.MakeDragHandle then
+		ns.Window.MakeDragHandle(headerFrame, panel, app._finishPanelDrag)
+	end
 	app.ui.skinHeader = headerFrame
 	local originalScopeWidth = scopeSeg.frame:GetWidth()
 	local originalScopeHeight = scopeSeg.frame:GetHeight()
@@ -18827,11 +19924,11 @@ do
 				app.ui.sidebarSectionLayer:SetFrameLevel((sidebar:GetFrameLevel() or 1) + 2)
 			end
 		end
-		local customSectionY = { -66, -136, -260, -348, -400, -452 }
+		local customSectionY = { -66, -136, -254, -338, -388, -455 }
 		for i, sec in ipairs(app.ui.sidebarSections or {}) do
 			sec:SetShown(not compact)
 			sec:ClearAllPoints()
-			sec:SetHeight(14)
+			sec:SetHeight(on and 12 or 14)
 			if sec.SetDrawLayer then sec:SetDrawLayer("OVERLAY", 7) end
 			if sec.SetJustifyV then sec:SetJustifyV("MIDDLE") end
 			applySafeFont(sec, on and 10.5 or 11, "semibold")
@@ -18911,13 +20008,13 @@ do
 				fs:SetPoint("TOPLEFT", wallet, "TOPLEFT", on and 58 or 12, i == 1 and -71 or -90)
 			end
 		end
-		local customNavY = { -80, -98, -150, -168, -186, -204, -222, -240, -274, -292, -310, -328, -362, -380, -414, -432, -466 }
+		local customNavY = { -80, -98, -149, -166, -183, -200, -217, -234, -267, -284, -301, -318, -351, -368, -401, -418, -435, -468 }
 		for i, nb in ipairs(app.ui.navOrder or {}) do
 			local active = nb.key == app.ui._activeNavKey
 			nb:ClearAllPoints()
-			if on then nb:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 12, customNavY[i] or (-80 - (i - 1) * 18))
+			if on then nb:SetPoint("TOPLEFT", sidebar, "TOPLEFT", 12, customNavY[i] or (-80 - (i - 1) * 17))
 			else nb:SetPoint(unpack(originalNavPoints[nb])) end
-			nb:SetSize(on and 196 or 192, on and 17 or 22)
+			nb:SetSize(on and 196 or 192, on and 16 or 21)
 			nb.iconTex:SetShown(not on)
 			nb.labelFs:ClearAllPoints()
 			nb.labelFs:SetPoint("LEFT", on and nb or nb.iconTex, on and "LEFT" or "RIGHT", on and 12 or 9, 0)
@@ -19016,7 +20113,7 @@ function app.setTab(tab)
 	end
 	if tab == "sniper" then
 		tab = app.lastSubTab.sniper or "sniper_gap"
-	elseif tab == "sniper_gap" or tab == "sniper_vendor" then
+	elseif tab == "sniper_gap" or tab == "sniper_vendor" or tab == "sniper_de" then
 		app.lastSubTab.sniper = tab
 	end
 	if tab == "console" then
@@ -19290,12 +20387,16 @@ end
 function app.getUIPriceBank()
 	local db = MerchantMasterDB or {}
 	local econ = ns.CurrentEconomyInfo()
+	local bgMode = (ns.GetBackgroundPriceMode and ns.GetBackgroundPriceMode()) or "local"
 	local sig = table.concat({
 		tostring(econ.selectedKey or "auto"),
 		tostring(econ.effectiveKey or ""),
 		tostring(db.priceSource or "auto"),
+		tostring(bgMode),
 		tostring(db.lastRefreshAt or 0),
-		tostring(ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion() or ns.priceCacheEpoch or 1),
+		tostring((ns.GetPriceDataRevision and ns.GetPriceDataRevision())
+			or (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion())
+			or ns.priceCacheEpoch or 1),
 	}, "|")
 	local now = (GetTime and GetTime()) or 0
 	local bank = app.uiPriceBank
@@ -19449,7 +20550,9 @@ local function refreshPanelImpl()
 		local srcTag = "AH"
 		local ageLbl = "Ready"
 		local econKey = econInfo and econInfo.effectiveKey
-		local snapMeta = (ns.Pricing and type(ns.Pricing.GetSnapshotMeta) == "function") and ns.Pricing.GetSnapshotMeta(econKey) or nil
+		local snapSuppressed = (ns.IsLocalSnapshotSuppressed and ns.IsLocalSnapshotSuppressed()) and true or false
+		local snapMeta = (not snapSuppressed and ns.Pricing and type(ns.Pricing.GetSnapshotMeta) == "function")
+			and ns.Pricing.GetSnapshotMeta(econKey) or nil
 		local snapAt = (type(snapMeta) == "table" and type(snapMeta.updatedAt) == "number" and snapMeta.updatedAt > 0 and (not now or snapMeta.updatedAt <= now))
 			and snapMeta.updatedAt or nil
 		local ahPool = db and db.ahPrices and econKey and db.ahPrices[econKey]
@@ -19459,8 +20562,19 @@ local function refreshPanelImpl()
 		if econInfo and econInfo.isActive and type(db.lastRefreshAt) == "number" and db.lastRefreshAt > 0 and (not now or db.lastRefreshAt <= now) then
 			liveAt = (liveAt and math.max(liveAt, db.lastRefreshAt)) or db.lastRefreshAt
 		end
+		local tsmAvail = (econInfo and econInfo.isActive and ns.IsTSMAvailable and ns.IsTSMAvailable()) and true or false
+		local tsmTs = nil
+		if tsmAvail then
+			local rawTsm = (type(ns.GetTSMRealUpdateTime) == "function" and ns.GetTSMRealUpdateTime())
+				or (type(ns.GetTSMLastUpdateTime) == "function" and ns.GetTSMLastUpdateTime())
+				or ns._tsmLastSeenAt
+			if type(rawTsm) == "number" and rawTsm > 0 and (not now or rawTsm <= now) then
+				tsmTs = rawTsm
+			end
+		end
 		local ts = nil
 		local useSnap = false
+		local usingTSM = false
 		if srcKey == "snapshot" then
 			srcTag = "Snap"
 			ts = snapAt
@@ -19468,6 +20582,8 @@ local function refreshPanelImpl()
 		elseif srcKey == "live_ah" then
 			srcTag = "AH"
 			ts = liveAt
+		elseif srcKey == "tsm" then
+			usingTSM = tsmAvail
 		elseif srcKey == "auto" then
 			if snapAt and (not liveAt or snapAt >= liveAt) then
 				useSnap = true
@@ -19476,6 +20592,13 @@ local function refreshPanelImpl()
 			else
 				srcTag = "AH"
 				ts = liveAt
+			end
+			if tsmAvail then
+				local bestTs = (useSnap and snapAt) or liveAt or 0
+				if (tsmTs and tsmTs > bestTs) or (liveAt == nil and snapAt == nil) then
+					usingTSM = true
+					useSnap = false
+				end
 			end
 		else
 			srcTag = "AH"
@@ -19490,17 +20613,7 @@ local function refreshPanelImpl()
 			ageLbl = (fmtAge and fmtAge(ts, now)) or "just now"
 		end
 		local econStr = (econInfo.selectedKey == "auto") and ("Auto \194\183 " .. econLabel) or econLabel
-		local hasSnaps = (ns.HasSnapshots and ns.HasSnapshots()) and true or false
-		local liveIsRecent = (liveAt ~= nil and now ~= nil and (now - liveAt) <= 1800) and true or false
-		local tsmAvail = (econInfo and econInfo.isActive and ns.IsTSMAvailable and ns.IsTSMAvailable()) and true or false
-		local usingTSM = tsmAvail and (srcKey == "tsm" or (srcKey == "auto" and not useSnap and not liveIsRecent))
-		local tsmTs = nil
-		if tsmAvail and type(ns.GetTSMLastUpdateTime) == "function" then
-			local rawTsm = ns.GetTSMLastUpdateTime()
-			if type(rawTsm) == "number" and rawTsm > 0 and (not now or rawTsm <= now) then
-				tsmTs = rawTsm
-			end
-		end
+		local hasSnaps = (not snapSuppressed) and ((ns.HasSnapshots and ns.HasSnapshots()) and true or false)
 		local noScanYet = (not usingTSM) and (ts == nil and liveAt == nil and not hasSnaps)
 		local syncStr
 		if usingTSM then
@@ -19654,7 +20767,7 @@ local function refreshPanelImpl()
 	end
 
 	if type(app.activeTab) == "string" and app.activeTab:sub(1, 8) == "console_" then
-		if (app.activeTab == "console_settings" or app.activeTab == "console_mail" or app.activeTab == "console_ui")
+		if (app.activeTab == "console_settings" or app.activeTab == "console_mail" or app.activeTab == "console_tooltips" or app.activeTab == "console_ui")
 			and app.consoleProvider and app.consoleProvider.SyncSettings then
 			app.consoleProvider.SyncSettings()
 		end
@@ -19995,6 +21108,9 @@ local function refreshPanelImpl()
 			app.syncDashboardBasketCard()
 		end
 		if app.syncDashboardMode then app.syncDashboardMode() end
+		if app.ui.dashBloombergView and app.ui.dashBloombergView:IsShown() and app.ui.dashBloombergView.Refresh then
+			app.ui.dashBloombergView:Refresh(false)
+		end
 		if app.ui.dashBriefView and app.ui.dashBriefView:IsShown() and app.ui.dashBriefView.Refresh then
 			app.ui.dashBriefView:Refresh(false)
 		end
@@ -20354,7 +21470,7 @@ local function refreshPanelImpl()
 			}))
 		end
 
-	elseif t == "sniper_gap" or t == "sniper_vendor" then
+	elseif t == "sniper_gap" or t == "sniper_vendor" or t == "sniper_de" then
 		if app.sniperProvider and app.sniperProvider.Refresh then
 			app.sniperProvider.Refresh("app_refresh")
 		end
@@ -20642,7 +21758,7 @@ function app.layoutWindow()
 			kpiList[2].frame:SetWidth(kpiW)
 		end
 	end
-	local dashHost = app.ui.dashClassicWrap or app.ui.dashboardView
+	local dashHost = app.ui.dashClassicBody or app.ui.dashClassicWrap or app.ui.dashboardView
 	local dashKpis = app.ui.dashKpis
 	local dashGap = custom and 10 or 16
 	local dashKpiW = custom and math.floor((width - 20) / 3) or kpiW
@@ -20665,10 +21781,11 @@ function app.layoutWindow()
 			cardsTop = top + obH + gap
 		end
 		local halfW = math.max(240, math.floor((width - gap) / 2))
-		local availH = math.max(360, (height or 642) - cardsTop)
+		local dashH = math.max(360, (height or 642) - 38)
+		local availH = math.max(320, dashH - cardsTop)
 		local row2H = math.max(onboardShown and 190 or 238, math.floor((availH - gap) * 0.474))
 		if row2H > 286 then row2H = 286 end
-		if custom then row2H = math.max(160, math.floor((height - cardsTop - gap) / 2)) end
+		if custom then row2H = math.max(150, math.floor((dashH - cardsTop - gap) / 2)) end
 		app.ui.dashLeftCard:ClearAllPoints()
 		app.ui.dashLeftCard:SetPoint("TOPLEFT", dashHost, "TOPLEFT", 0, -cardsTop)
 		app.ui.dashRightCard:ClearAllPoints()
@@ -20695,7 +21812,15 @@ function app.layoutWindow()
 			app.ui.dashOutlierRows[5]:SetShown(show5th and app.ui.dashOutlierRows[5].data ~= nil)
 		end
 	end
-	if app.ensureDashboardBrief then app.ensureDashboardBrief() end
+	local activeDashMode = app.getDashboardMode and app.getDashboardMode() or "brief"
+	if activeDashMode == "bloomberg" and app.ensureDashboardBloomberg then
+		app.ensureDashboardBloomberg()
+	elseif activeDashMode == "brief" and app.ensureDashboardBrief then
+		app.ensureDashboardBrief()
+	end
+	if app.ui.dashBloombergView and app.ui.dashBloombergView.Layout then
+		app.ui.dashBloombergView:Layout(width, height)
+	end
 	if app.ui.dashBriefView and app.ui.dashBriefView.Layout then
 		app.ui.dashBriefView:Layout(width, height)
 	end
@@ -20735,9 +21860,11 @@ function app.refresh()
 		app.activeTab = shopSource
 	end
 	local perfT0 = (ns._consolePerfOn == true and _G.debugprofilestop) and _G.debugprofilestop() or nil
+	app._inRefresh = (app._inRefresh or 0) + 1
 	local ok, err = pcall(function()
 		refreshPanelImpl()
 	end)
+	app._inRefresh = math.max(0, (app._inRefresh or 1) - 1)
 	if perfT0 and ns.ConsoleEngine and ns.ConsoleEngine.RecordUITiming then
 		ns.ConsoleEngine.RecordUITiming(app.activeTab, _G.debugprofilestop() - perfT0)
 	end
@@ -20813,6 +21940,10 @@ end
 local function anchorPanel()
 	applyPanelLayout()
 	if panel.userMoved then return end
+	if ns.Window and ns.Window.RestorePosition and ns.Window.RestorePosition(panel, "main") then
+		panel.userMoved = true
+		return
+	end
 	local ah = (AuctionHouseFrame and AuctionHouseFrame:IsShown() and AuctionHouseFrame)
 		or (AuctionFrame and AuctionFrame:IsShown() and AuctionFrame)
 	panel:ClearAllPoints()
@@ -20821,6 +21952,32 @@ local function anchorPanel()
 	else
 		panel:SetPoint("CENTER")
 	end
+end
+
+function app.resetWindowPositions()
+	if ns.Window and ns.Window.ClearSavedPosition then
+		ns.Window.ClearSavedPosition(nil)
+	end
+	panel.userMoved = false
+	if app.ui and app.ui.shopModal then
+		app.ui.shopModal._mmUserPositioned = false
+	end
+	if panel:IsShown() then
+		anchorPanel()
+	end
+	if app.ui and app.ui.cartBuyerModal and app.ui.cartBuyerModal:IsShown() and app.dockCartBuyerModal then
+		app.dockCartBuyerModal(true)
+		if app.ui.cartBuyerModal.Render then app.ui.cartBuyerModal.Render() end
+	end
+	if ns.DisenchantHelper and ns.DisenchantHelper.ApplyPosition then
+		ns.DisenchantHelper.ApplyPosition()
+	end
+	if app.ui and app.ui.shopModal and app.ui.shopModal:IsShown() then
+		app.ui.shopModal:ClearAllPoints()
+		app.ui.shopModal:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+	end
+	say("Reset all MerchantMaster window positions to smart defaults.")
+	return true
 end
 
 function app.togglePanel(forceTab)
@@ -20923,6 +22080,13 @@ end
 panel:HookScript("OnShow", function()
 	if ns.Theme and ns.Theme.FlushPendingRepaint then ns.Theme.FlushPendingRepaint() end
 	if ns.EnsureSnapshotsLoaded then ns.EnsureSnapshotsLoaded() end
+	if ns.IsTSMAvailable and ns.IsTSMAvailable() then
+		local curTsmTs = ns.GetTSMRealUpdateTime and ns.GetTSMRealUpdateTime() or nil
+		if curTsmTs and curTsmTs ~= app._lastSeenTsmUpdateTs then
+			app._lastSeenTsmUpdateTs = curTsmTs
+			if ns.InvalidatePriceCache then ns.InvalidatePriceCache({ reason = "tsm" }) end
+		end
+	end
 	if app.refreshSkinLayout then app.refreshSkinLayout() end
 	if app.scanPlayerCooldowns then app.scanPlayerCooldowns() end
 	app.refresh()
@@ -21334,9 +22498,12 @@ do
 	function app.clearSavedAHPrices()
 		wipe(app.costs)
 		wipe(app.ahPrices)
-		if MerchantMasterDB and MerchantMasterDB.ahLots then
-			local _, activeEcon = ns.MarketScan.ActiveEconomyPrices()
-			if MerchantMasterDB.ahLots[activeEcon] then wipe(MerchantMasterDB.ahLots[activeEcon]) end
+		if MerchantMasterDB then
+			MerchantMasterDB.lastRefreshAt = nil
+			if MerchantMasterDB.ahLots then
+				local _, activeEcon = ns.MarketScan.ActiveEconomyPrices()
+				if MerchantMasterDB.ahLots[activeEcon] then wipe(MerchantMasterDB.ahLots[activeEcon]) end
+			end
 		end
 		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
 		app.refresh()
@@ -21365,14 +22532,16 @@ do
 		{ cmd = "/mm dashboard", desc = "open Today's Overview dashboard" },
 		{ cmd = "/mm watchlist", desc = "open Watchlist favorites (/mm fav)" },
 		{ cmd = "/mm spread",   desc = "open Daily Crafts (Profit Spread)" },
-		{ cmd = "/mm sniper",   desc = "open Gap Sniper (/mm vsniper for Vendor Sniper)" },
+		{ cmd = "/mm sniper",   desc = "open Gap Sniper (/mm vsniper Vendor, /mm desniper Disenchant)" },
 		{ cmd = "/mm prof",     desc = "open 1-300 Profession Leveling guide" },
 		{ cmd = "/mm analytics", desc = "open Profit & Wealth ledger" },
 		{ cmd = "/mm shopping", desc = "toggle detachable Shopping List window" },
+		{ cmd = "/mm resetpos", desc = "reset all saved window positions back to smart defaults" },
 		{ cmd = "/mm options",  desc = "open Settings (/mm blizzoptions for Blizzard Options)" },
 		{ cmd = "/mm mail",     desc = "open Console -> Mail (saved recipients & send safety net)" },
+		{ cmd = "/mm tooltips", desc = "open Console -> Tooltip Setup (sections, price format & live preview)" },
 		{ cmd = "/mm console",  desc = "open Console diagnostics & maintenance" },
-		{ cmd = "/mm snapshots", desc = "open Console -> Snapshot Settings (optional background helper)" },
+		{ cmd = "/mm snapshots", desc = "open Console -> Snapshot Sync (1-line GitHub auto-sync)" },
 		{ cmd = "/mm scan",     desc = "refresh Live AH prices (at an Auctioneer)" },
 		{ cmd = "/mm clearah",  desc = "clear saved Live AH prices for active economy" },
 		{ cmd = "/mm theme",    desc = "switch UI Theme (standard, human, night_elf, orc, undead, goblin)" },
@@ -21501,7 +22670,12 @@ local function isRecentlyCrafting()
 end
 
 local function scheduleRefresh(reason)
-	if reason == "items" and (app.superListProvider or app.vendorCrafterProvider or app.disenchantCrafterProvider or app.allItemsProvider) then return end
+	if reason == "items" and (
+		(app.activeTab == "recipes" and app.superListProvider)
+		or (app.activeTab == "vendor_crafter" and app.vendorCrafterProvider)
+		or (app.activeTab == "disenchant_crafter" and app.disenchantCrafterProvider)
+		or (app.activeTab == "all_items" and app.allItemsProvider)
+	) then return end
 	if not panel:IsShown() then return end
 	local isProfTab = type(app.activeTab) == "string" and app.activeTab:sub(1, 5) == "prof_"
 	if isProfTab and (reason == "bags" or reason == "skills" or reason == "professor") then
@@ -21528,6 +22702,52 @@ local function scheduleRefresh(reason)
 end
 app.scheduleRecipeRefresh = scheduleRefresh
 app.scheduleRefresh = scheduleRefresh
+
+if ns.RegisterPriceChangeListener then
+	ns.RegisterPriceChangeListener(function(reason, itemIDs)
+		app.uiPriceBank = nil
+		app.recipeStatsRevision = (app.recipeStatsRevision or 0) + 1
+		if ns.ClearDECache then ns.ClearDECache() end
+		if ns.MP and ns.MP.InvalidateSolveCache then ns.MP.InvalidateSolveCache() end
+		if ns.DashboardBloombergModel and ns.DashboardBloombergModel.InvalidateCache then
+			ns.DashboardBloombergModel.InvalidateCache()
+		end
+		if ns.Analytics then
+			if ns.Analytics.Model then
+				if ns.Analytics.Model.Invalidate then
+					ns.Analytics.Model.Invalidate()
+				elseif ns.Analytics.Model.InvalidateCache then
+					ns.Analytics.Model.InvalidateCache()
+				end
+			end
+			if ns.Analytics.Tooltips and ns.Analytics.Tooltips.InvalidateAll then
+				ns.Analytics.Tooltips.InvalidateAll()
+			end
+		end
+		if ns.Watchlist and ns.Watchlist.Invalidate then
+			ns.Watchlist.Invalidate()
+		end
+		if ns.DeepAnalysis and ns.DeepAnalysis.Invalidate then
+			ns.DeepAnalysis.Invalidate()
+		end
+		if ns.DisenchantHelper and ns.DisenchantHelper.Invalidate then
+			ns.DisenchantHelper.Invalidate()
+		end
+		if (app._inRefresh or 0) == 0 then
+			if panel and panel:IsShown() then
+				if reason == "snapshot" or reason == "tsm" then
+					scheduleRefresh("prices")
+				end
+				if app.activeTab == "deep_analysis" and ns.DeepAnalysis and ns.DeepAnalysis.Refresh then
+					ns.DeepAnalysis.Refresh()
+				end
+			end
+			if app.refreshQuickLook then
+				app.refreshQuickLook()
+			end
+		end
+	end)
+end
 
 local function scheduleItemInfoRefresh()
 	if not panel:IsShown() then return end
@@ -21608,6 +22828,10 @@ local function purgeStaleSingleWordSelfChars(activeEcon, realm, playerFaction, p
 end
 
 local function flushBagResync(forceAll)
+	if not forceAll and ns.MailHelper and ns.MailHelper.IsActive and ns.MailHelper.IsActive() then
+		app._deferredBagResyncAfterMail = true
+		return nil
+	end
 	app.bagsDirty = true
 	app.bagCountsDirty = true
 	if app.atBank then scanBank() end
@@ -21660,6 +22884,10 @@ end
 
 local bagResyncQueued = false
 local function scheduleBagResync()
+	if ns.MailHelper and ns.MailHelper.IsActive and ns.MailHelper.IsActive() then
+		app._deferredBagResyncAfterMail = true
+		return
+	end
 	if bagResyncQueued then return end
 	if C_Timer and C_Timer.After then
 		bagResyncQueued = true
@@ -21670,6 +22898,12 @@ local function scheduleBagResync()
 	else
 		flushBagResync(false)
 	end
+end
+
+function app.flushDeferredMailBagResync()
+	if not app._deferredBagResyncAfterMail then return nil end
+	app._deferredBagResyncAfterMail = nil
+	return flushBagResync(false)
 end
 
 function app.resyncBags(verbose)
@@ -22269,6 +23503,8 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
 			if bootT0 and ns.ConsoleEngine and ns.ConsoleEngine.RecordBootPhase then
 				ns.ConsoleEngine.RecordBootPhase("ADDON_LOADED", _G.debugprofilestop() - bootT0)
 			end
+		elseif arg1 == "Blizzard_Professions" then
+			if app.ensureProfessionsMMTab then app.ensureProfessionsMMTab() end
 		end
 	elseif event == "PLAYER_LOGIN" then
 		app.ensureDEContainerHooks()
@@ -22318,6 +23554,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
 		sanitizeKnownRecipes(app.char)
 		scanTradeSkillWindow()
 		if app.ensureMerchantFrameHooked then app.ensureMerchantFrameHooked() end
+		if app.ensureProfessionsMMTab then app.ensureProfessionsMMTab() end
 		if app.orderFlow and app.orderFlow.RestoreState then
 			app.orderFlow.RestoreState()
 		end
@@ -22399,6 +23636,9 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
 	elseif event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_UPDATE" or event == "TRADE_SKILL_LIST_UPDATE" or event == "TRADE_SKILL_DATA_SOURCE_CHANGED" or event == "NEW_RECIPE_LEARNED" or event == "CRAFT_SHOW" or event == "CRAFT_UPDATE" then
 		if event == "TRADE_SKILL_DATA_SOURCE_CHANGED" then
 			app._tsSessionScanned = false
+		end
+		if (event == "TRADE_SKILL_SHOW" or event == "TRADE_SKILL_DATA_SOURCE_CHANGED") and app.ensureProfessionsMMTab then
+			app.ensureProfessionsMMTab()
 		end
 		if app.orderFlow then
 			if event == "TRADE_SKILL_SHOW" and app.orderFlow.OnTradeSkillShow then
@@ -22518,6 +23758,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
             end
         end
         app.atMailbox=false; app.mailboxSession=(app.mailboxSession or 0)+1; app.mailboxScanPending=nil
+        if app.flushDeferredMailBagResync then app.flushDeferredMailBagResync() end
 		if app.orderFlow and app.orderFlow.OnMailClosed then
 			app.orderFlow.OnMailClosed()
 			syncOrderFlowDockAndRender()
@@ -22601,6 +23842,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
 			ns.MarketScan.HookBuyFrame()
 			addAHSearchBarButton()
 			if ns.AHSellTab and ns.AHSellTab.EnsureAttached then ns.AHSellTab.EnsureAttached() end
+			if app.ensureAuctionHouseMMTab then app.ensureAuctionHouseMMTab() end
 			if app._ahBuyingMode and app.ui.cartBuyerModal and app.ui.cartBuyerModal:IsShown() then
 				if panel and panel:IsShown() then panel:Hide() end
 				if app.dockCartBuyerModal then app.dockCartBuyerModal() end
@@ -22989,6 +24231,8 @@ SlashCmdList.MERCHANTMASTER = function(msg)
 		app.togglePanel("console_settings")
 	elseif msg == "mail" or msg == "mailpresets" then
 		app.togglePanel("console_mail")
+	elseif msg == "tooltips" or msg == "tooltip" then
+		app.togglePanel("console_tooltips")
 	elseif msg == "blizzoptions" then
 		openOptions()
 	elseif msg == "console" or msg == "admin" or msg == "monitor" then
@@ -22997,8 +24241,8 @@ SlashCmdList.MERCHANTMASTER = function(msg)
 		app.togglePanel("console_database")
 	elseif msg == "perf" or msg == "debug" or msg == "profiler" then
 		app.togglePanel("console_perf")
-	elseif msg == "setup" or msg == "snapshots" or msg == "snapshot" then
-		app.togglePanel("console_setup")
+	elseif msg == "setup" or msg == "snapshots" or msg == "snapshot" or msg == "setup2" or msg == "snapshots2" or msg == "github" or msg == "autosync" or msg == "builder" or msg == "setup1" or msg == "snapshots1" then
+		app.togglePanel("console_setup2")
 	elseif msg == "ui" or msg == "appearance" then
 		app.togglePanel("console_ui")
 	elseif msg == "data" or msg == "maintenance" then
@@ -23089,6 +24333,10 @@ SlashCmdList.MERCHANTMASTER = function(msg)
 		app.togglePanel("sniper_gap")
 	elseif msg == "vsniper" or msg == "vendorsniper" or msg == "sniper_vendor" or msg == "sniper vendor" or msg == "vsnipe" then
 		app.togglePanel("sniper_vendor")
+	elseif msg == "desniper" or msg == "disenchantsniper" or msg == "sniper_de" or msg == "sniper de" or msg == "desnipe" then
+		app.togglePanel("sniper_de")
+	elseif msg == "resetpos" or msg == "resetpositions" or msg == "resetwindows" then
+		app.resetWindowPositions()
 	elseif msg == "sell" or msg == "post" then
 		if ns.AHSellTab and atAH() and ns.AHSellTab.SelectTab then
 			ns.AHSellTab.SelectTab()
@@ -23238,7 +24486,11 @@ _G.MerchantMasterAPI = {
 			end
 			return false
 		end
+		local prevExt = app.snapshotExtension
 		app.snapshotExtension = provider
+		if provider ~= prevExt and ns.InvalidatePriceCache then
+			ns.InvalidatePriceCache({ reason = "snapshot" })
+		end
 		if app.consoleProvider then
 			if type(app.consoleProvider.SyncExtensions) == "function" then
 				pcall(app.consoleProvider.SyncExtensions)
@@ -23454,7 +24706,7 @@ _G.MerchantMasterAPI = {
 		app.sniperProvider = provider
 		if panel:IsShown() then
 			applyPanelLayout()
-			if app.activeTab == "sniper_gap" or app.activeTab == "sniper_vendor" then app.refresh() end
+			if app.activeTab == "sniper_gap" or app.activeTab == "sniper_vendor" or app.activeTab == "sniper_de" then app.refresh() end
 		end
 		return true
 	end,

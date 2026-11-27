@@ -491,13 +491,22 @@ local DEFAULT_SERVER_PRESETS = {
 	{ key = "custom", label = "Custom (ruleset:house=Economy)" },
 }
 
-CE.INSTALL_COMMANDS = {
-	windows = "py -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; py -m snapshot_builder setup-gui",
-	windowsAlt = "python -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; python -m snapshot_builder setup-gui",
-	linux = "curl -fsSL https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py -o install_linux.py && python3 install_linux.py",
-	macos = "python3 -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip && python3 -m snapshot_builder setup-gui",
+CE.INSTALL_COMMANDS_V2 = {
+	windows = "py -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; py -m snapshot_builder configure --sync-mode github --apply-task --sync-now",
+	windowsAlt = "python -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip; python -m snapshot_builder configure --sync-mode github --apply-task --sync-now",
+	windowsCheck = "py -m snapshot_builder pull-github --check-only",
+	windowsGui = "py -m snapshot_builder setup-gui",
+	windowsRebuild = "py -m snapshot_builder sync --source github --force",
+	windowsUninstall = "py -m snapshot_builder uninstall-task",
+	linux = "curl -fsSL https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py -o install_linux.py && python3 install_linux.py --sync-mode github",
+	macos = "python3 -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip && python3 -m snapshot_builder configure --sync-mode github --apply-task --sync-now",
+	linuxCheck = "~/.local/bin/mm-snapshots pull-github --check-only",
+	linuxRebuild = "~/.local/bin/mm-snapshots sync --source github --force",
+	linuxUninstall = "~/.local/bin/mm-snapshots uninstall-task",
+	macosRebuild = "python3 -m snapshot_builder sync --source github --force",
+	macosUninstall = "python3 -m snapshot_builder uninstall-task",
+	dataRepoUrl = "https://github.com/JustBenji/MerchantMaster-SnapshotData",
 	guideUrl = "https://github.com/JustBenji/MerchantMaster-Snapshots",
-	linuxScriptUrl = "https://raw.githubusercontent.com/JustBenji/MerchantMaster-Snapshots/main/install_linux.py",
 }
 
 local function quoteShellArg(s)
@@ -753,7 +762,7 @@ function CE.CollectStorageSnapshot()
 		label = "Addon Settings & Queues",
 		rows = miscRows,
 		estBytes = miscBytes,
-		fields = "economy, priceSource, useTSMPrices, uiSkin, uiThemeMode, tableStyle, consolePerfEnabled, consoleStats, queues",
+		fields = "economy, priceSource, backgroundPriceMode, useTSMPrices, uiSkin, uiThemeMode, tableStyle, consolePerfEnabled, consoleStats, queues",
 	}
 
 	-- MerchantMasterLedgerDB breakdown
@@ -788,7 +797,9 @@ function CE.CollectStorageSnapshot()
 	end
 
 	local snapExt = CE.GetSnapshotExtension()
-	local hasSnap = (snapExt ~= nil) or (type(ns.HasSnapshots) == "function" and ns.HasSnapshots() == true)
+	local hasSnap = (snapExt ~= nil)
+		or (type(ns.HasRawSnapshots) == "function" and ns.HasRawSnapshots() == true)
+		or (type(ns.HasSnapshots) == "function" and ns.HasSnapshots() == true)
 	local sysMeta = hasSnap and ns.Pricing and type(ns.Pricing.GetSnapshotSystemMeta) == "function"
 		and ns.Pricing.GetSnapshotSystemMeta() or nil
 	local sqliteTables = {}
@@ -1258,6 +1269,7 @@ function CE.RunAction(actionKey, arg)
 		if se then
 			if type(se.ClearGapDeals) == "function" then se.ClearGapDeals() end
 			if type(se.ClearVendorDeals) == "function" then se.ClearVendorDeals() end
+			if type(se.ClearDEDeals) == "function" then se.ClearDEDeals() end
 			if type(se.ResetSessionStats) == "function" then se.ResetSessionStats() end
 			if type(se.ClearDrillCache) == "function" then se.ClearDrillCache() end
 			if type(se.ResetNeutralCache) == "function" then se.ResetNeutralCache() end

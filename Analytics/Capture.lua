@@ -358,7 +358,7 @@ local function readMail(index,subIndex,identityOnly)
             local lnk=_G.GetInboxItemLink and _G.GetInboxItemLink(index,tonumber(subIndex))
             if hasSecret(nm,id,cnt,lnk) then return end
             firstNm=nm; firstID=tonumber(id) or itemID(lnk); totalAttQty=tonumber(cnt) or 0
-        else
+        elseif hasItem==true or (tonumber(hasItem) or 0)>0 then
             local declared=tonumber(hasItem)
             local loaded=0
             for slot=1,maxAtt do
@@ -366,7 +366,7 @@ local function readMail(index,subIndex,identityOnly)
                 local lnk=_G.GetInboxItemLink and _G.GetInboxItemLink(index,slot)
                 if hasSecret(nm,id,cnt,lnk) then return end
                 local sid=tonumber(id) or itemID(lnk)
-                if nm or (sid and (hasItem==true or (tonumber(hasItem) or 0)>0)) then
+                if nm or sid then
                     if not sid or not nm or nm==_G.RETRIEVING_DATA then return end
                     loaded=loaded+1
                     local quantity=tonumber(cnt) or 1
@@ -376,6 +376,7 @@ local function readMail(index,subIndex,identityOnly)
                     if (firstID and sid==firstID) or (not firstID and nm==firstNm) then
                         totalAttQty=totalAttQty+(tonumber(cnt) or 1)
                     end
+                    if declared and loaded>=declared then break end
                 end
             end
             if (declared and loaded~=declared) or (hasItem==true and loaded==0) then return end
@@ -385,7 +386,6 @@ local function readMail(index,subIndex,identityOnly)
             m.attachedName=firstNm; m.attachedID=firstID; m.attachedCount=totalAttQty>0 and totalAttQty or 1
         end
     end
-    if _G.GetInboxText then local text=_G.GetInboxText(index); if not hasSecret(text) then m.text=text end end
     return m
 end
 local function mailSlotSig(char,m)
@@ -490,12 +490,15 @@ function Capture.InspectAndRecordMail(index,subIndex,collectedDelta)
         for _,entry in pairs(db().seenMail or {}) do if type(entry)=="table" then entry.gone=true; entry.shell=nil end end
         mailCache={}; Capture._mailCachedCount=0; Capture._mailObservedEmpty=nil
     end
+    local quickLive=readMail(index,subIndex)
     local previous=mailCache[index]
+    local mayRecoverSeller=quickLive and (quickLive.invoiceType=="seller" or quickLive.invoiceType=="seller_temp_invoice") and (tonumber(collectedDelta) or 0)>0
+    if not mailCollectable(quickLive) and not mayRecoverSeller and not (previous and (previous.consumed or mailCollectable(previous))) then return end
     if cacheMail and (not Capture._mailCachedCount or totalCount~=Capture._mailCachedCount or (previous and previous.consumed)) then
         -- Seller identity reconciliation needs invoices only; attachment ownership stays deferred.
         cacheMail(true)
     end
-    local live=readMail(index,subIndex)
+    local live=quickLive or readMail(index,subIndex)
     local cached=mailCache[index]
     -- Under taint-safe hooksecurefunc, TakeInboxMoney may zero live.money in C before our post-hook runs.
     -- Recover the exact invoice payout when live still carries the seller invoice and player money rose by it.
@@ -971,30 +974,47 @@ cacheMail=function(identityOnly,rejectEmpty)
                     for _,p in ipairs(pendingSellerMail) do if p.m==pm then p.m=nm end end
                 end
             elseif S>0 and T>0 then
-                local stride=T+2
-                local dp={}
-                for i=0,(S+2)*stride-1 do dp[i+1]=0 end
-                for i=S,1,-1 do
-                    for j=T,1,-1 do
-                        local at=i*stride+j+1
-                        local best=math.max(dp[at+stride],dp[at+1])
-                        local score=(surv[i].slotSig==targets[j].slotSig and 1001 or 1000)+dp[at+stride+1]
-                        if score>best then best=score end
-                        dp[at]=best
-                    end
+                local allSameSig=true
+                local sig0=surv[1] and surv[1].slotSig
+                for i=1,S do if surv[i].slotSig~=sig0 then allSameSig=false; break end end
+                if allSameSig then
+                    for j=1,T do if targets[j].slotSig~=sig0 then allSameSig=false; break end end
                 end
-                local i,j=1,1
-                while i<=S and j<=T do
-                    local at=i*stride+j+1
-                    local score=(surv[i].slotSig==targets[j].slotSig and 1001 or 1000)+dp[at+stride+1]
-                    if dp[at]==score then
-                        if surv[i].consumed then targets[j].consumed=true; targets[j].fingerprint=surv[i].fingerprint; targets[j].consumedOrder=surv[i].consumedOrder end
-                        if surv[i].pendingCash then
-                            targets[j].pendingCash=true
-                            for _,p in ipairs(pendingSellerMail) do if p.m==surv[i] then p.m=targets[j] end end
+                if allSameSig then
+                    local kMax=math.min(S,T)
+                    for k=1,kMax do
+                        if surv[k].consumed then targets[k].consumed=true; targets[k].fingerprint=surv[k].fingerprint; targets[k].consumedOrder=surv[k].consumedOrder end
+                        if surv[k].pendingCash then
+                            targets[k].pendingCash=true
+                            for _,p in ipairs(pendingSellerMail) do if p.m==surv[k] then p.m=targets[k] end end
                         end
-                        i=i+1; j=j+1
-                    elseif dp[at+stride]>=dp[at+1] then i=i+1 else j=j+1 end
+                    end
+                else
+                    local stride=T+2
+                    local dp={}
+                    for i=0,(S+2)*stride-1 do dp[i+1]=0 end
+                    for i=S,1,-1 do
+                        for j=T,1,-1 do
+                            local at=i*stride+j+1
+                            local best=math.max(dp[at+stride],dp[at+1])
+                            local score=(surv[i].slotSig==targets[j].slotSig and 1001 or 1000)+dp[at+stride+1]
+                            if score>best then best=score end
+                            dp[at]=best
+                        end
+                    end
+                    local i,j=1,1
+                    while i<=S and j<=T do
+                        local at=i*stride+j+1
+                        local score=(surv[i].slotSig==targets[j].slotSig and 1001 or 1000)+dp[at+stride+1]
+                        if dp[at]==score then
+                            if surv[i].consumed then targets[j].consumed=true; targets[j].fingerprint=surv[i].fingerprint; targets[j].consumedOrder=surv[i].consumedOrder end
+                            if surv[i].pendingCash then
+                                targets[j].pendingCash=true
+                                for _,p in ipairs(pendingSellerMail) do if p.m==surv[i] then p.m=targets[j] end end
+                            end
+                            i=i+1; j=j+1
+                        elseif dp[at+stride]>=dp[at+1] then i=i+1 else j=j+1 end
+                    end
                 end
             end
         end
@@ -2074,6 +2094,14 @@ function Capture.ValueWealthItem(h,hostDB,charEcon,activeEcon,id,isBound,catKey)
     if sameEcon and h and h.GetItemMarketPrice then
         mkt,src=h.GetItemMarketPrice(id)
         listed=h.GetNumListed and h.GetNumListed(id) or nil
+    elseif h and h.GetCanonicalItemPrice then
+        local can=h.GetCanonicalItemPrice(id,charEcon)
+        mkt=can and can.price or nil
+        src=can and can.source or nil
+        listed=can and can.listed or nil
+    elseif sameEcon==false and h and h.GetItemMarketPrice then
+        mkt,src=h.GetItemMarketPrice(id)
+        listed=h.GetNumListed and h.GetNumListed(id) or nil
     else
         local pool=hostDB and hostDB.ahPrices and hostDB.ahPrices[charEcon]
         local rec=pool and pool[id]
@@ -2147,8 +2175,8 @@ function Capture.QueueWealthSnapshot(opts)
     opts=opts or {}; if not ready() or Store.IsDisabled("SNAPSHOT") then return end
     if Capture._snapshotRunning then Capture._snapshotAgain=true; return end
     local h=H(); if not (h and h.app and h.app.char) then return end
-    local priceVersion=h.GetEffectivePriceVersion and h.GetEffectivePriceVersion() or h.priceCacheEpoch or 0
-    if wealthEvalEpoch~=h.priceCacheEpoch then wealthEvalBank={}; wealthEvalEpoch=h.priceCacheEpoch end
+    local priceVersion=(h.GetPriceDataRevision and h.GetPriceDataRevision()) or (h.GetEffectivePriceVersion and h.GetEffectivePriceVersion()) or h.priceCacheEpoch or 0
+    if wealthEvalEpoch~=priceVersion then wealthEvalBank={}; wealthEvalEpoch=priceVersion end
     Capture._snapshotRunning=true
     lastWealthSnapAt=nowSec()
     if h.app.scanGear then pcall(h.app.scanGear) end

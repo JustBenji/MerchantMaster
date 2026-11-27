@@ -576,4 +576,97 @@ do
     check(p1080:GetWidth() == 1840 and p1080:GetHeight() == 730, "1920x1080 unzoom restores exact 1840x730")
 end
 
+---------------------------------------------------------------------------------------------------
+-- 7. WoW Forever Full Name (First Last) & Unified Dashboard Mode Switcher Symmetry / Round-Trip
+---------------------------------------------------------------------------------------------------
+do
+    local app = ns.app
+    local ui = app and app.ui
+    check(type(app) == "table" and type(ui) == "table", "ns.app and app.ui loaded")
+
+    -- 7a. Full Character Name (First Last) via ns.GetPlayerFullName and RegionalUniqueNamesEnabled fallback
+    local savedUnitName = _G.UnitName
+    local savedRegional = _G.RegionalUniqueNamesEnabled
+    local savedConstants = _G.Constants
+    local savedGetPlayerFullName = ns.GetPlayerFullName
+
+    ns.GetPlayerFullName = function() return "Vexia Copperbolt", "Vexia" end
+    check(Brief.GetGreeting(14) == "Good afternoon, Vexia Copperbolt",
+        "Brief.GetGreeting uses ns.GetPlayerFullName First Last (got " .. tostring(Brief.GetGreeting(14)) .. ")")
+
+    ns.GetPlayerFullName = nil
+    _G.RegionalUniqueNamesEnabled = function() return true end
+    _G.Constants = { CharacterNameSeparatorConsts = { CHARACTERNAME_SURNAME_SEPARATOR = " " } }
+    _G.UnitName = function(unit)
+        if unit == "player" then return "Vexia", "Copperbolt" end
+        return nil
+    end
+    check(Brief.GetGreeting(14) == "Good afternoon, Vexia Copperbolt",
+        "Brief.GetGreeting joins two-value UnitName('player') when RegionalUniqueNamesEnabled (got " .. tostring(Brief.GetGreeting(14)) .. ")")
+
+    -- Restore real ns.GetPlayerFullName and verify end-to-end app.ensureDashboardBrief() greeting
+    ns.GetPlayerFullName = savedGetPlayerFullName
+    local prevMode = _G.MerchantMasterDB and _G.MerchantMasterDB.dashboardMode
+    app.panel:Show()
+    app.setTab("dashboard")
+    app.setDashboardMode("brief")
+    local briefView = app.ensureDashboardBrief()
+    check(briefView ~= nil, "app.ensureDashboardBrief returns brief view")
+    briefView:Refresh(true)
+    local greetText = briefView.greetingFs and briefView.greetingFs:GetText() or ""
+    check(greetText:find("Vexia Copperbolt", 1, true) ~= nil,
+        "end-to-end briefView greeting renders First Last 'Vexia Copperbolt' (got " .. tostring(greetText) .. ")")
+
+    _G.UnitName = savedUnitName
+    _G.RegionalUniqueNamesEnabled = savedRegional
+    _G.Constants = savedConstants
+
+    -- 7b. Unified upper-right switcher symmetry & brief -> classic -> brief round-trip
+    check(ui.dashClassicBanner ~= nil and ui.dashClassicBanner:GetHeight() == 32,
+        "classic dashboard exposes 32px dashClassicBanner")
+    check(ui.dashClassicTitle ~= nil and ui.dashClassicTitle:GetText() == "Market Pulse",
+        "dashClassicTitle displays 'Market Pulse'")
+    check(ui.dashClassicBody ~= nil, "dashClassicBody container exposed")
+    check(ui.dashKpis[1].frame:GetParent() == ui.dashClassicBody
+        and ui.dashLeftCard:GetParent() == ui.dashClassicBody
+        and ui.dashRightCard:GetParent() == ui.dashClassicBody
+        and ui.dashTurninCard:GetParent() == ui.dashClassicBody
+        and ui.dashBasketCard:GetParent() == ui.dashClassicBody,
+        "classic KPIs and bento cards are parented inside dashClassicBody")
+    check(ui.dashClassicModeSeg ~= nil and ui.dashClassicModeSeg.buttons ~= nil
+        and ui.dashClassicModeSeg.buttons.brief ~= nil and ui.dashClassicModeSeg.buttons.classic ~= nil,
+        "dashClassicModeSeg exposes brief and classic buttons")
+    check(ui.dashBriefReturnBtn == ui.dashClassicModeSeg.buttons.brief,
+        "dashBriefReturnBtn preserves backward compatibility pointing to dashClassicModeSeg.buttons.brief")
+
+    local cPt = ui.dashClassicModeSeg.frame._points and ui.dashClassicModeSeg.frame._points[#ui.dashClassicModeSeg.frame._points]
+    local bPt = briefView.modeSeg.frame._points and briefView.modeSeg.frame._points[#briefView.modeSeg.frame._points]
+    check(cPt and cPt[1] == "RIGHT" and cPt[2] == ui.dashClassicBanner and cPt[3] == "RIGHT" and cPt[4] == -2 and cPt[5] == 0,
+        "dashClassicModeSeg anchored RIGHT, dashClassicBanner, RIGHT, -2, 0")
+    check(bPt and bPt[1] == "RIGHT" and bPt[2] == briefView.banner and bPt[3] == "RIGHT" and bPt[4] == -2 and bPt[5] == 0,
+        "briefView.modeSeg anchored RIGHT, banner, RIGHT, -2, 0")
+    check(ui.dashClassicModeSeg.frame:GetWidth() == briefView.modeSeg.frame:GetWidth()
+        and ui.dashClassicModeSeg.frame:GetHeight() == briefView.modeSeg.frame:GetHeight(),
+        "classic and brief modeSeg share identical dimensions")
+
+    -- Round-trip: brief -> classic -> brief
+    check(briefView:IsShown() and not ui.dashClassicWrap:IsShown(), "brief mode shows briefView and hides dashClassicWrap")
+    briefView.modeSeg.buttons.classic:GetScript("OnClick")(briefView.modeSeg.buttons.classic, "LeftButton")
+    check(_G.MerchantMasterDB.dashboardMode == "classic", "clicking Market Pulse switches DB mode to classic")
+    check(not briefView:IsShown() and ui.dashClassicWrap:IsShown(), "classic mode hides briefView and shows dashClassicWrap")
+    local classicThumbPt = ui.dashClassicModeSeg.thumb._points and ui.dashClassicModeSeg.thumb._points[1]
+    check(classicThumbPt and classicThumbPt[2] == ui.dashClassicModeSeg.buttons.classic,
+        "dashClassicModeSeg highlights classic segment in classic mode")
+
+    ui.dashBriefReturnBtn:GetScript("OnClick")(ui.dashBriefReturnBtn, "LeftButton")
+    check(_G.MerchantMasterDB.dashboardMode == "brief", "clicking dashBriefReturnBtn switches DB mode back to brief")
+    check(briefView:IsShown() and not ui.dashClassicWrap:IsShown(), "brief mode restores briefView and hides dashClassicWrap")
+    local briefThumbPt = briefView.modeSeg.thumb._points and briefView.modeSeg.thumb._points[1]
+    check(briefThumbPt and briefThumbPt[2] == briefView.modeSeg.buttons.brief,
+        "briefView.modeSeg highlights brief segment after round-trip")
+
+    if _G.MerchantMasterDB then _G.MerchantMasterDB.dashboardMode = prevMode end
+    app.syncDashboardMode()
+end
+
 print("PASS dashboard_brief: " .. tostring(hostEnv.assertions()) .. " assertions, 0 failures")

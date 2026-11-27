@@ -139,8 +139,17 @@ function Refresh.Create(panel, anchor)
             GameTooltip:AddLine(c.state.text, 0.90, 0.90, 0.94)
         end
         local stamp = c.state.at
-        local showSnapInfo = hasSnapshotCapability()
-        if showSnapInfo and c.state.isSnapshot then
+        local suppressed = safe(ns.IsLocalSnapshotSuppressed) and type(ns.IsLocalSnapshotSuppressed) == 'function' and ns.IsLocalSnapshotSuppressed()
+        local showSnapInfo = hasSnapshotCapability() and not suppressed
+        if c.state.isTSM then
+            GameTooltip:AddLine('Last TSM update: ' .. (stamp and (date and date('%Y-%m-%d %H:%M:%S', stamp) or tostring(stamp)) or 'unavailable'), 0.75, 0.76, 0.80)
+            if c.state.manualAt then
+                GameTooltip:AddLine('Last full scan: ' .. (date and date('%Y-%m-%d %H:%M:%S', c.state.manualAt) or tostring(c.state.manualAt)), 0.75, 0.76, 0.80)
+            end
+            if showSnapInfo and c.state.snapAt then
+                GameTooltip:AddLine('Last snapshot: ' .. (date and date('%Y-%m-%d %H:%M:%S', c.state.snapAt) or tostring(c.state.snapAt)), 0.75, 0.76, 0.80)
+            end
+        elseif showSnapInfo and c.state.isSnapshot then
             GameTooltip:AddLine('Last snapshot: ' .. (stamp and (date and date('%Y-%m-%d %H:%M:%S', stamp) or tostring(stamp)) or 'unavailable'), 0.75, 0.76, 0.80)
             if c.state.manualAt then
                 GameTooltip:AddLine('Last full scan: ' .. (date and date('%Y-%m-%d %H:%M:%S', c.state.manualAt) or tostring(c.state.manualAt)), 0.75, 0.76, 0.80)
@@ -181,8 +190,9 @@ function Refresh.Create(panel, anchor)
         self._manualStamp = curStamp
         local wasAhNotOpen = self.ahNotOpen == true
         if scanning or isAHOpen() or curStamp ~= self._ahNotOpenStamp then self.ahNotOpen = false end
-        local snapCapable = hasSnapshotCapability()
-        local snapActive = hasSnapshotsActive()
+        local suppressed = safe(ns.IsLocalSnapshotSuppressed) and type(ns.IsLocalSnapshotSuppressed) == 'function' and ns.IsLocalSnapshotSuppressed()
+        local snapCapable = (not suppressed) and hasSnapshotCapability()
+        local snapActive = (not suppressed) and hasSnapshotsActive()
         local snapMeta = nil
         if snapCapable and safe(key) and type(key) == 'string' and key ~= ''
             and safe(ns.Pricing) and type(ns.Pricing) == 'table'
@@ -195,7 +205,30 @@ function Refresh.Create(panel, anchor)
                 end
             end
         end
-        if snapCapable and snapMeta and (not curStamp or snapMeta.updatedAt > curStamp) then
+        local tsmAvail = safe(info) and type(info) == 'table' and info.isActive
+            and safe(ns.IsTSMAvailable) and type(ns.IsTSMAvailable) == 'function' and ns.IsTSMAvailable()
+        local tsmAt = nil
+        if tsmAvail then
+            local rawTsm = (safe(ns.GetTSMRealUpdateTime) and type(ns.GetTSMRealUpdateTime) == 'function' and ns.GetTSMRealUpdateTime())
+                or ns._tsmLastSeenAt
+            if valid(rawTsm) and valid(now) and rawTsm <= now then
+                tsmAt = rawTsm
+            end
+        end
+        local snapAtVal = (snapMeta and valid(snapMeta.updatedAt)) and snapMeta.updatedAt or nil
+        if tsmAt and tsmAt > (curStamp or 0) and tsmAt > (snapAtVal or 0) then
+            local age = now - tsmAt
+            local status = age < 4500 and 'green' or (age <= 10800 and 'orange' or 'red')
+            self.state = {
+                status = status,
+                age = age,
+                at = tsmAt,
+                isTSM = true,
+                manualAt = curStamp,
+                snapAt = snapAtVal,
+                text = string.format('TSM %dm', math.floor(age / 60)),
+            }
+        elseif snapCapable and snapMeta and (not curStamp or snapMeta.updatedAt > curStamp) then
             self.state = Refresh.GetSnapshotFreshness(snapMeta, now, curStamp)
         else
             self.state = Refresh.GetFreshness(curStamp, now)
@@ -203,7 +236,7 @@ function Refresh.Create(panel, anchor)
                 self.state.snapAt = snapMeta.updatedAt
             end
         end
-        local showScanLabel = (curStamp == nil) and (not snapActive) and (not scanning) and (not self.ahNotOpen)
+        local showScanLabel = (curStamp == nil) and (not snapActive) and (not (self.state and self.state.isTSM)) and (not scanning) and (not self.ahNotOpen)
         if showScanLabel then
             if button.SetText then button:SetText('Scan AH') end
             if button.SetSize then button:SetSize(78, 24) end

@@ -3,11 +3,12 @@
 --   1. Overview            (RAM, SavedVariables, Live AH scans, Health, optional Snapshot cards)
 --   2. Database            (WoW SavedVariables schema inspector + optional SQLite companion tables)
 --   3. Perf & Debug        (Zero-overhead opt-in runtime profiler & privacy-safe Debug Bundle)
---   4. Snapshot Settings   (Always-visible optional snapshot setup, folders & OS command builder)
+--   4. Snapshot Sync       (GitHub Auto-Sync & 3-way Price Refresh Mode)
 --   5. Settings            (Synced /mm options, Leveling guide, tooltip settings)
 --   6. Mail                (Saved mail recipients, mailbox quick-pick buttons & safety net)
---   7. Addon UI            (Theme/skin, table style & price format switcher with live preview)
---   8. Data & Maintenance  (Two-click cache/ledger cleanup with hover tooltips, CSV export, slash help)
+--   7. Tooltip Setup       (Item tooltip sections, price format, modifier & live example preview)
+--   8. Addon UI            (Theme/skin, table style & price format switcher with live preview)
+--   9. Data & Maintenance  (Two-click cache/ledger cleanup with hover tooltips, CSV export, slash help)
 -- Pure ASCII only (BAD_GLYPHS=0).
 
 local ADDON, ns = ...
@@ -27,9 +28,10 @@ local SUB_TABS = {
 	console_overview = true,
 	console_database = true,
 	console_perf = true,
-	console_setup = true,
+	console_setup2 = true,
 	console_settings = true,
 	console_mail = true,
+	console_tooltips = true,
 	console_ui = true,
 	console_data = true,
 }
@@ -114,9 +116,9 @@ local state = {
 	overviewView = nil,
 	databaseView = nil,
 	perfView = nil,
-	setupView = nil,
 	settingsView = nil,
 	mailView = nil,
+	tooltipsView = nil,
 	uiView = nil,
 	dataView = nil,
 
@@ -135,18 +137,6 @@ local state = {
 		includeLogs = true,
 		redactNames = true,
 	},
-	setupOpts = {
-		osMode = "windows",
-		posixMode = "linux",
-		region = "eu",
-		presetKey = "Normal-Horde",
-		customHouse = "2:114=Normal-Horde",
-		intervalMin = 15,
-		retentionDays = 30,
-		maxExportMB = 8,
-		dbPath = "",
-		outDir = "",
-	},
 	uiPreview = {
 		skin = nil,
 		mode = nil,
@@ -159,8 +149,11 @@ local state = {
 	actionStatusVariant = "muted",
 	exportCsvText = "",
 
+	tooltipSampleKey = "green_lens",
+
 	settingsControls = {},
 	mailControls = {},
+	tooltipControls = {},
 	uiControls = {},
 }
 
@@ -1298,8 +1291,8 @@ local function buildDatabaseView(parent)
 			if dv.snapBadge and dv.snapBadge.SetVariant then
 				dv.snapBadge:SetVariant("orange", "Disabled")
 			end
-			dv.snapHeadline:SetText("Installed -- Disabled in WoW AddOns Menu")
-			dv.snapBody:SetText("MerchantMaster_Snapshots is already installed on your PC, but unchecked for this character.\nOpen Esc -> AddOns, check MerchantMaster Snapshots, and click Reload UI to see your full disk size & snapshot count.")
+			dv.snapHeadline:SetText("Data Pack Unchecked in Esc -> AddOns")
+			dv.snapBody:SetText("The background Python sync already wrote snapshot data to disk, but WoW has MerchantMaster_Snapshots unchecked.\nOpen Esc -> AddOns, check MerchantMaster Snapshots, and click Reload UI to see your full disk size & snapshot count.")
 			dv.svHeadline:SetText("WoW SavedVariables Est: " .. CE.FormatBytes(storage.totalSavedBytes or 0))
 			dv.sumBody:SetText(format(
 				"SavedVariables Est: %s across %d tracked tables (MerchantMasterDB + MerchantMasterLedgerDB).\nIn-Game Live AH Scans: %d full, %d partial  |  Local AH Snapshots: %s items\nExternal SQLite Disk DB: hidden while MerchantMaster_Snapshots is disabled.",
@@ -1314,7 +1307,7 @@ local function buildDatabaseView(parent)
 				dv.snapBadge:SetVariant("neutral", "Not Installed")
 			end
 			dv.snapHeadline:SetText("External Disk DB: Not Installed (0 B)")
-			dv.snapBody:SetText("MerchantMaster is running standalone from live in-game AH scans.\nOpen the Snapshot Settings tab to install the optional 30-day disk database (Split Windows & Linux instructions).")
+			dv.snapBody:SetText("MerchantMaster is running standalone from live in-game AH scans.\nOpen the Snapshot Settings tab to set up the optional background Python sync (30-day disk DB; split Windows Task Scheduler & Linux systemd setup).")
 			dv.svHeadline:SetText("WoW SavedVariables Est: " .. CE.FormatBytes(storage.totalSavedBytes or 0))
 			dv.sumBody:SetText(format(
 				"SavedVariables Est: %s across %d tracked tables (MerchantMasterDB + MerchantMasterLedgerDB).\nIn-Game Live AH Scans: %d full, %d partial  |  Local AH Snapshots: %s items\nExternal SQLite Disk DB: 0 B (not loaded).",
@@ -1582,647 +1575,377 @@ local function buildPerfView(parent)
 end
 
 ---------------------------------------------------------------------------------------------------
--- Sub-View 4: Snapshot Settings & Companion Setup (console_setup)
+-- Sub-View 4: Snapshot Sync - GitHub Auto-Sync (Zero API Key) (console_setup2)
 ---------------------------------------------------------------------------------------------------
 
-local function buildSetupView(parent)
+local function buildSetupV2View(parent)
 	local frame = CreateFrame("Frame", nil, parent)
 	frame:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, -34)
 	frame:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", 0, 0)
 
-	local su = {
+	local v2 = {
 		frame = frame,
 	}
 
-	-- Top Status & Folder Summary Card (always visible)
+	local function addCardAccent(card, r, g, b, a)
+		if not (card and card.CreateTexture) then return nil end
+		local bar = card:CreateTexture(nil, "ARTWORK", nil, 2)
+		bar:SetPoint("TOPLEFT", card, "TOPLEFT", 2, -1)
+		bar:SetPoint("TOPRIGHT", card, "TOPRIGHT", -2, -1)
+		bar:SetHeight(2)
+		bar:SetColorTexture(r, g, b, a or 0.90)
+		return bar
+	end
+
+	-- Top Status & Feed Summary Card
 	local statusCard = createSurfaceCard(frame, "glass_r12", "cardBg")
 	statusCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
 	statusCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
-	statusCard:SetHeight(88)
-	su.statusCard = statusCard
+	statusCard:SetHeight(72)
+	addCardAccent(statusCard, 0.24, 0.84, 0.48, 0.90)
+	v2.statusCard = statusCard
 
 	local stTitle = makeFs(statusCard, 13, "semibold", "text")
-	stTitle:SetPoint("TOPLEFT", statusCard, "TOPLEFT", 14, -10)
-	stTitle:SetPoint("TOPRIGHT", statusCard, "TOPRIGHT", -14, -10)
-	stTitle:SetText("Snapshot Settings (Optional Add-On - Not Installed)")
-	su.stTitle = stTitle
+	stTitle:SetPoint("TOPLEFT", statusCard, "TOPLEFT", 14, -8)
+	stTitle:SetPoint("TOPRIGHT", statusCard, "TOPRIGHT", -14, -8)
+	stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - Zero API Key)")
+	v2.stTitle = stTitle
 
 	local stBody = makeFs(statusCard, 11, "regular", "textSecondary")
-	stBody:SetPoint("TOPLEFT", statusCard, "TOPLEFT", 14, -30)
-	stBody:SetPoint("TOPRIGHT", statusCard, "TOPRIGHT", -14, -30)
-	stBody:SetHeight(28)
+	stBody:SetPoint("TOPLEFT", statusCard, "TOPLEFT", 14, -26)
+	stBody:SetPoint("TOPRIGHT", statusCard, "TOPRIGHT", -14, -26)
+	stBody:SetHeight(22)
 	if stBody.SetJustifyV then stBody:SetJustifyV("TOP") end
 	if stBody.SetWordWrap then stBody:SetWordWrap(true) end
-	su.stBody = stBody
+	v2.stBody = stBody
 
-	local stFolders = makeFs(statusCard, 11, "regular", "textBlue")
-	stFolders:SetPoint("BOTTOMLEFT", statusCard, "BOTTOMLEFT", 14, 10)
-	stFolders:SetPoint("BOTTOMRIGHT", statusCard, "BOTTOMRIGHT", -14, 10)
-	if stFolders.SetWordWrap then stFolders:SetWordWrap(true) end
-	su.stFolders = stFolders
+	local stFeed = makeFs(statusCard, 11, "regular", "textBlue")
+	stFeed:SetPoint("BOTTOMLEFT", statusCard, "BOTTOMLEFT", 14, 6)
+	stFeed:SetPoint("BOTTOMRIGHT", statusCard, "BOTTOMRIGHT", -14, 6)
+	if stFeed.SetWordWrap then stFeed:SetWordWrap(true) end
+	stFeed:SetText("Public Feed: JustBenji/MerchantMaster-SnapshotData (tag: snapshots-live)  |  SHA256 verified before import")
+	v2.stFeed = stFeed
 
-	local function makeCopyRowIn(card, yOff, labelText, btnVariant)
-		local lbl = makeFs(card, 11, "semibold", "text")
+	-- 3-Way Price Refresh Mode Card (Local Snapshot & TSM Light never mix)
+	local tsmCard = createSurfaceCard(frame, "glass_r12", "cardBg")
+	tsmCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -80)
+	tsmCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -80)
+	tsmCard:SetHeight(72)
+	addCardAccent(tsmCard, 0.24, 0.72, 0.98, 0.90)
+	v2.tsmCard = tsmCard
+
+	local modeLbl = makeFs(tsmCard, 12, "semibold", "text")
+	modeLbl:SetPoint("TOPLEFT", tsmCard, "TOPLEFT", 14, -10)
+	modeLbl:SetText("Price Refresh Mode:")
+	v2.modeLbl = modeLbl
+
+	v2.modeBtns = {}
+	do
+		local modeDefs = {
+			{
+				key = "local",
+				label = "Local Snapshot",
+				width = 118,
+				tipTitle = "Local Snapshot Mode",
+				tipLines = {
+					"Uses MerchantMaster_Snapshots for 15m background AH updates, 7x24 heatmaps, and 6-tier buyout depth.",
+					"Local Snapshot and TSM Light never mix (TSM stays completely off).",
+				},
+			},
+			{
+				key = "tsm",
+				label = "TSM Light",
+				width = 96,
+				tipTitle = "TSM Light Mode (Hourly Prices)",
+				tipLines = {
+					"Uses TradeSkillMaster addon + TSM Desktop App for hourly prices inside MerchantMaster tables with zero local storage.",
+					"Local Snapshot and TSM Light never mix (Local Snapshot, 7x24 heatmaps, and buyout depth are paused).",
+				},
+			},
+			{
+				key = "none",
+				label = "None (Manual AH)",
+				width = 132,
+				tipTitle = "Manual AH Only Mode",
+				tipLines = {
+					"Manual in-game Auction House scans only.",
+					"Both Local Snapshot background data and TSM Light are paused (they never mix).",
+				},
+			},
+		}
+		local prevBtn = nil
+		for _, def in ipairs(modeDefs) do
+			local btn = createButton(tsmCard, def.label, def.width, 24, {
+				variant = "secondary",
+				pill = true,
+				fontSize = 11,
+			})
+			if not prevBtn then
+				btn:SetPoint("TOPLEFT", tsmCard, "TOPLEFT", 146, -7)
+			else
+				btn:SetPoint("LEFT", prevBtn, "RIGHT", 6, 0)
+			end
+			local modeKey = def.key
+			btn:SetScript("OnClick", function()
+				if type(ns.SetBackgroundPriceMode) == "function" then
+					ns.SetBackgroundPriceMode(modeKey)
+				else
+					if type(_G.MerchantMasterDB) ~= "table" then _G.MerchantMasterDB = {} end
+					_G.MerchantMasterDB.backgroundPriceMode = modeKey
+					_G.MerchantMasterDB.useTSMPrices = (modeKey == "tsm")
+					if type(ns.InvalidatePriceCache) == "function" then
+						ns.InvalidatePriceCache()
+					end
+				end
+				local app = ns.app
+				if app and app.ui and app.ui.optSourceBtn and type(ns.CurrentSourceInfo) == "function" then
+					app.ui.optSourceBtn:SetText("Price Source: " .. ns.CurrentSourceInfo().label)
+				end
+				v2.retheme()
+				UI.SyncSettings()
+				if app and type(app.refresh) == "function" then
+					app.refresh()
+				end
+			end)
+			attachTooltip(btn, def.tipTitle, def.tipLines)
+			v2.modeBtns[modeKey] = btn
+			prevBtn = btn
+		end
+	end
+	v2.enableBtn = v2.modeBtns["local"]
+	v2.disableBtn = v2.modeBtns["none"]
+
+	local tsmStatusFs = makeFs(tsmCard, 11, "semibold", "textMuted", "RIGHT")
+	tsmStatusFs:SetPoint("TOPRIGHT", tsmCard, "TOPRIGHT", -14, -10)
+	tsmStatusFs:SetWidth(220)
+	tsmStatusFs:SetText("Manual AH Only (Local OFF)")
+	v2.tsmStatusFs = tsmStatusFs
+
+	local tsmSubFs = makeFs(tsmCard, 10, "regular", "textSecondary")
+	tsmSubFs:SetPoint("TOPLEFT", tsmCard, "TOPLEFT", 14, -36)
+	tsmSubFs:SetPoint("BOTTOMRIGHT", tsmCard, "BOTTOMRIGHT", -14, 6)
+	if tsmSubFs.SetJustifyV then tsmSubFs:SetJustifyV("TOP") end
+	if tsmSubFs.SetWordWrap then tsmSubFs:SetWordWrap(true) end
+	tsmSubFs:SetText("Manual in-game Auction House scans only. Both Local Snapshot background data and TSM Light are paused (Local Snapshot and TSM Light never mix).")
+	v2.tsmSubFs = tsmSubFs
+
+	local function makeCopyRowV2(card, yOff, labelText, btnVariant)
+		local isPrimary = (btnVariant == "primary")
+		local lbl = makeFs(card, 11, "semibold", isPrimary and "textGold" or "textMuted")
 		lbl:SetPoint("TOPLEFT", card, "TOPLEFT", 14, yOff)
 		lbl:SetPoint("TOPRIGHT", card, "TOPRIGHT", -14, yOff)
 		lbl:SetText(labelText)
 
+		local btnW = isPrimary and 88 or 74
+		local boxRight = isPrimary and -112 or -98
 		local box = createSingleLineBox(card, 320, 24)
-		box:SetPoint("TOPLEFT", card, "TOPLEFT", 14, yOff - 18)
-		box:SetPoint("TOPRIGHT", card, "TOPRIGHT", -100, yOff - 18)
+		box:SetPoint("TOPLEFT", card, "TOPLEFT", 14, yOff - 16)
+		box:SetPoint("TOPRIGHT", card, "TOPRIGHT", boxRight, yOff - 16)
 
-		local selBtn = createButton(card, "Select", 74, 24, {
+		local selBtn = createButton(card, isPrimary and "Copy / Select" or "Select", btnW, 24, {
 			variant = btnVariant or "secondary",
-			pill = (btnVariant == "primary"),
-			fontSize = 11,
+			pill = isPrimary,
+			fontSize = isPrimary and 10 or 11,
 		})
-		selBtn:SetPoint("TOPRIGHT", card, "TOPRIGHT", -14, yOff - 18)
-		selBtn:SetScript("OnClick", function() selectAllInBox(box) end)
+		selBtn:SetPoint("TOPRIGHT", card, "TOPRIGHT", -14, yOff - 16)
+		selBtn:SetScript("OnClick", function()
+			selectAllInBox(box)
+			if v2.stFeed then
+				v2.stFeed:SetText(colorHex("hexBlue", "Command highlighted - press Ctrl+C, then paste once into PowerShell / Terminal.", getPal()))
+			end
+		end)
 		return box, selBtn, lbl
 	end
 
-	-- Optional TSM Light Mode Toggle Card (always visible below statusCard)
-	local tsmCard = createSurfaceCard(frame, "glass_r12", "cardBg")
-	tsmCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -96)
-	tsmCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -96)
-	tsmCard:SetHeight(64)
-	su.tsmCard = tsmCard
-
-	local tsmSwitch = createCheck(tsmCard, "TSM Light Mode (Hourly Prices, No Local Storage)", 12, function(_, isOn)
-		if type(_G.MerchantMasterDB) ~= "table" then _G.MerchantMasterDB = {} end
-		isOn = (isOn == true)
-		_G.MerchantMasterDB.useTSMPrices = isOn
-		if isOn and not hasSnapshotExt() then
-			_G.MerchantMasterDB.priceSource = "tsm"
-		elseif (not isOn) and _G.MerchantMasterDB.priceSource == "tsm" then
-			_G.MerchantMasterDB.priceSource = "auto"
-		end
-		if type(ns.InvalidatePriceCache) == "function" then
-			ns.InvalidatePriceCache()
-		end
-		local app = ns.app
-		if app and app.ui and app.ui.optSourceBtn and type(ns.CurrentSourceInfo) == "function" then
-			app.ui.optSourceBtn:SetText("Price Source: " .. ns.CurrentSourceInfo().label)
-		end
-		su.retheme()
-		UI.SyncSettings()
-		if app and type(app.refresh) == "function" then
-			app.refresh()
-		end
-	end)
-	tsmSwitch:SetPoint("TOPLEFT", tsmCard, "TOPLEFT", 14, -7)
-	if tsmSwitch.label then
-		applyFont(tsmSwitch.label, 12, "semibold")
-	end
-	attachTooltip(tsmSwitch, "TSM Light Mode (Hourly Prices)", {
-		"Keeps AH prices updated hourly inside MerchantMaster tables with zero local snapshot files.",
-		"Requires the TradeSkillMaster addon + TSM Desktop App installed locally (see TSM's setup instructions).",
-		"7x24 heatmaps, hourly curves, and 6-tier buyout depth stay off unless MerchantMaster_Snapshots is installed.",
-	})
-	su.tsmSwitch = tsmSwitch
-
-	local tsmSubFs = makeFs(tsmCard, 10, "regular", "textSecondary")
-	tsmSubFs:SetPoint("TOPLEFT", tsmCard, "TOPLEFT", 54, -29)
-	tsmSubFs:SetPoint("BOTTOMRIGHT", tsmCard, "BOTTOMRIGHT", -184, 6)
-	if tsmSubFs.SetJustifyV then tsmSubFs:SetJustifyV("TOP") end
-	if tsmSubFs.SetWordWrap then tsmSubFs:SetWordWrap(true) end
-	tsmSubFs:SetText("Keeps AH prices updated hourly inside MerchantMaster tables with zero local snapshot files (7x24 heatmaps and buyout depth stay off). Requires the TradeSkillMaster addon + TSM Desktop App installed locally (see TSM's setup instructions).")
-	su.tsmSubFs = tsmSubFs
-
-	local tsmStatusFs = makeFs(tsmCard, 11, "semibold", "textMuted", "RIGHT")
-	tsmStatusFs:SetPoint("RIGHT", tsmCard, "RIGHT", -14, 0)
-	tsmStatusFs:SetWidth(166)
-	tsmStatusFs:SetText("Off")
-	su.tsmStatusFs = tsmStatusFs
-
-	-- Sub-Container A: Standalone Guide Split Left (Windows) / Right (Linux)
-	local standalonePanel = CreateFrame("Frame", nil, frame)
-	standalonePanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -168)
-	standalonePanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
-	su.standalonePanel = standalonePanel
-
-	local stepsCard = createSurfaceCard(standalonePanel, "glass_r12", "cardBg")
-	stepsCard:SetPoint("TOPLEFT", standalonePanel, "TOPLEFT", 0, 0)
-	stepsCard:SetPoint("TOPRIGHT", standalonePanel, "TOPRIGHT", 0, 0)
-	stepsCard:SetHeight(56)
-	su.stepsCard = stepsCard
-
-	local stepsTitle = makeFs(stepsCard, 12, "semibold", "text")
-	stepsTitle:SetPoint("TOPLEFT", stepsCard, "TOPLEFT", 14, -7)
-	stepsTitle:SetText("Before You Start (All Systems)")
-
-	local stepsBody = makeFs(stepsCard, 11, "regular", "textSecondary")
-	stepsBody:SetPoint("TOPLEFT", stepsCard, "TOPLEFT", 14, -23)
-	stepsBody:SetPoint("BOTTOMRIGHT", stepsCard, "BOTTOMRIGHT", -14, 6)
-	if stepsBody.SetJustifyV then stepsBody:SetJustifyV("TOP") end
-	if stepsBody.SetWordWrap then stepsBody:SetWordWrap(true) end
-	stepsBody:SetText(
-		"1. Create a free Battle.net API key at https://develop.battle.net/access/clients.\n"
-		.. "2. Pick Windows (Left) or Linux / Steam Deck (Right) below, run the install line, click Save & Sync, then /reload in WoW."
-	)
-	su.stepsBody = stepsBody
-
-	-- Left Column: Windows Install (PowerShell)
-	local winCard = createSurfaceCard(standalonePanel, "glass_r12", "cardBg")
-	winCard:SetPoint("TOPLEFT", standalonePanel, "TOPLEFT", 0, -64)
-	winCard:SetPoint("BOTTOMLEFT", standalonePanel, "BOTTOMLEFT", 0, 0)
+	-- Left Column: Windows Automatic GitHub Sync
+	local winCard = createSurfaceCard(frame, "glass_r12", "cardBg")
+	winCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -160)
+	winCard:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0)
 	winCard:SetWidth(460)
-	su.winCard = winCard
+	addCardAccent(winCard, 0.30, 0.66, 0.96, 0.85)
+	v2.winCard = winCard
 
 	local winTitle = makeFs(winCard, 13, "semibold", "text")
-	winTitle:SetPoint("TOPLEFT", winCard, "TOPLEFT", 14, -10)
-	winTitle:SetText("Windows Install (PowerShell)")
+	winTitle:SetPoint("TOPLEFT", winCard, "TOPLEFT", 14, -8)
+	winTitle:SetText("Windows Automatic GitHub Sync (PowerShell)")
 
-	local winSub = makeFs(winCard, 11, "regular", "textSecondary")
-	winSub:SetPoint("TOPLEFT", winCard, "TOPLEFT", 14, -28)
-	winSub:SetPoint("TOPRIGHT", winCard, "TOPRIGHT", -14, -28)
-	winSub:SetText("Requires Python 3.11+ (python.org or winget install Python.Python.3.12)")
+	local winSub = makeFs(winCard, 10, "regular", "textSecondary")
+	winSub:SetPoint("TOPLEFT", winCard, "TOPLEFT", 14, -24)
+	winSub:SetPoint("TOPRIGHT", winCard, "TOPRIGHT", -14, -24)
+	winSub:SetText("Requires Python 3.11+ (python.org or winget install Python.Python.3.12) - Zero API Key")
 
-	local winSep1 = createSeparator(winCard)
-	winSep1:SetPoint("TOPLEFT", winCard, "TOPLEFT", 12, -46)
-	winSep1:SetPoint("TOPRIGHT", winCard, "TOPRIGHT", -12, -46)
+	local wSep = createSeparator(winCard)
+	wSep:SetPoint("TOPLEFT", winCard, "TOPLEFT", 12, -40)
+	wSep:SetPoint("TOPRIGHT", winCard, "TOPRIGHT", -12, -40)
 
-	local winSteps = makeFs(winCard, 11, "regular", "textSecondary")
-	winSteps:SetPoint("TOPLEFT", winCard, "TOPLEFT", 14, -52)
-	winSteps:SetPoint("TOPRIGHT", winCard, "TOPRIGHT", -14, -52)
-	winSteps:SetHeight(48)
-	if winSteps.SetJustifyV then winSteps:SetJustifyV("TOP") end
-	if winSteps.SetWordWrap then winSteps:SetWordWrap(true) end
-	winSteps:SetText(
-		"1. Open PowerShell, click Select below, copy & run the command.\n"
-		.. "2. Paste your Blizzard Client ID + Secret & choose your server.\n"
-		.. "3. Click Save, Schedule & Sync Now, then type /reload in WoW."
-	)
+	v2.winInstallBox, v2.winSelectBtn = makeCopyRowV2(winCard, -48, "1. Recommended - 1-Line Auto-Setup:", "primary")
+	v2.winAltBox, v2.winAltSelectBtn = makeCopyRowV2(winCard, -94, "2. Fallback (if 'py' is not recognized):", "secondary")
+	v2.winCheckBox, v2.winCheckBtn = makeCopyRowV2(winCard, -140, "3. Preview Missing Data (--check-only):", "secondary")
+	v2.winRebuildBox, v2.winRebuildBtn = makeCopyRowV2(winCard, -186, "4. Rebuild Snapshot DB (--force):", "secondary")
+	v2.winUninstallBox, v2.winUninstallBtn = makeCopyRowV2(winCard, -232, "5. Turn Off Background Sync (uninstall-task):", "secondary")
 
-	local winSep2 = createSeparator(winCard)
-	winSep2:SetPoint("TOPLEFT", winCard, "TOPLEFT", 12, -102)
-	winSep2:SetPoint("TOPRIGHT", winCard, "TOPRIGHT", -12, -102)
-
-	su.winInstallBox, su.winSelectBtn = makeCopyRowIn(winCard, -110, "1. 1-Line PowerShell Install & Setup Window:", "primary")
-	su.winAltBox, su.winAltSelectBtn = makeCopyRowIn(winCard, -162, "2. Fallback Command (if 'py' is not recognized):", "secondary")
-	su.guideBox, su.guideSelectBtn = makeCopyRowIn(winCard, -214, "3. Full Setup Guide URL:", "secondary")
-
-	local winNote = makeFs(winCard, 11, "regular", "textSecondary")
-	winNote:SetPoint("TOPLEFT", winCard, "TOPLEFT", 14, -264)
-	winNote:SetPoint("BOTTOMRIGHT", winCard, "BOTTOMRIGHT", -14, 10)
+	local winNote = makeFs(winCard, 10, "regular", "textSecondary")
+	winNote:SetPoint("TOPLEFT", winCard, "TOPLEFT", 14, -278)
+	winNote:SetPoint("BOTTOMRIGHT", winCard, "BOTTOMRIGHT", -14, 8)
 	if winNote.SetJustifyV then winNote:SetJustifyV("TOP") end
 	if winNote.SetWordWrap then winNote:SetWordWrap(true) end
-	winNote:SetText("Auto-detects your WoW Forever folder across drives, stores API keys safely in your Windows user account, and schedules background updates every 15 minutes.")
-	su.winNote = winNote
+	winNote:SetText("Installs hidden Task Scheduler catch-up (zero UAC prompt, 100-350 KB/hr deltas). Rebuild re-syncs local cache; Uninstall removes scheduled sync cleanly.")
+	v2.winNote = winNote
 
-	-- Right Column: Linux / Steam Deck Install (Terminal)
-	local linuxCard = createSurfaceCard(standalonePanel, "glass_r12", "cardBg")
-	linuxCard:SetPoint("TOPLEFT", winCard, "TOPRIGHT", 10, 0)
-	linuxCard:SetPoint("TOPRIGHT", standalonePanel, "TOPRIGHT", 0, -64)
-	linuxCard:SetPoint("BOTTOMRIGHT", standalonePanel, "BOTTOMRIGHT", 0, 0)
-	su.linuxCard = linuxCard
+	-- Right Column: Linux / Steam Deck & macOS Automatic GitHub Sync
+	local unixCard = createSurfaceCard(frame, "glass_r12", "cardBg")
+	unixCard:SetPoint("TOPLEFT", winCard, "TOPRIGHT", 10, 0)
+	unixCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -160)
+	unixCard:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+	addCardAccent(unixCard, 0.30, 0.66, 0.96, 0.85)
+	v2.unixCard = unixCard
 
-	local linuxTitle = makeFs(linuxCard, 13, "semibold", "text")
-	linuxTitle:SetPoint("TOPLEFT", linuxCard, "TOPLEFT", 14, -10)
-	linuxTitle:SetText("Linux / Steam Deck Install (Terminal)")
+	local unixTitle = makeFs(unixCard, 13, "semibold", "text")
+	unixTitle:SetPoint("TOPLEFT", unixCard, "TOPLEFT", 14, -8)
+	unixTitle:SetText("Linux / Steam Deck & macOS Auto-Sync (Terminal)")
 
-	local linuxSub = makeFs(linuxCard, 11, "regular", "textSecondary")
-	linuxSub:SetPoint("TOPLEFT", linuxCard, "TOPLEFT", 14, -28)
-	linuxSub:SetPoint("TOPRIGHT", linuxCard, "TOPRIGHT", -14, -28)
-	linuxSub:SetText("Requires Python 3.11+ (uses its own clean folder, never touches system Python)")
+	local unixSub = makeFs(unixCard, 10, "regular", "textSecondary")
+	unixSub:SetPoint("TOPLEFT", unixCard, "TOPLEFT", 14, -24)
+	unixSub:SetPoint("TOPRIGHT", unixCard, "TOPRIGHT", -14, -24)
+	unixSub:SetText("Auto-detects Wine, Lutris, Steam Deck, Bottles & macOS - Zero API Key")
 
-	local linSep1 = createSeparator(linuxCard)
-	linSep1:SetPoint("TOPLEFT", linuxCard, "TOPLEFT", 12, -46)
-	linSep1:SetPoint("TOPRIGHT", linuxCard, "TOPRIGHT", -12, -46)
+	local uSep = createSeparator(unixCard)
+	uSep:SetPoint("TOPLEFT", unixCard, "TOPLEFT", 12, -40)
+	uSep:SetPoint("TOPRIGHT", unixCard, "TOPRIGHT", -12, -40)
 
-	local linSteps = makeFs(linuxCard, 11, "regular", "textSecondary")
-	linSteps:SetPoint("TOPLEFT", linuxCard, "TOPLEFT", 14, -52)
-	linSteps:SetPoint("TOPRIGHT", linuxCard, "TOPRIGHT", -14, -52)
-	linSteps:SetHeight(48)
-	if linSteps.SetJustifyV then linSteps:SetJustifyV("TOP") end
-	if linSteps.SetWordWrap then linSteps:SetWordWrap(true) end
-	linSteps:SetText(
-		"1. Open Terminal (Desktop Mode on Steam Deck) & run line #1.\n"
-		.. "2. The script finds WoW under Lutris, Wine, Steam, or Bottles.\n"
-		.. "3. Enter your API key + server in setup, then /reload in WoW."
-	)
+	v2.linuxInstallBox, v2.linuxSelectBtn = makeCopyRowV2(unixCard, -48, "1. Recommended (Linux / Steam Deck 1-Line Auto-Setup):", "primary")
+	v2.macInstallBox, v2.macSelectBtn = makeCopyRowV2(unixCard, -94, "2. macOS 1-Line Auto-Setup:", "secondary")
+	v2.linuxCheckBox, v2.linuxCheckBtn = makeCopyRowV2(unixCard, -140, "3. Preview Missing Data (--check-only):", "secondary")
+	v2.linuxRebuildBox, v2.linuxRebuildBtn = makeCopyRowV2(unixCard, -186, "4. Rebuild Snapshot DB (--force):", "secondary")
+	v2.linuxUninstallBox, v2.linuxUninstallBtn = makeCopyRowV2(unixCard, -232, "5. Turn Off Background Sync (uninstall-task):", "secondary")
 
-	local linSep2 = createSeparator(linuxCard)
-	linSep2:SetPoint("TOPLEFT", linuxCard, "TOPLEFT", 12, -102)
-	linSep2:SetPoint("TOPRIGHT", linuxCard, "TOPRIGHT", -12, -102)
+	local unixNote = makeFs(unixCard, 10, "regular", "textSecondary")
+	unixNote:SetPoint("TOPLEFT", unixCard, "TOPLEFT", 14, -278)
+	unixNote:SetPoint("BOTTOMRIGHT", unixCard, "BOTTOMRIGHT", -14, 8)
+	if unixNote.SetJustifyV then unixNote:SetJustifyV("TOP") end
+	if unixNote.SetWordWrap then unixNote:SetWordWrap(true) end
+	unixNote:SetText("Uses isolated ~/.local/bin/mm-snapshots with systemd timer / launchd agent & SHA256 check. Feed: github.com/JustBenji/MerchantMaster-SnapshotData")
+	v2.unixNote = unixNote
 
-	su.linuxInstallBox, su.linuxSelectBtn = makeCopyRowIn(linuxCard, -110, "1. 1-Line Terminal Install (runs install_linux.py):", "primary")
-	su.linuxScriptBox, su.linuxScriptSelectBtn = makeCopyRowIn(linuxCard, -162, "2. Direct Linux Script URL (install_linux.py):", "secondary")
-	su.macInstallBox, su.macSelectBtn = makeCopyRowIn(linuxCard, -214, "3. macOS Terminal Install (Python 3.11+):", "secondary")
-
-	local linNote = makeFs(linuxCard, 11, "regular", "textSecondary")
-	linNote:SetPoint("TOPLEFT", linuxCard, "TOPLEFT", 14, -264)
-	linNote:SetPoint("BOTTOMRIGHT", linuxCard, "BOTTOMRIGHT", -14, 10)
-	if linNote.SetJustifyV then linNote:SetJustifyV("TOP") end
-	if linNote.SetWordWrap then linNote:SetWordWrap(true) end
-	linNote:SetText("Works with or without a desktop popup (falls back to a private terminal prompt if needed), saves keys safely to your own user folder, and starts a background timer.")
-	su.linNote = linNote
-
-	-- Sub-Container B: Connected Companion Config & Split Windows/Linux Command Builders
-	local connectedPanel = CreateFrame("Frame", nil, frame)
-	connectedPanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -168)
-	connectedPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
-	su.connectedPanel = connectedPanel
-
-	-- Top Config Builder Card
-	local cfgCard = createSurfaceCard(connectedPanel, "glass_r12", "cardBg")
-	cfgCard:SetPoint("TOPLEFT", connectedPanel, "TOPLEFT", 0, 0)
-	cfgCard:SetPoint("TOPRIGHT", connectedPanel, "TOPRIGHT", 0, 0)
-	cfgCard:SetHeight(124)
-	su.cfgCard = cfgCard
-
-	local cfgTitle = makeFs(cfgCard, 13, "semibold", "text")
-	cfgTitle:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 14, -10)
-	cfgTitle:SetText("Companion Config Builder (Generates Windows & Linux Commands Side-by-Side)")
-	su.cfgTitle = cfgTitle
-
-	local regionBtn = createButton(cfgCard, "Region: EU", 108, 24, { dropdown = true, fontSize = 11 })
-	regionBtn:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 14, -36)
-	su.regionBtn = regionBtn
-
-	local presetBtn = createButton(cfgCard, "Server: Normal-Horde (2:114)", 228, 24, { dropdown = true, fontSize = 11 })
-	presetBtn:SetPoint("LEFT", regionBtn, "RIGHT", 8, 0)
-	su.presetBtn = presetBtn
-
-	local intervalBtn = createButton(cfgCard, "Every: 15 min", 116, 24, { dropdown = true, fontSize = 11 })
-	intervalBtn:SetPoint("LEFT", presetBtn, "RIGHT", 8, 0)
-	su.intervalBtn = intervalBtn
-
-	local retainBtn = createButton(cfgCard, "Retain: 30d", 112, 24, { dropdown = true, fontSize = 11 })
-	retainBtn:SetPoint("LEFT", intervalBtn, "RIGHT", 8, 0)
-	su.retainBtn = retainBtn
-
-	local capBtn = createButton(cfgCard, "Cap: 8 MB", 104, 24, { dropdown = true, fontSize = 11 })
-	capBtn:SetPoint("LEFT", retainBtn, "RIGHT", 8, 0)
-	su.capBtn = capBtn
-
-	local resetCfgBtn = createButton(cfgCard, "Reset Defaults", 108, 24, { variant = "ghost", fontSize = 11 })
-	resetCfgBtn:SetPoint("LEFT", capBtn, "RIGHT", 8, 0)
-	su.resetCfgBtn = resetCfgBtn
-
-	local customLbl = makeFs(cfgCard, 11, "regular", "textSecondary")
-	customLbl:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 14, -66)
-	customLbl:SetText("Custom House (ruleset:house=Econ):")
-
-	local customBox = createSingleLineBox(cfgCard, 190, 22, function(self)
-		state.setupOpts.customHouse = (self.GetText and self:GetText()) or ""
-		state.setupOpts.presetKey = "custom"
-		su.updateCommands()
-	end)
-	customBox:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 14, -84)
-	customBox:SetText(state.setupOpts.customHouse)
-	su.customBox = customBox
-
-	local dbLbl = makeFs(cfgCard, 11, "regular", "textSecondary")
-	dbLbl:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 216, -66)
-	dbLbl:SetText("Database Folder / File (blank = default):")
-
-	local dbBox = createSingleLineBox(cfgCard, 270, 22, function(self)
-		state.setupOpts.dbPath = (self.GetText and self:GetText()) or ""
-		su.updateCommands()
-	end)
-	dbBox:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 216, -84)
-	su.dbBox = dbBox
-
-	local outLbl = makeFs(cfgCard, 11, "regular", "textSecondary")
-	outLbl:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 498, -66)
-	outLbl:SetText("WoW Export Folder (blank = auto AddOns/MerchantMaster_Snapshots):")
-
-	local outBox = createSingleLineBox(cfgCard, 320, 22, function(self)
-		state.setupOpts.outDir = (self.GetText and self:GetText()) or ""
-		su.updateCommands()
-	end)
-	outBox:SetPoint("TOPLEFT", cfgCard, "TOPLEFT", 498, -84)
-	outBox:SetPoint("TOPRIGHT", cfgCard, "TOPRIGHT", -14, -84)
-	su.outBox = outBox
-
-	-- Left Connected Command Card: Windows PowerShell
-	local winCmdCard = createSurfaceCard(connectedPanel, "glass_r12", "cardBg")
-	winCmdCard:SetPoint("TOPLEFT", connectedPanel, "TOPLEFT", 0, -132)
-	winCmdCard:SetPoint("BOTTOMLEFT", connectedPanel, "BOTTOMLEFT", 0, 0)
-	winCmdCard:SetWidth(460)
-	su.winCmdCard = winCmdCard
-	su.cmdCard = winCmdCard
-
-	local winCmdTitle = makeFs(winCmdCard, 12, "semibold", "text")
-	winCmdTitle:SetPoint("TOPLEFT", winCmdCard, "TOPLEFT", 14, -10)
-	winCmdTitle:SetText("Windows Commands (PowerShell)")
-	su.winCmdTitle = winCmdTitle
-
-	su.guiBox, su.guiSelBtn, su.c1Lbl = makeCopyRowIn(winCmdCard, -36, "1. Open Visual Setup Window:", "secondary")
-	su.cfgBox, su.cfgSelBtn, su.c2Lbl = makeCopyRowIn(winCmdCard, -88, "2. Apply Folders, Server & Schedule:", "secondary")
-
-	local c3Lbl = makeFs(winCmdCard, 11, "semibold", "text")
-	c3Lbl:SetPoint("TOPLEFT", winCmdCard, "TOPLEFT", 14, -140)
-	c3Lbl:SetText("3. Save Battle.net API Key & Discover:")
-	su.c3Lbl = c3Lbl
-
-	local keyCard, keyBox = createMultiLineArea(winCmdCard)
-	keyCard:SetPoint("TOPLEFT", winCmdCard, "TOPLEFT", 14, -158)
-	keyCard:SetPoint("BOTTOMRIGHT", winCmdCard, "BOTTOMRIGHT", -100, 12)
-	su.keyBox = keyBox
-
-	local keySelBtn = createButton(winCmdCard, "Select", 74, 24, { variant = "primary", pill = true, fontSize = 11 })
-	keySelBtn:SetPoint("TOPRIGHT", winCmdCard, "TOPRIGHT", -14, -158)
-	keySelBtn:SetScript("OnClick", function() selectAllInBox(keyBox) end)
-
-	-- Right Connected Command Card: Linux / Steam Deck (with optional macOS switch)
-	local linuxCmdCard = createSurfaceCard(connectedPanel, "glass_r12", "cardBg")
-	linuxCmdCard:SetPoint("TOPLEFT", winCmdCard, "TOPRIGHT", 10, 0)
-	linuxCmdCard:SetPoint("TOPRIGHT", connectedPanel, "TOPRIGHT", 0, -132)
-	linuxCmdCard:SetPoint("BOTTOMRIGHT", connectedPanel, "BOTTOMRIGHT", 0, 0)
-	su.linuxCmdCard = linuxCmdCard
-
-	local linuxCmdTitle = makeFs(linuxCmdCard, 12, "semibold", "text")
-	linuxCmdTitle:SetPoint("TOPLEFT", linuxCmdCard, "TOPLEFT", 14, -10)
-	linuxCmdTitle:SetPoint("TOPRIGHT", linuxCmdCard, "TOPRIGHT", -132, -10)
-	linuxCmdTitle:SetText("Linux / Steam Deck Commands (Terminal)")
-	su.linuxCmdTitle = linuxCmdTitle
-
-	local posixModeBtn = createButton(linuxCmdCard, "Switch to macOS", 112, 20, { variant = "ghost", fontSize = 10 })
-	posixModeBtn:SetPoint("TOPRIGHT", linuxCmdCard, "TOPRIGHT", -14, -8)
-	su.posixModeBtn = posixModeBtn
-
-	su.linuxGuiBox, su.linuxGuiSelBtn, su.lc1Lbl = makeCopyRowIn(linuxCmdCard, -36, "1. Open Visual Setup Window:", "secondary")
-	su.linuxCfgBox, su.linuxCfgSelBtn, su.lc2Lbl = makeCopyRowIn(linuxCmdCard, -88, "2. Apply Folders, Server & Schedule:", "secondary")
-
-	local lc3Lbl = makeFs(linuxCmdCard, 11, "semibold", "text")
-	lc3Lbl:SetPoint("TOPLEFT", linuxCmdCard, "TOPLEFT", 14, -140)
-	lc3Lbl:SetText("3. Save Battle.net API Key (Private Prompt) & Discover:")
-	su.lc3Lbl = lc3Lbl
-
-	local linuxKeyCard, linuxKeyBox = createMultiLineArea(linuxCmdCard)
-	linuxKeyCard:SetPoint("TOPLEFT", linuxCmdCard, "TOPLEFT", 14, -158)
-	linuxKeyCard:SetPoint("BOTTOMRIGHT", linuxCmdCard, "BOTTOMRIGHT", -100, 12)
-	su.linuxKeyBox = linuxKeyBox
-
-	local linuxKeySelBtn = createButton(linuxCmdCard, "Select", 74, 24, { variant = "primary", pill = true, fontSize = 11 })
-	linuxKeySelBtn:SetPoint("TOPRIGHT", linuxCmdCard, "TOPRIGHT", -14, -158)
-	linuxKeySelBtn:SetScript("OnClick", function() selectAllInBox(linuxKeyBox) end)
-
-	local REGION_OPTS = {
-		{ key = "eu", label = "EU (Europe)" },
-		{ key = "us", label = "US (Americas)" },
-		{ key = "kr", label = "KR (Korea)" },
-		{ key = "tw", label = "TW (Taiwan)" },
-	}
-	local INTERVAL_OPTS = {
-		{ key = 5, label = "Every 5 min" },
-		{ key = 10, label = "Every 10 min" },
-		{ key = 15, label = "Every 15 min" },
-		{ key = 30, label = "Every 30 min" },
-		{ key = 60, label = "Every 60 min" },
-	}
-	local RETAIN_OPTS = {
-		{ key = 7, label = "Retain 7 days" },
-		{ key = 14, label = "Retain 14 days" },
-		{ key = 30, label = "Retain 30 days" },
-		{ key = 60, label = "Retain 60 days" },
-		{ key = 90, label = "Retain 90 days" },
-	}
-	local CAP_OPTS = {
-		{ key = 4, label = "4 MB Cap" },
-		{ key = 8, label = "8 MB Cap" },
-		{ key = 12, label = "12 MB Cap" },
-		{ key = 16, label = "16 MB Cap" },
-	}
-
-	function su.layout()
+	function v2.layout()
 		local w = (frame.GetWidth and frame:GetWidth()) or 1000
 		if w <= 0 then w = 1000 end
 		local halfW = max(320, floor((w - 10) / 2))
 		winCard:SetWidth(halfW)
-		winCmdCard:SetWidth(halfW)
 	end
 
-	local function buildOptsForOs(osKey)
-		return {
-			osMode = osKey,
-			region = state.setupOpts.region,
-			presetKey = state.setupOpts.presetKey,
-			customHouse = state.setupOpts.customHouse,
-			intervalMin = state.setupOpts.intervalMin,
-			retentionDays = state.setupOpts.retentionDays,
-			maxExportMB = state.setupOpts.maxExportMB,
-			dbPath = state.setupOpts.dbPath,
-			outDir = state.setupOpts.outDir,
-			snapDir = state.setupOpts.snapDir,
-			pythonExe = state.setupOpts.pythonExe,
-		}
-	end
-
-	function su.updateCommands()
-		local CE = getCE()
-		if not CE then return end
-		local posixMode = (tostring(state.setupOpts.posixMode or "linux"):lower() == "macos") and "macos" or "linux"
-		if posixMode == "macos" then
-			linuxCmdTitle:SetText("macOS Commands (Terminal)")
-			setButtonLabel(posixModeBtn, "Switch to Linux")
-		else
-			linuxCmdTitle:SetText("Linux / Steam Deck Commands (Terminal)")
-			setButtonLabel(posixModeBtn, "Switch to macOS")
-		end
-
-		local presets = (type(CE.GetServerPresets) == "function" and CE.GetServerPresets()) or {}
-		local presetLabel = state.setupOpts.presetKey or "Normal-Horde"
-		for _, p in ipairs(presets) do
-			if p.key == state.setupOpts.presetKey then
-				presetLabel = p.label
-				break
+	function v2.updateTsmStatus(pal)
+		pal = pal or getPal()
+		local mode = (type(ns.GetBackgroundPriceMode) == "function" and ns.GetBackgroundPriceMode()) or "none"
+		if type(v2.modeBtns) == "table" then
+			for k, btn in pairs(v2.modeBtns) do
+				if btn and type(btn.SetActive) == "function" then
+					btn:SetActive(k == mode)
+				end
 			end
 		end
-		setButtonLabel(regionBtn, "Region: " .. tostring(state.setupOpts.region or "eu"):upper())
-		setButtonLabel(presetBtn, "Server: " .. presetLabel)
-		setButtonLabel(intervalBtn, format("Every: %d min", tonumber(state.setupOpts.intervalMin) or 15))
-		setButtonLabel(retainBtn, format("Retain: %dd", tonumber(state.setupOpts.retentionDays) or 30))
-		setButtonLabel(capBtn, format("Cap: %d MB", tonumber(state.setupOpts.maxExportMB) or 8))
-
-		local winCmds = CE.BuildSetupCommands(buildOptsForOs("windows"))
-		if type(winCmds) == "table" then
-			if su.guiBox and su.guiBox.SetText then su.guiBox:SetText(winCmds.guiCmd or "") end
-			if su.cfgBox and su.cfgBox.SetText then su.cfgBox:SetText(winCmds.configureCmd or "") end
-			if su.keyBox and su.keyBox.SetText then su.keyBox:SetText(winCmds.apiKeyCmd or "") end
+		if mode == "local" then
+			local hasLocal = hasSnapshotExt() or (type(ns.HasRawSnapshots) == "function" and ns.HasRawSnapshots() == true)
+			if v2.tsmStatusFs then
+				if hasLocal then
+					v2.tsmStatusFs:SetText(colorHex("hexGreen", "Local Snapshot Active", pal))
+				else
+					v2.tsmStatusFs:SetText(colorHex("hexWarning", "Local Snapshot (Not Installed)", pal))
+				end
+			end
+			if v2.tsmSubFs then
+				v2.tsmSubFs:SetText("Uses MerchantMaster_Snapshots for 15m background AH updates, 7x24 heatmaps, and 6-tier buyout depth. Local Snapshot and TSM Light never mix (TSM stays completely off).")
+			end
+		elseif mode == "tsm" then
+			local avail = false
+			if type(ns.IsTSMAvailable) == "function" then
+				avail = ns.IsTSMAvailable() == true
+			else
+				local api = rawget(_G, "TSM_API")
+				avail = type(api) == "table" and type(api.GetCustomPriceValue) == "function"
+			end
+			if v2.tsmStatusFs then
+				if avail then
+					v2.tsmStatusFs:SetText(colorHex("hexGreen", "TSM Light Active (Local OFF)", pal))
+				else
+					v2.tsmStatusFs:SetText(colorHex("hexWarning", "Waiting for TradeSkillMaster", pal))
+				end
+			end
+			if v2.tsmSubFs then
+				v2.tsmSubFs:SetText("Uses TradeSkillMaster addon + TSM Desktop App for hourly prices inside MerchantMaster tables with zero local storage. Local Snapshot and TSM Light never mix (Local Snapshot, 7x24 heatmaps, and buyout depth are paused).")
+			end
 		else
-			if su.guiBox and su.guiBox.SetText then su.guiBox:SetText("") end
-			if su.cfgBox and su.cfgBox.SetText then su.cfgBox:SetText("") end
-			if su.keyBox and su.keyBox.SetText then su.keyBox:SetText("") end
-		end
-
-		local posixCmds = CE.BuildSetupCommands(buildOptsForOs(posixMode))
-		if type(posixCmds) == "table" then
-			if su.linuxGuiBox and su.linuxGuiBox.SetText then su.linuxGuiBox:SetText(posixCmds.guiCmd or "") end
-			if su.linuxCfgBox and su.linuxCfgBox.SetText then su.linuxCfgBox:SetText(posixCmds.configureCmd or "") end
-			if su.linuxKeyBox and su.linuxKeyBox.SetText then su.linuxKeyBox:SetText(posixCmds.apiKeyCmd or "") end
-		else
-			if su.linuxGuiBox and su.linuxGuiBox.SetText then su.linuxGuiBox:SetText("") end
-			if su.linuxCfgBox and su.linuxCfgBox.SetText then su.linuxCfgBox:SetText("") end
-			if su.linuxKeyBox and su.linuxKeyBox.SetText then su.linuxKeyBox:SetText("") end
+			if v2.tsmStatusFs then
+				v2.tsmStatusFs:SetText(colorHex("hexMuted", "Manual AH Only (Local OFF)", pal))
+			end
+			if v2.tsmSubFs then
+				v2.tsmSubFs:SetText("Manual in-game Auction House scans only. Both Local Snapshot background data and TSM Light are paused (Local Snapshot and TSM Light never mix).")
+			end
 		end
 	end
 
-	posixModeBtn:SetScript("OnClick", function()
-		local cur = tostring(state.setupOpts.posixMode or "linux"):lower()
-		state.setupOpts.posixMode = (cur == "macos") and "linux" or "macos"
-		su.updateCommands()
-	end)
-	regionBtn:SetScript("OnClick", function(self)
-		local T = getTheme()
-		if T and T.OpenDropDown then
-			T.OpenDropDown(self, REGION_OPTS, state.setupOpts.region, function(k)
-				state.setupOpts.region = k
-				su.updateCommands()
-			end, 160)
-		end
-	end)
-	presetBtn:SetScript("OnClick", function(self)
-		local T = getTheme()
-		local CE = getCE()
-		if T and T.OpenDropDown and CE then
-			local presets = (type(CE.GetServerPresets) == "function" and CE.GetServerPresets()) or {}
-			T.OpenDropDown(self, presets, state.setupOpts.presetKey, function(k)
-				state.setupOpts.presetKey = k
-				su.updateCommands()
-			end, 240)
-		end
-	end)
-	intervalBtn:SetScript("OnClick", function(self)
-		local T = getTheme()
-		if T and T.OpenDropDown then
-			T.OpenDropDown(self, INTERVAL_OPTS, state.setupOpts.intervalMin, function(k)
-				state.setupOpts.intervalMin = k
-				su.updateCommands()
-			end, 160)
-		end
-	end)
-	retainBtn:SetScript("OnClick", function(self)
-		local T = getTheme()
-		if T and T.OpenDropDown then
-			T.OpenDropDown(self, RETAIN_OPTS, state.setupOpts.retentionDays, function(k)
-				state.setupOpts.retentionDays = k
-				su.updateCommands()
-			end, 160)
-		end
-	end)
-	capBtn:SetScript("OnClick", function(self)
-		local T = getTheme()
-		if T and T.OpenDropDown then
-			T.OpenDropDown(self, CAP_OPTS, state.setupOpts.maxExportMB, function(k)
-				state.setupOpts.maxExportMB = k
-				su.updateCommands()
-			end, 140)
-		end
-	end)
-	resetCfgBtn:SetScript("OnClick", function()
-		state.setupOpts.osMode = "windows"
-		state.setupOpts.posixMode = "linux"
-		state.setupOpts.region = "eu"
-		state.setupOpts.presetKey = "Normal-Horde"
-		state.setupOpts.customHouse = "2:114=Normal-Horde"
-		state.setupOpts.intervalMin = 15
-		state.setupOpts.retentionDays = 30
-		state.setupOpts.maxExportMB = 8
-		state.setupOpts.dbPath = ""
-		state.setupOpts.outDir = ""
-		if customBox.SetText then customBox:SetText(state.setupOpts.customHouse) end
-		if dbBox.SetText then dbBox:SetText("") end
-		if outBox.SetText then outBox:SetText("") end
-		su.updateCommands()
-	end)
-
-	function su.updateTsmStatus(pal)
-		pal = pal or getPal()
-		local isOn = (type(_G.MerchantMasterDB) == "table" and _G.MerchantMasterDB.useTSMPrices == true) and true or false
-		if su.tsmSwitch and su.tsmSwitch.SetChecked then
-			su.tsmSwitch:SetChecked(isOn)
-		end
-		if not su.tsmStatusFs then return end
-		if not isOn then
-			su.tsmStatusFs:SetText(colorHex("hexMuted", "Off", pal))
-			return
-		end
-		local avail = false
-		if type(ns.IsTSMAvailable) == "function" then
-			avail = ns.IsTSMAvailable() == true
-		else
-			local api = rawget(_G, "TSM_API")
-			avail = type(api) == "table" and type(api.GetCustomPriceValue) == "function"
-		end
-		if avail then
-			su.tsmStatusFs:SetText(colorHex("hexGreen", "TSM Active (Hourly)", pal))
-		else
-			su.tsmStatusFs:SetText(colorHex("hexWarning", "Waiting for TradeSkillMaster", pal))
-		end
-	end
-
-	function su.retheme()
+	function v2.retheme()
 		local CE = getCE()
 		if not CE then return end
 		local pal = getPal()
-		su.updateTsmStatus(pal)
+		v2.updateTsmStatus(pal)
 		local installed = hasSnapshotExt()
 		local addonState = type(CE.GetAddonState) == "function" and CE.GetAddonState("MerchantMaster_Snapshots") or (installed and "loaded" or "absent")
-		su.standalonePanel:SetShown(not installed)
-		su.connectedPanel:SetShown(installed)
+		local bgMode = (type(ns.GetBackgroundPriceMode) == "function" and ns.GetBackgroundPriceMode()) or "none"
+		local suppressed = type(ns.IsLocalSnapshotSuppressed) == "function" and ns.IsLocalSnapshotSuppressed()
+
 		if not installed then
 			if addonState == "disabled" then
-				su.stTitle:SetText("Snapshot Settings (Installed - Disabled in WoW AddOns Menu)")
-				su.stBody:SetText("MerchantMaster_Snapshots is already in your AddOns folder, but unchecked for this character. Open Esc -> AddOns, check MerchantMaster Snapshots, and click Reload UI.")
-				su.stFolders:SetText("Already installed on disk: enable MerchantMaster Snapshots in Esc -> AddOns to view live database size and sync status.")
+				v2.stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - Enable Pack in WoW)")
+				v2.stBody:SetText("SnapshotData.lua is on disk, but MerchantMaster_Snapshots is unchecked in Esc -> AddOns. Check it and click Reload UI.")
 			else
-				su.stTitle:SetText("Snapshot Settings (Optional Add-On - Not Installed)")
-				su.stBody:SetText("MerchantMaster works 100% standalone from your in-game Auction House scans. Pick Windows (Left) or Linux / Steam Deck (Right) below to add 24/7 background snapshots.")
-				su.stFolders:SetText("No in-game folder setup needed: WoW automatically loads AddOns/MerchantMaster_Snapshots once the helper runs.")
+				v2.stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - Zero API Key)")
+				v2.stBody:SetText("Copy 1 command below -> auto-installs Python sync, detects WoW Forever, pulls GitHub deltas & exports SnapshotData.lua -> /reload in WoW.")
 			end
-			return
+		elseif suppressed and bgMode == "tsm" then
+			v2.stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - Paused by TSM Light)")
+			v2.stBody:SetText("Snapshot pack is ready on disk. Click Local Snapshot above to switch back from TSM Light.")
+		elseif suppressed and bgMode == "none" then
+			v2.stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - OFF / Manual AH)")
+			v2.stBody:SetText("Snapshot pack is ready on disk, currently paused. Click Local Snapshot above to resume or run Rebuild (--force) below.")
+		else
+			v2.stTitle:SetText("Snapshot Sync (GitHub Auto-Sync - Active)")
+			local sys = v2._lastSys
+			if sys then
+				local diskTotal = max(((tonumber(sys.dbBytes) or 0) + (tonumber(sys.walBytes) or 0) + (tonumber(sys.shmBytes) or 0) + (tonumber(sys.logBytes) or 0)), tonumber(sys.localDataDirBytes) or 0) + (tonumber(sys.exportBytes) or 0)
+				v2.stBody:SetText(format("GitHub Auto-Sync Active | Disk: %s | Snapshots: %s | Every %dm | Last Sync: %s",
+					CE.FormatBytes(diskTotal), CE.FormatInt(sys.totalRuns or 0), sys.intervalMin or 15, CE.FormatTimestamp(sys.exportedAt)))
+			else
+				v2.stBody:SetText("GitHub Auto-Sync Ready | Local Snapshot mode active. Run 1 command below on a fresh PC to auto-install and sync.")
+			end
 		end
 
-		su.stTitle:SetText("Snapshot Settings (Active Background Helper)")
-		local sys = su._lastSys
-		if sys then
-			local diskTotal = max(((tonumber(sys.dbBytes) or 0) + (tonumber(sys.walBytes) or 0) + (tonumber(sys.shmBytes) or 0) + (tonumber(sys.logBytes) or 0)), tonumber(sys.localDataDirBytes) or 0) + (tonumber(sys.exportBytes) or 0)
-			su.stBody:SetText(format(
-				"Task: %s (enabled=%s)  |  Region: %s  |  Creds: %s  |  Snapshots: %s  |  Disk: %s  |  Every %dm  |  Houses: %s  |  Last Sync: %s",
-				tostring(sys.taskStatus or "?"), tostring(sys.taskEnabled),
-				tostring(sys.region or "?"),
-				sys.credsSet and colorHex("hexGreen", "SET", pal) or colorHex("hexWarning", "MISSING", pal),
-				CE.FormatInt(sys.totalRuns or 0),
-				CE.FormatBytes(diskTotal),
-				sys.intervalMin or 15,
-				tostring(sys.houseMap or ""),
-				CE.FormatTimestamp(sys.exportedAt)))
-			local dbLabel = (type(sys.dbPath) == "string" and sys.dbPath ~= "") and sys.dbPath or "(default data folder)"
-			local outLabel = (type(sys.outDir) == "string" and sys.outDir ~= "") and sys.outDir or "AddOns/MerchantMaster_Snapshots (auto)"
-			su.stFolders:SetText(format(
-				"Database Folder: %s  |  WoW AddOn Folder: %s  (No in-game redirect needed if you move the DB.)",
-				dbLabel, outLabel))
-		else
-			su.stBody:SetText("Snapshot Helper detected, waiting for first sync export. Run command #1 or #2 for Windows (Left) or Linux (Right).")
-			su.stFolders:SetText("Database Folder: (pending first sync)  |  WoW AddOn Folder: AddOns/MerchantMaster_Snapshots  (No in-game redirect needed if you move the DB.)")
-		end
+		v2.stFeed:SetText("Public Feed: JustBenji/MerchantMaster-SnapshotData (tag: snapshots-live)  |  Mode: " .. (bgMode == "local" and colorHex("hexGreen", "Local Snapshot Active", pal) or colorHex("hexWarning", bgMode == "none" and "OFF (Manual AH)" or "Paused (TSM Light)", pal)))
 	end
 
-	function su.refresh()
+	function v2.refresh()
 		local CE = getCE()
 		if not CE then return end
 		local installed = hasSnapshotExt()
-		su._lastSys = installed and ns.Pricing and type(ns.Pricing.GetSnapshotSystemMeta) == "function"
+		v2._lastSys = installed and ns.Pricing and type(ns.Pricing.GetSnapshotSystemMeta) == "function"
 			and ns.Pricing.GetSnapshotSystemMeta() or nil
 
-		local installCmds = CE.INSTALL_COMMANDS
-		if type(installCmds) == "table" then
-			if su.winInstallBox and su.winInstallBox.SetText then su.winInstallBox:SetText(installCmds.windows or "") end
-			if su.winAltBox and su.winAltBox.SetText then su.winAltBox:SetText(installCmds.windowsAlt or "") end
-			if su.guideBox and su.guideBox.SetText then su.guideBox:SetText(installCmds.guideUrl or "") end
-			if su.linuxInstallBox and su.linuxInstallBox.SetText then su.linuxInstallBox:SetText(installCmds.linux or "") end
-			if su.linuxScriptBox and su.linuxScriptBox.SetText then su.linuxScriptBox:SetText(installCmds.linuxScriptUrl or "") end
-			if su.macInstallBox and su.macInstallBox.SetText then su.macInstallBox:SetText(installCmds.macos or "") end
-		end
+		local cmds = CE.INSTALL_COMMANDS_V2 or {}
+		if v2.winInstallBox and v2.winInstallBox.SetText then v2.winInstallBox:SetText(cmds.windows or "") end
+		if v2.winAltBox and v2.winAltBox.SetText then v2.winAltBox:SetText(cmds.windowsAlt or "") end
+		if v2.winCheckBox and v2.winCheckBox.SetText then v2.winCheckBox:SetText(cmds.windowsCheck or "") end
+		if v2.winRebuildBox and v2.winRebuildBox.SetText then v2.winRebuildBox:SetText(cmds.windowsRebuild or "") end
+		if v2.winUninstallBox and v2.winUninstallBox.SetText then v2.winUninstallBox:SetText(cmds.windowsUninstall or "") end
+		if v2.linuxInstallBox and v2.linuxInstallBox.SetText then v2.linuxInstallBox:SetText(cmds.linux or "") end
+		if v2.macInstallBox and v2.macInstallBox.SetText then v2.macInstallBox:SetText(cmds.macos or "") end
+		if v2.linuxCheckBox and v2.linuxCheckBox.SetText then v2.linuxCheckBox:SetText(cmds.linuxCheck or "") end
+		if v2.linuxRebuildBox and v2.linuxRebuildBox.SetText then v2.linuxRebuildBox:SetText(cmds.linuxRebuild or "") end
+		if v2.linuxUninstallBox and v2.linuxUninstallBox.SetText then v2.linuxUninstallBox:SetText(cmds.linuxUninstall or "") end
 
-		su.retheme()
-		su.updateCommands()
+		v2.retheme()
 	end
 
-	return su
+	return v2
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -2391,8 +2114,21 @@ local function buildSettingsView(parent)
 		end
 	end)
 	attachTooltip(mailShortcutBtn, "Mail Recipients & Safety", {
-		"Configure per-economy Bank, Auction, Main Crafter, and Profession mail recipients.",
+		"Configure per-economy Bank, Investment Storage, Auction, Main Crafter, and Profession mail recipients.",
 		"Customize mailbox quick-pick buttons and the unsaved-recipient confirmation popup.",
+	})
+
+	local tooltipShortcutBtn = createButton(leftCard, "Tooltip Setup ->", 156, 24, { variant = "secondary", fontSize = 11 })
+	tooltipShortcutBtn:SetPoint("LEFT", mailShortcutBtn, "RIGHT", 8, 0)
+	tooltipShortcutBtn:SetScript("OnClick", function()
+		if ns.app and type(ns.app.setTab) == "function" then
+			ns.app.setTab("console_tooltips")
+		else
+			UI.Show("console_tooltips")
+		end
+	end)
+	attachTooltip(tooltipShortcutBtn, "Tooltip Setup", {
+		"Customize item tooltip sections, price format, modifier key, and preview live examples.",
 	})
 
 	local leftNote = makeFs(leftCard, 11, "regular", "textSecondary")
@@ -2495,6 +2231,7 @@ local function buildSettingsView(parent)
 		minimapCheck = minimapCheck,
 		coldFilterCheck = coldFilterCheck,
 		mailShortcutBtn = mailShortcutBtn,
+		tooltipShortcutBtn = tooltipShortcutBtn,
 		checks = sv.checks,
 	}
 
@@ -2698,12 +2435,13 @@ local function buildMailView(parent)
 	mv.subFs = subFs
 
 	local coreSpecs = {
-		{ key = "bank",        label = "Bank Character",    icon = 133784 },
-		{ key = "auction",     label = "Auction Character", icon = 133785 },
-		{ key = "mainCrafter", label = "Main Crafter",      icon = 136241 },
+		{ key = "bank",              label = "Bank Character",     icon = 133784 },
+		{ key = "investmentStorage", label = "Investment Storage", icon = 133786 },
+		{ key = "auction",           label = "Auction Character",  icon = 133785 },
+		{ key = "mainCrafter",       label = "Main Crafter",       icon = 136241 },
 	}
 	for i, spec in ipairs(coreSpecs) do
-		local yOff = -(54 + (i - 1) * 30)
+		local yOff = -(50 + (i - 1) * 27)
 		local row = CreateFrame("Frame", nil, leftCard)
 		row:SetHeight(24)
 		row:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 14, yOff)
@@ -2717,7 +2455,7 @@ local function buildMailView(parent)
 
 		local lbl = makeFs(row, 11, "semibold", "text")
 		lbl:SetPoint("LEFT", ico, "RIGHT", 6, 0)
-		lbl:SetWidth(116)
+		lbl:SetWidth(122)
 		lbl:SetText(spec.label)
 
 		local box = createPresetEditBox(row, spec.key, 240)
@@ -2738,11 +2476,11 @@ local function buildMailView(parent)
 	end
 
 	local profSep = createSeparator(leftCard)
-	profSep:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 12, -148)
-	profSep:SetPoint("TOPRIGHT", leftCard, "TOPRIGHT", -12, -148)
+	profSep:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 12, -162)
+	profSep:SetPoint("TOPRIGHT", leftCard, "TOPRIGHT", -12, -162)
 
 	local profTitle = makeFs(leftCard, 12, "semibold", "text")
-	profTitle:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 14, -158)
+	profTitle:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 14, -170)
 	profTitle:SetText("Profession Characters")
 
 	local profSpecs = {
@@ -3012,7 +2750,7 @@ local function buildMailView(parent)
 		leftCard:SetWidth(leftW)
 
 		local innerW = max(430, leftW - 28)
-		local coreBoxW = max(148, innerW - 140 - 92)
+		local coreBoxW = max(148, innerW - 146 - 92)
 		for _, r in ipairs(mv.coreRows) do
 			if r.box and r.box.SetWidth then
 				r.box:SetWidth(coreBoxW)
@@ -3024,7 +2762,7 @@ local function buildMailView(parent)
 		local profBoxW = max(126, cellW - 90)
 		for _, c in ipairs(mv.profCells) do
 			c.frame:ClearAllPoints()
-			c.frame:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 14 + c.col * (cellW + colGap), -(178 + c.row * 48))
+			c.frame:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 14 + c.col * (cellW + colGap), -(190 + c.row * 46))
 			c.frame:SetWidth(cellW)
 			if c.box and c.box.SetWidth then
 				c.box:SetWidth(profBoxW)
@@ -3040,7 +2778,7 @@ local function buildMailView(parent)
 			or { showIcon = true, showName = true, showRole = true, warnUnsaved = true }
 
 		mv.syncing = true
-		for _, k in ipairs({ "bank", "auction", "mainCrafter" }) do
+		for _, k in ipairs({ "bank", "investmentStorage", "auction", "mainCrafter" }) do
 			local box = mv.inputs[k]
 			if box and box.SetText then
 				box:SetText(type(econ[k]) == "string" and econ[k] or "")
@@ -3078,7 +2816,904 @@ local function buildMailView(parent)
 end
 
 ---------------------------------------------------------------------------------------------------
--- Sub-View 6: Addon UI & Live Theme Preview (console_ui)
+-- Sub-View 7: Tooltip Setup & Live Example Preview (console_tooltips)
+---------------------------------------------------------------------------------------------------
+
+local TOOLTIP_FALLBACK_DEFAULTS = {
+	ttEnabled = true,
+	ttPriceFormat = "colored",
+	ttModifier = "none",
+	ttMarketEnabled = true,
+	ttMinBuyout = true,
+	ttMarketValue = true,
+	ttListedCount = true,
+	ttVendorSell = false,
+	tooltipCraftCost = false,
+	ttCraftProfit = true,
+	tooltipDEValue = true,
+	ttDEArcaneSalvager = true,
+	tooltipDEBreakdown = true,
+	crateTooltips = true,
+	anTooltips = true,
+	ttAccSell = true,
+	ttAccBasis = true,
+	ttAccProfit = true,
+	ttAccLastSold = true,
+	ttAccSaleRate = true,
+	ttAccSlowing = true,
+	ttHideEmpty = true,
+	anTooltipInventory = true,
+	ttInvByChar = true,
+	ttInvHideZero = true,
+	ttInvCompact = true,
+}
+
+local TOOLTIP_SECTIONS = {
+	{
+		title = "Market & Pricing",
+		items = {
+			{ key = "ttMarketEnabled", label = "Show Market & Pricing section", tip = "Master switch for live AH and market price lines in item hover tooltips." },
+			{ key = "ttMinBuyout",     label = "Min Buyout (AH lowest)", indent = true, parentKey = "ttMarketEnabled", tip = "Shows the lowest current Auction House buyout price." },
+			{ key = "ttMarketValue",   label = "Market Value (14d / Region)", indent = true, parentKey = "ttMarketEnabled", tip = "Shows historical or snapshot Market Value alongside Min Buyout." },
+			{ key = "ttListedCount",   label = "Listed count & scan age", indent = true, parentKey = "ttMarketEnabled", tip = "Shows active AH listing count and how recently prices were scanned." },
+			{ key = "ttVendorSell",    label = "Vendor Sell price", indent = true, parentKey = "ttMarketEnabled", tip = "Shows MerchantMaster vendor sell reference line inside the Market section." },
+		},
+	},
+	{
+		title = "Crafting & Disenchant",
+		items = {
+			{ key = "tooltipCraftCost",   label = "Craft Cost (cheapest reagents)", tip = "Shows reagent crafting cost for known and catalog recipes on hover." },
+			{ key = "ttCraftProfit",      label = "Craft Profit & margin", indent = true, parentKey = "tooltipCraftCost", tip = "Shows expected net profit after AH fee when Craft Cost is enabled." },
+			{ key = "tooltipDEValue",     label = "Disenchant Value", tip = "Shows expected disenchant value for eligible gear inside tooltips." },
+			{ key = "ttDEArcaneSalvager", label = "Arcane Salvager (+20% bonus)", indent = true, parentKey = "tooltipDEValue", tip = "Shows boosted disenchant value with the +20% Arcane Salvager perk." },
+			{ key = "tooltipDEBreakdown", label = "DE material breakdown", indent = true, parentKey = "tooltipDEValue", tip = "Lists individual dust, essence, and shard drop odds under Disenchant Value." },
+			{ key = "crateTooltips",      label = "Waylaid Crate fill cost & rep", tip = "Shows cheapest crate fill, Shopping List cost, and reputation/favor details." },
+		},
+	},
+	{
+		title = "Accounting",
+		items = {
+			{ key = "anTooltips",    label = "Show Accounting section", tip = "Master switch for personal sales, cost basis, and profit history in tooltips." },
+			{ key = "ttAccSell",     label = "Avg Sell & Min / Max Sell", indent = true, parentKey = "anTooltips", tip = "Shows your average, minimum, and maximum historical sale prices." },
+			{ key = "ttAccBasis",    label = "Avg Buy & Current Basis", indent = true, parentKey = "anTooltips", tip = "Shows your average buy cost and remaining FIFO inventory cost basis." },
+			{ key = "ttAccProfit",   label = "Avg Profit", indent = true, parentKey = "anTooltips", tip = "Shows your realized average profit per unit sold." },
+			{ key = "ttAccLastSold", label = "Last Sold price", indent = true, parentKey = "anTooltips", tip = "Shows the unit price of your most recent recorded sale." },
+			{ key = "ttAccSaleRate", label = "Sale Rate & Expires", indent = true, parentKey = "anTooltips", tip = "Shows historical sell-through percentage and expired auctions count." },
+			{ key = "ttAccSlowing",  label = "Slowing / Over-listed alert", indent = true, parentKey = "anTooltips", tip = "Highlights items with repeated expires that need a price review." },
+			{ key = "ttHideEmpty",   label = "Hide section when item has no history", indent = true, parentKey = "anTooltips", tip = "Suppresses the Accounting header when an item has zero recorded trades." },
+		},
+	},
+	{
+		title = "Inventory",
+		items = {
+			{ key = "anTooltipInventory", label = "Show Inventory section", tip = "Master switch for cross-character bag, bank, mail, and AH counts." },
+			{ key = "ttInvByChar",        label = "Per-character breakdown", indent = true, parentKey = "anTooltipInventory", tip = "Lists each character's owned quantities above the Total Inventory line." },
+			{ key = "ttInvHideZero",      label = "Hide zero-count alts", indent = true, parentKey = "anTooltipInventory", tip = "Omits characters that currently hold 0 of the hovered item." },
+			{ key = "ttInvCompact",       label = "Compact inventory line format", indent = true, parentKey = "anTooltipInventory", tip = "Uses compact counts like '42 (12 bags, 20 bank, 0 mail, 10 AH)' instead of verbose labels." },
+		},
+	},
+}
+
+local function buildFallbackTooltipPreview(sampleKey, getPref)
+	local on = getPref("ttEnabled") ~= false
+	local dim = { 0.42, 0.45, 0.50 }
+	local gold = { 1.00, 0.82, 0.00 }
+	local slate = { 0.62, 0.66, 0.72 }
+	local white = { 0.90, 0.92, 0.95 }
+	local green = { 0.28, 0.88, 0.45 }
+	local function mkRow(left, right, enabled, isHeader, rL, gL, bL, rR, gR, bR)
+		local active = on and (enabled ~= false)
+		if not active then
+			return { left = left, right = right, rL = dim[1], gL = dim[2], bL = dim[3], rR = dim[1], gR = dim[2], bR = dim[3], enabled = false, isHeader = isHeader == true }
+		end
+		return {
+			left = left,
+			right = right,
+			rL = rL or (isHeader and gold[1] or white[1]),
+			gL = gL or (isHeader and gold[2] or white[2]),
+			bL = bL or (isHeader and gold[3] or white[3]),
+			rR = rR or (isHeader and slate[1] or white[1]),
+			gR = gR or (isHeader and slate[2] or white[2]),
+			bR = bR or (isHeader and slate[3] or white[3]),
+			enabled = true,
+			isHeader = isHeader == true,
+		}
+	end
+	local name = "Green Lens"
+	local qRGB = { 0.00, 0.44, 0.87 }
+	local sub = "Item Level 48  |  Binds when equipped"
+	local sell = "Sell Price: 1g 12s 40c"
+	if sampleKey == "silk_cloth" then
+		name = "Silk Cloth"
+		qRGB = { 1.00, 1.00, 1.00 }
+		sub = "Trade Goods  |  Stack: 20"
+		sell = "Sell Price: 1s 50c"
+	elseif sampleKey == "waylaid_crate" then
+		name = "Waylaid Supplies: Bronze Bars"
+		qRGB = { 0.12, 1.00, 0.00 }
+		sub = "Unique  |  Requires Level 15"
+		sell = ""
+	end
+	local mOn = getPref("ttMarketEnabled") ~= false
+	local cOn = getPref("tooltipCraftCost") == true
+	local deOn = getPref("tooltipDEValue") ~= false
+	local aOn = getPref("anTooltips") ~= false
+	local iOn = getPref("anTooltipInventory") ~= false
+	return {
+		header = { name = name, qualityRGB = qRGB, subtitle = sub, sellPrice = sell },
+		rows = {
+			mkRow("MerchantMaster Market", "(Live AH)", mOn, true),
+			mkRow("  Min Buyout", "18g 45s", mOn and getPref("ttMinBuyout") ~= false, false),
+			mkRow("  Market Value", "21g 20s", mOn and getPref("ttMarketValue") ~= false, false),
+			mkRow("  Listed", "7 (4m ago)", mOn and getPref("ttListedCount") ~= false, false),
+			mkRow("MerchantMaster Craft & DE", "", cOn or deOn, true),
+			mkRow("  Craft Cost", "11g 30s", cOn, false),
+			mkRow("  Craft Profit", "+6g 22s (+55%)", cOn and getPref("ttCraftProfit") ~= false, false, white[1], white[2], white[3], green[1], green[2], green[3]),
+			mkRow("  Disenchant Value", "4g 85s", deOn, false),
+			mkRow("MerchantMaster Accounting", "(per 1)", aOn, true),
+			mkRow("  Avg Sell", "19g 90s", aOn and getPref("ttAccSell") ~= false, false),
+			mkRow("  Avg Profit", "+7g 60s", aOn and getPref("ttAccProfit") ~= false, false, white[1], white[2], white[3], green[1], green[2], green[3]),
+			mkRow("MerchantMaster Inventory", "4 total", iOn, true),
+			mkRow("  Total Inventory", "4", iOn, false),
+		},
+	}
+end
+
+local function buildTooltipsView(parent)
+	local frame = CreateFrame("Frame", nil, parent)
+	frame:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, -34)
+	frame:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", 0, 0)
+
+	local tv = {
+		frame = frame,
+		checks = {},
+		checkMeta = {},
+		sampleBtns = {},
+		presetBtns = {},
+		formatBtns = {},
+		modBtns = {},
+		previewRows = {},
+		sectionHeaders = {},
+	}
+
+	local function getTP()
+		return type(ns.TooltipPrefs) == "table" and ns.TooltipPrefs or nil
+	end
+
+	local function getPref(key)
+		local TP = getTP()
+		if TP and type(TP.Get) == "function" then
+			return TP.Get(key)
+		end
+		if _G.MerchantMasterDB and _G.MerchantMasterDB[key] ~= nil then
+			return _G.MerchantMasterDB[key]
+		end
+		return TOOLTIP_FALLBACK_DEFAULTS[key]
+	end
+
+	local function syncExternalControls()
+		if ns.app and ns.app.ui then
+			local crateOn = getPref("crateTooltips") == true
+			if ns.app.ui.optCrateTooltipCheck and ns.app.ui.optCrateTooltipCheck.SetChecked then
+				ns.app.ui.optCrateTooltipCheck:SetChecked(crateOn)
+			end
+			if ns.app.ui.crateTooltipCheck and ns.app.ui.crateTooltipCheck.SetChecked then
+				ns.app.ui.crateTooltipCheck:SetChecked(crateOn)
+			end
+		end
+	end
+
+	local function setPref(key, val)
+		local TP = getTP()
+		if TP and type(TP.Set) == "function" then
+			TP.Set(key, val)
+		else
+			if not _G.MerchantMasterDB then _G.MerchantMasterDB = {} end
+			_G.MerchantMasterDB[key] = val
+			if ns.InvalidateMarketTooltipCache then ns.InvalidateMarketTooltipCache() end
+			if ns.InvalidateEconTooltipCache then ns.InvalidateEconTooltipCache() end
+			if ns.InvalidateCrateTooltipCache then ns.InvalidateCrateTooltipCache() end
+		end
+		syncExternalControls()
+		UI.SyncSettings()
+		if not state.built then
+			tv.sync()
+		end
+	end
+
+	local function applyPreset(name)
+		local TP = getTP()
+		if TP and type(TP.ApplyPreset) == "function" then
+			TP.ApplyPreset(name)
+		else
+			if not _G.MerchantMasterDB then _G.MerchantMasterDB = {} end
+			if name == "all" then
+				for k, v in pairs(TOOLTIP_FALLBACK_DEFAULTS) do
+					if type(v) == "boolean" then
+						_G.MerchantMasterDB[k] = true
+					end
+				end
+			elseif name == "compact" then
+				for k, v in pairs(TOOLTIP_FALLBACK_DEFAULTS) do
+					_G.MerchantMasterDB[k] = v
+				end
+				_G.MerchantMasterDB.ttListedCount = false
+				_G.MerchantMasterDB.ttVendorSell = false
+				_G.MerchantMasterDB.tooltipDEBreakdown = false
+				_G.MerchantMasterDB.ttAccLastSold = false
+				_G.MerchantMasterDB.ttAccSaleRate = false
+				_G.MerchantMasterDB.ttInvByChar = false
+				_G.MerchantMasterDB.ttInvCompact = true
+			else
+				for k, v in pairs(TOOLTIP_FALLBACK_DEFAULTS) do
+					_G.MerchantMasterDB[k] = v
+				end
+			end
+			if ns.InvalidateMarketTooltipCache then ns.InvalidateMarketTooltipCache() end
+			if ns.InvalidateEconTooltipCache then ns.InvalidateEconTooltipCache() end
+			if ns.InvalidateCrateTooltipCache then ns.InvalidateCrateTooltipCache() end
+		end
+		syncExternalControls()
+		UI.SyncSettings()
+		if not state.built then
+			tv.sync()
+		end
+	end
+
+	-- -----------------------------------------------------------------------------------------------
+	-- Top Global Options Bar (height 48px)
+	-- -----------------------------------------------------------------------------------------------
+	local topBar = createSurfaceCard(frame, "glass_r12", "cardBg")
+	topBar:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+	topBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+	topBar:SetHeight(48)
+	tv.topBar = topBar
+
+	local masterCheck = createCheck(topBar, "Enable MM Tooltips", 11, function(_, on)
+		setPref("ttEnabled", on)
+	end)
+	masterCheck:SetPoint("LEFT", topBar, "LEFT", 12, 0)
+	attachTooltip(masterCheck, "Enable MerchantMaster Tooltips", {
+		"Master switch for all MerchantMaster item tooltip additions.",
+		"Turn off to hide Market, Crafting, Disenchant, Accounting, Inventory, and Crate tooltip lines.",
+	})
+	tv.checks.ttEnabled = masterCheck
+	tv.checkMeta.ttEnabled = { key = "ttEnabled", isMaster = true }
+
+	local vDiv1 = topBar:CreateTexture(nil, "ARTWORK")
+	vDiv1:SetSize(1, 24)
+	vDiv1:SetPoint("LEFT", topBar, "LEFT", 174, 0)
+	state.themedSeparators[#state.themedSeparators + 1] = vDiv1
+
+	local fmtLbl = makeFs(topBar, 10, "semibold", "textSecondary")
+	fmtLbl:SetPoint("LEFT", vDiv1, "RIGHT", 6, 0)
+	fmtLbl:SetText("Price:")
+
+	do
+		local fmtSpecs = {
+			{ key = "colored", label = "Colored Text", w = 82 },
+			{ key = "icons",   label = "Coin Icons",   w = 72 },
+		}
+		local prev = fmtLbl
+		for idx, sp in ipairs(fmtSpecs) do
+			local b = createButton(topBar, sp.label, sp.w, 22, { variant = "secondary", pill = true, fontSize = 10 })
+			b:SetPoint("LEFT", prev, "RIGHT", idx == 1 and 6 or 4, 0)
+			local fk = sp.key
+			b:SetScript("OnClick", function()
+				setPref("ttPriceFormat", fk)
+			end)
+			attachTooltip(b, "Tooltip Price Format: " .. sp.label, {
+				fk == "icons"
+					and "Renders WoW gold, silver, and copper coin textures inside tooltips."
+					or "Renders compact colored g / s / c letters inside tooltips.",
+			})
+			tv.formatBtns[fk] = b
+			prev = b
+		end
+	end
+
+	local vDiv2 = topBar:CreateTexture(nil, "ARTWORK")
+	vDiv2:SetSize(1, 24)
+	vDiv2:SetPoint("LEFT", tv.formatBtns.icons, "RIGHT", 6, 0)
+	state.themedSeparators[#state.themedSeparators + 1] = vDiv2
+
+	local modLbl = makeFs(topBar, 10, "semibold", "textSecondary")
+	modLbl:SetPoint("LEFT", vDiv2, "RIGHT", 6, 0)
+	modLbl:SetText("Modifier:")
+
+	do
+		local modSpecs = {
+			{ key = "none",  label = "Always", w = 50 },
+			{ key = "shift", label = "Shift",  w = 42 },
+			{ key = "alt",   label = "Alt",    w = 36 },
+			{ key = "ctrl",  label = "Ctrl",   w = 40 },
+		}
+		local prev = modLbl
+		for idx, sp in ipairs(modSpecs) do
+			local b = createButton(topBar, sp.label, sp.w, 22, { variant = "secondary", pill = true, fontSize = 10 })
+			b:SetPoint("LEFT", prev, "RIGHT", idx == 1 and 6 or 4, 0)
+			local mk = sp.key
+			b:SetScript("OnClick", function()
+				setPref("ttModifier", mk)
+			end)
+			attachTooltip(b, "Tooltip Modifier: " .. sp.label, {
+				mk == "none"
+					and "Always shows MerchantMaster tooltip lines on hover (hold Shift to multiply by stack size)."
+					or ("Only displays MerchantMaster tooltip lines while holding " .. sp.label .. "."),
+			})
+			tv.modBtns[mk] = b
+			prev = b
+		end
+	end
+
+	-- Right-aligned Preset buttons: All On, Compact, Reset
+	do
+		local resetBtn = createButton(topBar, "Reset", 54, 22, { variant = "secondary", fontSize = 10 })
+		resetBtn:SetPoint("RIGHT", topBar, "RIGHT", -12, 0)
+		resetBtn:SetScript("OnClick", function() applyPreset("reset") end)
+		attachTooltip(resetBtn, "Reset Tooltip Defaults", { "Restores all tooltip options to MerchantMaster's recommended defaults." })
+		tv.presetBtns.reset = resetBtn
+
+		local compactBtn = createButton(topBar, "Compact", 64, 22, { variant = "secondary", fontSize = 10 })
+		compactBtn:SetPoint("RIGHT", resetBtn, "LEFT", -4, 0)
+		compactBtn:SetScript("OnClick", function() applyPreset("compact") end)
+		attachTooltip(compactBtn, "Compact Preset", { "Keeps key buyout, DE, profit, and total inventory lines while hiding detailed breakdowns." })
+		tv.presetBtns.compact = compactBtn
+
+		local allBtn = createButton(topBar, "All On", 54, 22, { variant = "secondary", fontSize = 10 })
+		allBtn:SetPoint("RIGHT", compactBtn, "LEFT", -4, 0)
+		allBtn:SetScript("OnClick", function() applyPreset("all") end)
+		attachTooltip(allBtn, "All On Preset", { "Enables every tooltip section and detail line." })
+		tv.presetBtns.all = allBtn
+
+		local preLbl = makeFs(topBar, 10, "semibold", "textSecondary")
+		preLbl:SetPoint("RIGHT", allBtn, "LEFT", -6, 0)
+		preLbl:SetText("Presets:")
+		tv.presetLbl = preLbl
+	end
+
+	-- -----------------------------------------------------------------------------------------------
+	-- Left Pane (~46%): Scrollable 4-Section Toggle List
+	-- -----------------------------------------------------------------------------------------------
+	local leftCard = createSurfaceCard(frame, "glass_r12", "cardBg")
+	leftCard:SetPoint("TOPLEFT", topBar, "BOTTOMLEFT", 0, -8)
+	leftCard:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0)
+	leftCard:SetWidth(450)
+	tv.leftCard = leftCard
+
+	local leftTitle = makeFs(leftCard, 13, "semibold", "text")
+	leftTitle:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 14, -10)
+	leftTitle:SetText("Tooltip Sections & Lines")
+
+	local leftSub = makeFs(leftCard, 10, "regular", "textSecondary", "RIGHT")
+	leftSub:SetPoint("TOPRIGHT", leftCard, "TOPRIGHT", -14, -12)
+	leftSub:SetText("Changes apply immediately")
+
+	local leftSep = createSeparator(leftCard)
+	leftSep:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 12, -32)
+	leftSep:SetPoint("TOPRIGHT", leftCard, "TOPRIGHT", -12, -32)
+
+	local optScroll = CreateFrame("ScrollFrame", nil, leftCard)
+	optScroll:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 6, -36)
+	optScroll:SetPoint("BOTTOMRIGHT", leftCard, "BOTTOMRIGHT", -16, 8)
+	tv.optScroll = optScroll
+
+	local optChildParent = (optScroll.SetScrollChild ~= nil) and optScroll or leftCard
+	local optChild = CreateFrame("Frame", nil, optChildParent)
+	optChild:SetPoint("TOPLEFT", optChildParent, "TOPLEFT", 0, 0)
+	optChild:SetWidth(410)
+	if optScroll.SetScrollChild then
+		optScroll:SetScrollChild(optChild)
+	end
+	tv.optChild = optChild
+
+	local optSb = CreateFrame("Slider", nil, leftCard)
+	optSb:SetWidth(6)
+	optSb:SetPoint("TOPRIGHT", leftCard, "TOPRIGHT", -4, -38)
+	optSb:SetPoint("BOTTOMRIGHT", leftCard, "BOTTOMRIGHT", -4, 8)
+	if optSb.SetOrientation then optSb:SetOrientation("VERTICAL") end
+	if optSb.SetMinMaxValues then optSb:SetMinMaxValues(0, 0) end
+	if optSb.SetValueStep then optSb:SetValueStep(20) end
+	if optSb.SetValue then optSb:SetValue(0) end
+	local optThumb = optSb:CreateTexture(nil, "ARTWORK")
+	optThumb:SetSize(4, 32)
+	optThumb:SetColorTexture(1, 1, 1, 0.30)
+	if optSb.SetThumbTexture then optSb:SetThumbTexture(optThumb) end
+	local T = getTheme()
+	if T and type(T.SlimScrollBar) == "function" then
+		T.SlimScrollBar(optSb)
+	end
+	if optSb.SetScript and optScroll.SetVerticalScroll then
+		optSb:SetScript("OnValueChanged", function(_, val)
+			if optScroll.SetVerticalScroll then optScroll:SetVerticalScroll(val or 0) end
+		end)
+	end
+	tv.optSb = optSb
+
+	local function syncOptScrollRange()
+		if optScroll.UpdateScrollChildRect then optScroll:UpdateScrollChildRect() end
+		if optScroll.GetVerticalScrollRange and optSb.SetMinMaxValues then
+			local rng = max(0, optScroll:GetVerticalScrollRange() or 0)
+			optSb:SetMinMaxValues(0, rng)
+			if optSb.SetShown then optSb:SetShown(rng > 0) end
+		end
+	end
+
+	local function onOptWheel(_, delta)
+		if optScroll.GetVerticalScrollRange and optScroll.SetVerticalScroll and optScroll.GetVerticalScroll then
+			local rng = max(0, optScroll:GetVerticalScrollRange() or 0)
+			local cur = optScroll:GetVerticalScroll() or 0
+			local nxt = max(0, min(rng, cur - delta * 32))
+			optScroll:SetVerticalScroll(nxt)
+			if optSb.SetMinMaxValues then optSb:SetMinMaxValues(0, rng) end
+			if optSb.SetValue then optSb:SetValue(nxt) end
+		end
+	end
+	if leftCard.EnableMouseWheel then leftCard:EnableMouseWheel(true) end
+	leftCard:SetScript("OnMouseWheel", onOptWheel)
+	if optScroll.EnableMouseWheel then optScroll:EnableMouseWheel(true) end
+	optScroll:SetScript("OnMouseWheel", onOptWheel)
+
+	-- Populate 4 grouped sections inside optChild
+	do
+		local y = 6
+		for sIdx, sec in ipairs(TOOLTIP_SECTIONS) do
+			if sIdx > 1 then
+				local sDiv = createSeparator(optChild)
+				sDiv:SetPoint("TOPLEFT", optChild, "TOPLEFT", 8, -y)
+				sDiv:SetPoint("TOPRIGHT", optChild, "TOPRIGHT", -8, -y)
+				y = y + 9
+			end
+			local hdrFs = makeFs(optChild, 11, "semibold", "textBlue")
+			hdrFs:SetPoint("TOPLEFT", optChild, "TOPLEFT", 8, -y)
+			hdrFs:SetText(sec.title)
+			tv.sectionHeaders[sIdx] = hdrFs
+			y = y + 20
+
+			for _, item in ipairs(sec.items) do
+				local key = item.key
+				local cb = createCheck(optChild, item.label, 11, function(_, on)
+					setPref(key, on)
+				end)
+				local xOff = item.indent and 22 or 8
+				cb:SetPoint("TOPLEFT", optChild, "TOPLEFT", xOff, -y)
+				if item.tip then
+					attachTooltip(cb, item.label, { item.tip })
+				end
+				tv.checks[key] = cb
+				tv.checkMeta[key] = item
+				y = y + 24
+			end
+			y = y + 4
+		end
+		optChild:SetHeight(max(200, y + 10))
+	end
+
+	-- -----------------------------------------------------------------------------------------------
+	-- Right Pane (~54%): TSM-Inspired "Example Tooltip" Live Preview Panel
+	-- -----------------------------------------------------------------------------------------------
+	local rightCard = createSurfaceCard(frame, "glass_r12", "cardBg")
+	rightCard:SetPoint("TOPLEFT", leftCard, "TOPRIGHT", 10, 0)
+	rightCard:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+	tv.rightCard = rightCard
+
+	local rightTitle = makeFs(rightCard, 13, "semibold", "text")
+	rightTitle:SetPoint("TOPLEFT", rightCard, "TOPLEFT", 14, -10)
+	rightTitle:SetText("Example Tooltip")
+
+	local dimHintFs = makeFs(rightCard, 10, "regular", "textSecondary", "RIGHT")
+	dimHintFs:SetPoint("TOPRIGHT", rightCard, "TOPRIGHT", -14, -12)
+	dimHintFs:SetWidth(130)
+	if dimHintFs.SetWordWrap then dimHintFs:SetWordWrap(false) end
+	dimHintFs:SetText("Dimmed = hidden")
+	tv.dimHintFs = dimHintFs
+
+	-- Sample item switcher pills
+	do
+		local sampleSpecs = {
+			{ key = "green_lens",    label = "Green Lens",    w = 84 },
+			{ key = "silk_cloth",    label = "Silk Cloth",    w = 74 },
+			{ key = "waylaid_crate", label = "Waylaid Crate", w = 96 },
+		}
+		local prev
+		for idx, sp in ipairs(sampleSpecs) do
+			local b = createButton(rightCard, sp.label, sp.w, 22, { variant = "secondary", pill = true, fontSize = 10 })
+			if idx == 1 then
+				b:SetPoint("TOPLEFT", rightCard, "TOPLEFT", 14, -34)
+			else
+				b:SetPoint("LEFT", prev, "RIGHT", 6, 0)
+			end
+			local sk = sp.key
+			b:SetScript("OnClick", function()
+				state.tooltipSampleKey = sk
+				tv.sync()
+			end)
+			attachTooltip(b, "Preview Sample: " .. sp.label, {
+				"Switches the Example Tooltip below to inspect how " .. sp.label .. " renders with your current toggles.",
+			})
+			tv.sampleBtns[sk] = b
+			prev = b
+		end
+	end
+
+	local previewStatusFs = makeFs(rightCard, 10, "semibold", "textSecondary", "RIGHT")
+	previewStatusFs:SetPoint("TOPRIGHT", rightCard, "TOPRIGHT", -14, -40)
+	previewStatusFs:SetWidth(130)
+	if previewStatusFs.SetWordWrap then previewStatusFs:SetWordWrap(false) end
+	previewStatusFs:SetText("Active on hover")
+	tv.previewStatusFs = previewStatusFs
+
+	local rightSep = createSeparator(rightCard)
+	rightSep:SetPoint("TOPLEFT", rightCard, "TOPLEFT", 12, -62)
+	rightSep:SetPoint("TOPRIGHT", rightCard, "TOPRIGHT", -12, -62)
+
+	-- Dark WoW Tooltip Preview Box (#0B0E14 fill, 1px crisp gold/slate border, rounded corners)
+	local tipBox = CreateFrame("Frame", nil, rightCard)
+	tipBox:SetPoint("TOPLEFT", rightCard, "TOPLEFT", 14, -72)
+	tipBox:SetPoint("BOTTOMRIGHT", rightCard, "BOTTOMRIGHT", -14, 14)
+	tv.tipBox = tipBox
+
+	if T and type(T.NineApple) == "function" then
+		tv.tipSurface = T.NineApple(tipBox, "glass_r8", { 0.043, 0.055, 0.078, 0.98 }, { 0.68, 0.58, 0.34, 0.85 }, { noSpecular = true })
+	else
+		local bg = tipBox:CreateTexture(nil, "BACKGROUND", nil, 0)
+		bg:SetAllPoints(tipBox)
+		bg:SetColorTexture(0.043, 0.055, 0.078, 0.98)
+		local bTop = tipBox:CreateTexture(nil, "BORDER")
+		bTop:SetHeight(1)
+		bTop:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 0, 0)
+		bTop:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", 0, 0)
+		bTop:SetColorTexture(0.68, 0.58, 0.34, 0.85)
+		local bBot = tipBox:CreateTexture(nil, "BORDER")
+		bBot:SetHeight(1)
+		bBot:SetPoint("BOTTOMLEFT", tipBox, "BOTTOMLEFT", 0, 0)
+		bBot:SetPoint("BOTTOMRIGHT", tipBox, "BOTTOMRIGHT", 0, 0)
+		bBot:SetColorTexture(0.68, 0.58, 0.34, 0.85)
+		local bLeft = tipBox:CreateTexture(nil, "BORDER")
+		bLeft:SetWidth(1)
+		bLeft:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 0, 0)
+		bLeft:SetPoint("BOTTOMLEFT", tipBox, "BOTTOMLEFT", 0, 0)
+		bLeft:SetColorTexture(0.68, 0.58, 0.34, 0.85)
+		local bRight = tipBox:CreateTexture(nil, "BORDER")
+		bRight:SetWidth(1)
+		bRight:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", 0, 0)
+		bRight:SetPoint("BOTTOMRIGHT", tipBox, "BOTTOMRIGHT", 0, 0)
+		bRight:SetColorTexture(0.68, 0.58, 0.34, 0.85)
+	end
+
+	-- WoW item header (quality-colored title, subtitle, vendor sell line)
+	local headerNameFs = tipBox:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	headerNameFs:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 12, -10)
+	headerNameFs:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", -12, -10)
+	headerNameFs:SetJustifyH("LEFT")
+	if headerNameFs.SetWordWrap then headerNameFs:SetWordWrap(false) end
+	applyFont(headerNameFs, 13, "semibold")
+	tv.headerNameFs = headerNameFs
+
+	local headerSubFs = tipBox:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	headerSubFs:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 12, -28)
+	headerSubFs:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", -12, -28)
+	headerSubFs:SetJustifyH("LEFT")
+	if headerSubFs.SetWordWrap then headerSubFs:SetWordWrap(false) end
+	applyFont(headerSubFs, 10, "regular")
+	tv.headerSubFs = headerSubFs
+
+	local headerSellFs = tipBox:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	headerSellFs:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 12, -42)
+	headerSellFs:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", -12, -42)
+	headerSellFs:SetJustifyH("LEFT")
+	if headerSellFs.SetWordWrap then headerSellFs:SetWordWrap(false) end
+	applyFont(headerSellFs, 10, "regular")
+	tv.headerSellFs = headerSellFs
+
+	local headerSep = tipBox:CreateTexture(nil, "ARTWORK")
+	headerSep:SetHeight(1)
+	headerSep:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 10, -58)
+	headerSep:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", -10, -58)
+	headerSep:SetColorTexture(0.38, 0.42, 0.50, 0.45)
+	tv.headerSep = headerSep
+
+	-- Scrollable container inside tipBox for the 36 pooled double-column preview rows
+	local tipScroll = CreateFrame("ScrollFrame", nil, tipBox)
+	tipScroll:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 10, -64)
+	tipScroll:SetPoint("BOTTOMRIGHT", tipBox, "BOTTOMRIGHT", -16, 8)
+	tv.tipScroll = tipScroll
+
+	local tipChildParent = (tipScroll.SetScrollChild ~= nil) and tipScroll or tipBox
+	local tipChild = CreateFrame("Frame", nil, tipChildParent)
+	tipChild:SetPoint("TOPLEFT", tipChildParent, "TOPLEFT", 0, 0)
+	tipChild:SetWidth(420)
+	tipChild:SetHeight(320)
+	if tipScroll.SetScrollChild then
+		tipScroll:SetScrollChild(tipChild)
+	end
+	tv.tipChild = tipChild
+
+	local tipSb = CreateFrame("Slider", nil, tipBox)
+	tipSb:SetWidth(5)
+	tipSb:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", -4, -64)
+	tipSb:SetPoint("BOTTOMRIGHT", tipBox, "BOTTOMRIGHT", -4, 8)
+	if tipSb.SetOrientation then tipSb:SetOrientation("VERTICAL") end
+	if tipSb.SetMinMaxValues then tipSb:SetMinMaxValues(0, 0) end
+	if tipSb.SetValueStep then tipSb:SetValueStep(16) end
+	if tipSb.SetValue then tipSb:SetValue(0) end
+	local tipThumb = tipSb:CreateTexture(nil, "ARTWORK")
+	tipThumb:SetSize(4, 28)
+	tipThumb:SetColorTexture(0.75, 0.78, 0.85, 0.30)
+	if tipSb.SetThumbTexture then tipSb:SetThumbTexture(tipThumb) end
+	if T and type(T.SlimScrollBar) == "function" then
+		T.SlimScrollBar(tipSb)
+	end
+	if tipSb.SetScript and tipScroll.SetVerticalScroll then
+		tipSb:SetScript("OnValueChanged", function(_, val)
+			if tipScroll.SetVerticalScroll then tipScroll:SetVerticalScroll(val or 0) end
+		end)
+	end
+	tv.tipSb = tipSb
+
+	local function onTipWheel(_, delta)
+		if tipScroll.GetVerticalScrollRange and tipScroll.SetVerticalScroll and tipScroll.GetVerticalScroll then
+			local rng = max(0, tipScroll:GetVerticalScrollRange() or 0)
+			local cur = tipScroll:GetVerticalScroll() or 0
+			local nxt = max(0, min(rng, cur - delta * 28))
+			tipScroll:SetVerticalScroll(nxt)
+			if tipSb.SetMinMaxValues then tipSb:SetMinMaxValues(0, rng) end
+			if tipSb.SetValue then tipSb:SetValue(nxt) end
+		end
+	end
+	if tipBox.EnableMouseWheel then tipBox:EnableMouseWheel(true) end
+	tipBox:SetScript("OnMouseWheel", onTipWheel)
+	if tipScroll.EnableMouseWheel then tipScroll:EnableMouseWheel(true) end
+	tipScroll:SetScript("OnMouseWheel", onTipWheel)
+
+	-- 36 pooled double-column FontString rows
+	for i = 1, 36 do
+		local rf = CreateFrame("Frame", nil, tipChild)
+		rf:SetHeight(15)
+		rf:Hide()
+
+		local rFs = rf:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+		rFs:SetPoint("RIGHT", rf, "RIGHT", -2, 0)
+		rFs:SetJustifyH("RIGHT")
+		if rFs.SetWordWrap then rFs:SetWordWrap(false) end
+		applyFont(rFs, 11, "regular")
+
+		local lFs = rf:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+		lFs:SetPoint("LEFT", rf, "LEFT", 2, 0)
+		lFs:SetPoint("RIGHT", rFs, "LEFT", -8, 0)
+		lFs:SetJustifyH("LEFT")
+		if lFs.SetWordWrap then lFs:SetWordWrap(false) end
+		applyFont(lFs, 11, "regular")
+
+		tv.previewRows[i] = {
+			frame = rf,
+			leftFs = lFs,
+			rightFs = rFs,
+			enabled = false,
+			isHeader = false,
+		}
+	end
+
+	function tv.syncPreview()
+		local sampleKey = state.tooltipSampleKey or "green_lens"
+		local TP = getTP()
+		local data
+		if TP and type(TP.BuildPreviewLines) == "function" then
+			local ok, res = pcall(TP.BuildPreviewLines, sampleKey)
+			if ok and type(res) == "table" then
+				data = res
+			end
+		end
+		if type(data) ~= "table" then
+			data = buildFallbackTooltipPreview(sampleKey, getPref)
+		end
+
+		local hdr = type(data.header) == "table" and data.header or {}
+		local qRGB = type(hdr.qualityRGB) == "table" and hdr.qualityRGB or { 1, 1, 1 }
+		headerNameFs:SetText(tostring(hdr.name or "Item Preview"))
+		headerNameFs:SetTextColor(qRGB[1] or 1, qRGB[2] or 1, qRGB[3] or 1, 1)
+
+		local subTxt = tostring(hdr.subtitle or "")
+		local sellTxt = tostring(hdr.sellPrice or "")
+		local hdrY = 28
+		if subTxt ~= "" then
+			headerSubFs:SetText(subTxt)
+			headerSubFs:SetTextColor(0.72, 0.76, 0.82, 1)
+			headerSubFs:ClearAllPoints()
+			headerSubFs:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 12, -hdrY)
+			headerSubFs:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", -12, -hdrY)
+			headerSubFs:Show()
+			hdrY = hdrY + 14
+		else
+			headerSubFs:SetText("")
+			headerSubFs:Hide()
+		end
+		if sellTxt ~= "" then
+			headerSellFs:SetText(sellTxt)
+			headerSellFs:SetTextColor(0.90, 0.92, 0.95, 1)
+			headerSellFs:ClearAllPoints()
+			headerSellFs:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 12, -hdrY)
+			headerSellFs:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", -12, -hdrY)
+			headerSellFs:Show()
+			hdrY = hdrY + 15
+		else
+			headerSellFs:SetText("")
+			headerSellFs:Hide()
+		end
+
+		headerSep:ClearAllPoints()
+		headerSep:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 10, -(hdrY + 2))
+		headerSep:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", -10, -(hdrY + 2))
+		tipScroll:ClearAllPoints()
+		tipScroll:SetPoint("TOPLEFT", tipBox, "TOPLEFT", 10, -(hdrY + 8))
+		tipScroll:SetPoint("BOTTOMRIGHT", tipBox, "BOTTOMRIGHT", -16, 8)
+		tipSb:ClearAllPoints()
+		tipSb:SetPoint("TOPRIGHT", tipBox, "TOPRIGHT", -4, -(hdrY + 8))
+		tipSb:SetPoint("BOTTOMRIGHT", tipBox, "BOTTOMRIGHT", -4, 8)
+
+		local rows = type(data.rows) == "table" and data.rows or {}
+		local y = 0
+		local shownCount = 0
+		for i = 1, 36 do
+			local slot = tv.previewRows[i]
+			local r = rows[i]
+			if r then
+				shownCount = shownCount + 1
+				local isHdr = (r.isHeader == true)
+				local isEn = (r.enabled ~= false)
+				if shownCount > 1 and isHdr then
+					y = y + 6
+				end
+				local rowH = isHdr and 17 or 15
+				slot.frame:ClearAllPoints()
+				slot.frame:SetPoint("TOPLEFT", tipChild, "TOPLEFT", 0, -y)
+				slot.frame:SetPoint("TOPRIGHT", tipChild, "TOPRIGHT", 0, -y)
+				slot.frame:SetHeight(rowH)
+				applyFont(slot.leftFs, 11, isHdr and "semibold" or "regular")
+				applyFont(slot.rightFs, 11, "regular")
+
+				local rL = tonumber(r.rL) or (isEn and (isHdr and 1.00 or 0.90) or 0.42)
+				local gL = tonumber(r.gL) or (isEn and (isHdr and 0.82 or 0.92) or 0.45)
+				local bL = tonumber(r.bL) or (isEn and (isHdr and 0.00 or 0.95) or 0.50)
+				local rR = tonumber(r.rR) or (isEn and (isHdr and 0.62 or 0.90) or 0.42)
+				local gR = tonumber(r.gR) or (isEn and (isHdr and 0.66 or 0.92) or 0.45)
+				local bR = tonumber(r.bR) or (isEn and (isHdr and 0.72 or 0.95) or 0.50)
+
+				local rightTxt = tostring(r.right or "")
+				slot.leftFs:ClearAllPoints()
+				slot.leftFs:SetPoint("LEFT", slot.frame, "LEFT", 2, 0)
+				if rightTxt ~= "" then
+					slot.leftFs:SetPoint("RIGHT", slot.rightFs, "LEFT", -8, 0)
+				else
+					slot.leftFs:SetPoint("RIGHT", slot.frame, "RIGHT", -2, 0)
+				end
+				slot.leftFs:SetText(tostring(r.left or ""))
+				slot.leftFs:SetTextColor(rL, gL, bL, 1)
+				slot.rightFs:SetText(rightTxt)
+				slot.rightFs:SetTextColor(rR, gR, bR, 1)
+				slot.enabled = isEn
+				slot.isHeader = isHdr
+				slot.frame:Show()
+				y = y + rowH
+			else
+				slot.leftFs:SetText("")
+				slot.rightFs:SetText("")
+				slot.enabled = false
+				slot.isHeader = false
+				slot.frame:Hide()
+			end
+		end
+
+		tipChild:SetHeight(max(120, y + 10))
+		if tipScroll.UpdateScrollChildRect then tipScroll:UpdateScrollChildRect() end
+		if tipScroll.GetVerticalScrollRange and tipSb.SetMinMaxValues then
+			local rng = max(0, tipScroll:GetVerticalScrollRange() or 0)
+			tipSb:SetMinMaxValues(0, rng)
+			if tipSb.SetShown then tipSb:SetShown(rng > 0) end
+		end
+	end
+
+	function tv.sync()
+		local pal = getPal()
+		local masterOn = getPref("ttEnabled") ~= false
+		local curFmt = tostring(getPref("ttPriceFormat") or "colored")
+		local curMod = tostring(getPref("ttModifier") or "none")
+		local curSample = tostring(state.tooltipSampleKey or "green_lens")
+
+		for key, cb in pairs(tv.checks) do
+			local on = getPref(key) == true
+			if cb.SetChecked then cb:SetChecked(on) end
+			if cb.label then
+				local meta = tv.checkMeta[key]
+				local dimmed = false
+				if key ~= "ttEnabled" then
+					if not masterOn then
+						dimmed = true
+					elseif meta and meta.parentKey and getPref(meta.parentKey) == false then
+						dimmed = true
+					end
+				end
+				setFsColor(cb.label, dimmed and (pal.textMuted or pal.textSecondary) or pal.text)
+			end
+		end
+
+		for k, b in pairs(tv.formatBtns) do
+			if b.SetActive then b:SetActive(k == curFmt) end
+		end
+		for k, b in pairs(tv.modBtns) do
+			if b.SetActive then b:SetActive(k == curMod) end
+		end
+		for k, b in pairs(tv.sampleBtns) do
+			if b.SetActive then b:SetActive(k == curSample) end
+		end
+
+		if not masterOn then
+			previewStatusFs:SetText("All Tooltips OFF")
+			setFsColor(previewStatusFs, pal.accentRed or pal.textSecondary)
+		elseif curMod ~= "none" then
+			local ml = (curMod == "shift" and "Shift") or (curMod == "alt" and "Alt") or (curMod == "ctrl" and "Ctrl") or curMod
+			previewStatusFs:SetText("Hold " .. ml .. " to show")
+			setFsColor(previewStatusFs, pal.accentOrange or pal.textSecondary)
+		else
+			previewStatusFs:SetText("Active on hover")
+			setFsColor(previewStatusFs, pal.accentGreen or pal.textSecondary)
+		end
+
+		tv.syncPreview()
+	end
+
+	function tv.retheme()
+		tv.sync()
+	end
+
+	function tv.layout()
+		local w = (frame.GetWidth and frame:GetWidth()) or 1000
+		if w <= 0 then w = 1000 end
+		local leftW = max(380, floor((w - 10) * 0.46))
+		leftCard:SetWidth(leftW)
+		if optChild.SetWidth then
+			optChild:SetWidth(max(320, leftW - 26))
+		end
+		syncOptScrollRange()
+
+		local rightW = max(360, w - leftW - 10)
+		if tipChild.SetWidth then
+			tipChild:SetWidth(max(300, rightW - 58))
+		end
+		if tipScroll.UpdateScrollChildRect then tipScroll:UpdateScrollChildRect() end
+		if tipScroll.GetVerticalScrollRange and tipSb.SetMinMaxValues then
+			local rng = max(0, tipScroll:GetVerticalScrollRange() or 0)
+			tipSb:SetMinMaxValues(0, rng)
+			if tipSb.SetShown then tipSb:SetShown(rng > 0) end
+		end
+	end
+
+	function tv.refresh()
+		tv.sync()
+		tv.layout()
+	end
+
+	state.tooltipControls = {
+		checks = tv.checks,
+		sampleBtns = tv.sampleBtns,
+		presetBtns = tv.presetBtns,
+		formatBtns = tv.formatBtns,
+		modBtns = tv.modBtns,
+		previewRows = tv.previewRows,
+		leftCard = tv.leftCard,
+		rightCard = tv.rightCard,
+		topBar = tv.topBar,
+		tipBox = tv.tipBox,
+		headerNameFs = tv.headerNameFs,
+		headerSubFs = tv.headerSubFs,
+		headerSellFs = tv.headerSellFs,
+	}
+
+	return tv
+end
+
+---------------------------------------------------------------------------------------------------
+-- Sub-View 8: Addon UI & Live Theme Preview (console_ui)
 ---------------------------------------------------------------------------------------------------
 
 local function formatPreviewMoney(copper, signed, priceMode, pPal)
@@ -3323,6 +3958,24 @@ local function buildAddonUIView(parent)
 			uv.priceBtns[pm.key] = btn
 		end
 	end
+
+	local posHdr = makeFs(leftCard, 11, "semibold", "textSecondary")
+	posHdr:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 14, -344)
+	posHdr:SetText("Window Positions")
+
+	local resetPosBtn = createButton(leftCard, "Reset Window Positions", 188, 24, { variant = "secondary", fontSize = 11 })
+	resetPosBtn:SetPoint("TOPLEFT", leftCard, "TOPLEFT", 14, -362)
+	resetPosBtn:SetScript("OnClick", function()
+		if ns.app and ns.app.resetWindowPositions then
+			ns.app.resetWindowPositions()
+		elseif ns.Window and ns.Window.ClearSavedPosition then
+			ns.Window.ClearSavedPosition(nil)
+		end
+	end)
+	attachTooltip(resetPosBtn, "Reset Window Positions", {
+		"Clears saved positions for MerchantMaster, Disenchant Helper, Crafter/Trade Strip, and Shopping List so they return to smart default spawning.",
+	})
+	uv.resetPosBtn = resetPosBtn
 
 	local uiNote = makeFs(leftCard, 11, "regular", "textSecondary")
 	uiNote:SetPoint("BOTTOMLEFT", leftCard, "BOTTOMLEFT", 14, 14)
@@ -3935,32 +4588,17 @@ end
 -- Top Bar, Theme Integration & Lazy Build
 ---------------------------------------------------------------------------------------------------
 
-local function syncSubTabVisibility()
-	local bar = state.subTabBar
-	if not bar or not bar.buttons or not bar._defs then return end
-	local x = 4
-	for _, d in ipairs(bar._defs) do
-		local b = bar.buttons[d.key]
-		if b then
-			b:ClearAllPoints()
-			b:SetPoint("LEFT", bar, "LEFT", x, 0)
-			b:Show()
-			x = x + (d.width or 86) + 4
-		end
-	end
-	bar.rightStart = x + 6
-end
-
 local function buildSubTabBar(root)
 	local defs = {
-		{ key = "console_overview", label = "Overview", width = 78, hint = "Addon RAM, SavedVariables, Live AH scans & health" },
-		{ key = "console_database", label = "Database", width = 78, hint = "WoW SavedVariables schema inspector" },
-		{ key = "console_perf", label = "Perf & Debug", width = 92, hint = "Opt-in runtime profiler & support debug bundle" },
-		{ key = "console_setup", label = "Snapshot Settings", width = 124, hint = "Optional background AH snapshots setup, folders & OS commands" },
-		{ key = "console_settings", label = "Settings", width = 76, hint = "Market, inventory scope, Leveling filter & item tooltips" },
-		{ key = "console_mail", label = "Mail", width = 54, hint = "Saved mail recipients, mailbox quick-pick buttons & send safety net" },
-		{ key = "console_ui", label = "Addon UI", width = 78, hint = "Window skins, dark/light mode, table styles & price formats with live preview" },
-		{ key = "console_data", label = "Data & Maintenance", width = 134, hint = "Cache clears, Ledger pruning, CSV export & slash commands" },
+		{ key = "console_overview", label = "Overview", width = 60, hint = "Addon RAM, SavedVariables, Live AH scans & health" },
+		{ key = "console_database", label = "Database", width = 62, hint = "WoW SavedVariables schema inspector" },
+		{ key = "console_perf", label = "Perf & Debug", width = 80, hint = "Opt-in runtime profiler & support debug bundle" },
+		{ key = "console_setup2", label = "Snapshot Sync", width = 96, hint = "GitHub Auto-Sync & 3-way Price Refresh Mode - zero API key" },
+		{ key = "console_settings", label = "Settings", width = 56, hint = "Market, inventory scope, Leveling filter & item tooltips" },
+		{ key = "console_mail", label = "Mail", width = 38, hint = "Saved mail recipients, mailbox quick-pick buttons & send safety net" },
+		{ key = "console_tooltips", label = "Tooltip Setup", width = 80, hint = "Customize item tooltip sections, price format & live example preview" },
+		{ key = "console_ui", label = "Addon UI", width = 58, hint = "Window skins, dark/light mode, table styles & price formats with live preview" },
+		{ key = "console_data", label = "Data & Maintenance", width = 110, hint = "Cache clears, Ledger pruning, CSV export & slash commands" },
 	}
 	local function onSelect(key)
 		if ns.app and type(ns.app.setTab) == "function" then
@@ -4011,7 +4649,6 @@ local function buildSubTabBar(root)
 	end
 
 	state.subTabBar = bar
-	syncSubTabVisibility()
 end
 
 local function ensureBuilt()
@@ -4021,9 +4658,10 @@ local function ensureBuilt()
 	state.overviewView = buildOverviewView(state.root)
 	state.databaseView = buildDatabaseView(state.root)
 	state.perfView = buildPerfView(state.root)
-	state.setupView = buildSetupView(state.root)
+	state.setupV2View = buildSetupV2View(state.root)
 	state.settingsView = buildSettingsView(state.root)
 	state.mailView = buildMailView(state.root)
+	state.tooltipsView = buildTooltipsView(state.root)
 	state.uiView = buildAddonUIView(state.root)
 	state.dataView = buildDataView(state.root)
 	UI.ApplyTheme()
@@ -4071,9 +4709,10 @@ local function viewMap()
 		console_overview = state.overviewView,
 		console_database = state.databaseView,
 		console_perf = state.perfView,
-		console_setup = state.setupView,
+		console_setup2 = state.setupV2View,
 		console_settings = state.settingsView,
 		console_mail = state.mailView,
+		console_tooltips = state.tooltipsView,
 		console_ui = state.uiView,
 		console_data = state.dataView,
 	}
@@ -4085,7 +4724,9 @@ function UI.Show(subTab)
 		ns.EnsureSnapshotsLoaded()
 	end
 	ensureBuilt()
-	syncSubTabVisibility()
+	if subTab == "console_setup" then
+		subTab = "console_setup2"
+	end
 	local wasShown = UI.IsShown()
 	local prevTab = state.activeSubTab
 	local target = SUB_TABS[subTab] and subTab or "console_overview"
@@ -4150,12 +4791,14 @@ function UI.ApplyTheme()
 	if UI.IsShown() then
 		if state.activeSubTab == "console_overview" and state.overviewView and type(state.overviewView.retheme) == "function" then
 			state.overviewView.retheme()
-		elseif state.activeSubTab == "console_setup" and state.setupView and type(state.setupView.retheme) == "function" then
-			state.setupView.retheme()
+		elseif state.activeSubTab == "console_setup2" and state.setupV2View and type(state.setupV2View.retheme) == "function" then
+			state.setupV2View.retheme()
 		elseif state.activeSubTab == "console_database" and state.databaseView and type(state.databaseView.renderRows) == "function" then
 			state.databaseView.renderRows()
 		elseif state.activeSubTab == "console_mail" and state.mailView and type(state.mailView.retheme) == "function" then
 			state.mailView.retheme()
+		elseif state.activeSubTab == "console_tooltips" and state.tooltipsView and type(state.tooltipsView.retheme) == "function" then
+			state.tooltipsView.retheme()
 		elseif state.activeSubTab == "console_ui" and state.uiView and type(state.uiView.sync) == "function" then
 			state.uiView.sync()
 		end
@@ -4164,11 +4807,17 @@ end
 
 function UI.SyncSettings()
 	if not state.built then return end
+	if state.setupV2View and type(state.setupV2View.retheme) == "function" then
+		state.setupV2View.retheme()
+	end
 	if state.settingsView and type(state.settingsView.sync) == "function" then
 		state.settingsView.sync()
 	end
 	if state.mailView and type(state.mailView.sync) == "function" then
 		state.mailView.sync()
+	end
+	if state.tooltipsView and type(state.tooltipsView.sync) == "function" then
+		state.tooltipsView.sync()
 	end
 	if state.uiView and type(state.uiView.sync) == "function" then
 		state.uiView.sync()
@@ -4180,7 +4829,6 @@ end
 
 function UI.SyncExtensions()
 	if not state.built then return end
-	syncSubTabVisibility()
 	if UI.IsShown() then
 		UI.Layout()
 		UI.Refresh("extension_changed")
@@ -4197,10 +4845,10 @@ function UI.Refresh(reason)
 	if reason == "manual_btn" and not hasSnapshotExt() and type(ns.EnsureSnapshotsLoaded) == "function" then
 		ns.EnsureSnapshotsLoaded(true)
 	end
-	syncSubTabVisibility()
 	if reason == "app_refresh" then
 		if state.activeSubTab == "console_settings"
 			or state.activeSubTab == "console_mail"
+			or state.activeSubTab == "console_tooltips"
 			or state.activeSubTab == "console_ui"
 			or state.activeSubTab == "console_data" then
 			UI.SyncSettings()

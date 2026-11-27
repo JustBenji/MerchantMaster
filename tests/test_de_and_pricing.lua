@@ -214,31 +214,50 @@ matPrices[10940] = origDust
 matPrices[10938] = origEss
 ns.InvalidatePriceCache()
 
+local function nearRGB(a, b)
+	return type(a) == "number" and type(b) == "number" and math.abs(a - b) < 0.02
+end
+
 local fakeTipLines = {}
 local fakeTip = {
 	GetItem = function() return "Green Sword", "|Hitem:90002|h[Green Sword]|h" end,
-	AddDoubleLine = function(_, l, r) fakeTipLines[#fakeTipLines + 1] = { l, r } end,
+	AddDoubleLine = function(_, l, r, rL, gL, bL, rR, gR, bR)
+		fakeTipLines[#fakeTipLines + 1] = { l, r, rL, gL, bL, rR, gR, bR }
+	end,
 	NumLines = function() return #fakeTipLines end,
 }
-check(ns.AppendEconTooltip(fakeTip) == true and #fakeTipLines == 4,
-	"Default-enabled DE tooltip with AS + breakdown must add 4 lines, got " .. tostring(#fakeTipLines))
-check(fakeTipLines[1][1] == "DE Value (est.)", "DE tooltip label must match 'DE Value (est.)'")
-check(fakeTipLines[2][1] == "DE Value (AS +20%)", "DE tooltip must include 'DE Value (AS +20%)' line")
-check(fakeTipLines[3][1]:find("80%%", 1, false) ~= nil and fakeTipLines[4][1]:find("20%%", 1, false) ~= nil,
-	"DE breakdown lines must include 80% and 20% outcome chances")
+check(ns.AppendEconTooltip(fakeTip) == true and #fakeTipLines == 5,
+	"Default-enabled DE tooltip with header + AS + breakdown must add 5 lines, got " .. tostring(#fakeTipLines))
+check(fakeTipLines[1][1] == "MerchantMaster Crafting & DE"
+	and nearRGB(fakeTipLines[1][3], 1.00) and nearRGB(fakeTipLines[1][4], 0.82) and nearRGB(fakeTipLines[1][5], 0.00),
+	"Econ tooltip line 1 must be Gold header 'MerchantMaster Crafting & DE'")
+check(fakeTipLines[2][1] == "  DE Value (est.)"
+	and nearRGB(fakeTipLines[2][3], 0.90) and nearRGB(fakeTipLines[2][4], 0.92) and nearRGB(fakeTipLines[2][5], 0.95)
+	and nearRGB(fakeTipLines[2][6], 0.96) and nearRGB(fakeTipLines[2][7], 0.97) and nearRGB(fakeTipLines[2][8], 0.99),
+	"DE tooltip label must match '  DE Value (est.)' with off-white RGB")
+check(fakeTipLines[3][1] == "  DE Value (AS +20%)"
+	and nearRGB(fakeTipLines[3][3], 0.78) and nearRGB(fakeTipLines[3][4], 0.64) and nearRGB(fakeTipLines[3][5], 1.00)
+	and nearRGB(fakeTipLines[3][6], 0.78) and nearRGB(fakeTipLines[3][7], 0.64) and nearRGB(fakeTipLines[3][8], 1.00),
+	"DE tooltip must include '  DE Value (AS +20%)' line with arcane purple RGB")
+check(fakeTipLines[4][1]:find("^    ") ~= nil and fakeTipLines[4][1]:find("80%%", 1, false) ~= nil
+	and fakeTipLines[5][1]:find("^    ") ~= nil and fakeTipLines[5][1]:find("20%%", 1, false) ~= nil
+	and nearRGB(fakeTipLines[4][3], 0.84) and nearRGB(fakeTipLines[4][4], 0.86) and nearRGB(fakeTipLines[4][5], 0.90),
+	"DE breakdown lines must use 4-space indent, include 80% and 20% outcome chances, and light slate RGB")
 -- Dedup check: calling again on same tooltip without clear must not duplicate
-check(ns.AppendEconTooltip(fakeTip) == false and #fakeTipLines == 4, "Duplicate call on same tooltip must not add extra lines")
+check(ns.AppendEconTooltip(fakeTip) == false and #fakeTipLines == 5, "Duplicate call on same tooltip must not add extra lines")
 
 -- GetTooltipData fallback (when GetItem() is nil, e.g., Retail/Classic TooltipDataProcessor / ShoppingTooltip)
 local dataTipLines = {}
 local dataTip = {
 	GetItem = function() return nil end,
 	GetTooltipData = function() return { itemID = 90002 } end,
-	AddDoubleLine = function(_, l, r) dataTipLines[#dataTipLines + 1] = { l, r } end,
+	AddDoubleLine = function(_, l, r, rL, gL, bL, rR, gR, bR)
+		dataTipLines[#dataTipLines + 1] = { l, r, rL, gL, bL, rR, gR, bR }
+	end,
 	NumLines = function() return #dataTipLines end,
 }
-check(ns.AppendEconTooltip(dataTip) == true and #dataTipLines == 4,
-	"GetTooltipData itemID fallback must append DE Value + AS + breakdown lines")
+check(ns.AppendEconTooltip(dataTip) == true and #dataTipLines == 5,
+	"GetTooltipData itemID fallback must append Gold header + DE Value + AS + breakdown lines")
 
 -- One-time SavedVariables migration flips previously saved tooltipDEValue = false to true
 MerchantMasterDB.tooltipDEValue = false
@@ -251,17 +270,70 @@ end
 check(MerchantMasterDB.tooltipDEValue == true and MerchantMasterDB.tooltipDEBreakdown == true and MerchantMasterDB.tooltipDEDefaultMigrated == true,
 	"ADDON_LOADED one-time migration must enable DE tooltips on existing profiles")
 
--- Turning off DE breakdown only shows header + AS lines
+-- Turning off DE breakdown only shows Gold header + DE Value + AS lines
 app.setTooltipDEBreakdown(false)
 fakeTipLines = {}
-fakeTip._mmLastItem = nil
-check(ns.AppendEconTooltip(fakeTip) == true and #fakeTipLines == 2,
-	"DE tooltip with breakdown disabled must add 2 summary lines (est. + AS), got " .. tostring(#fakeTipLines))
+check(ns.AppendEconTooltip(fakeTip) == true and #fakeTipLines == 3,
+	"DE tooltip with breakdown disabled must add 3 lines (header + est. + AS), got " .. tostring(#fakeTipLines))
+
+-- Turning off ttDEArcaneSalvager hides AS +20% line cleanly
+MerchantMasterDB.ttDEArcaneSalvager = false
+if ns.InvalidateEconTooltipCache then ns.InvalidateEconTooltipCache() end
+fakeTipLines = {}
+check(ns.AppendEconTooltip(fakeTip) == true and #fakeTipLines == 2
+	and fakeTipLines[1][1] == "MerchantMaster Crafting & DE" and fakeTipLines[2][1] == "  DE Value (est.)",
+	"ttDEArcaneSalvager = false must hide DE Value (AS +20%) line")
+MerchantMasterDB.ttDEArcaneSalvager = true
+if ns.InvalidateEconTooltipCache then ns.InvalidateEconTooltipCache() end
+
+-- Craft Cost + ttCraftProfit toggles and profit RGB colors
+do
+	local origCraftCostFn = ns.GetTooltipCraftCost
+	local origMkt90002 = matPrices[90002]
+	local stubCost = 1000
+	ns.GetTooltipCraftCost = function(id)
+		if id == 90002 then return stubCost end
+		return origCraftCostFn and origCraftCostFn(id) or nil
+	end
+	matPrices[90002] = 2000 -- 95% net = 1900 -> +900 profit when stubCost=1000
+	app.setTooltipDEValue(false)
+	app.setTooltipCraftCost(true)
+	MerchantMasterDB.ttCraftProfit = true
+	if ns.InvalidateEconTooltipCache then ns.InvalidateEconTooltipCache() end
+
+	fakeTipLines = {}
+	check(ns.AppendEconTooltip(fakeTip) == true and #fakeTipLines == 3,
+		"Craft tooltip with ttCraftProfit=true must add 3 lines (header + Craft Cost + Craft Profit), got " .. tostring(#fakeTipLines))
+	check(fakeTipLines[1][1] == "MerchantMaster Crafting & DE"
+		and fakeTipLines[2][1] == "  Craft Cost (est.)"
+		and fakeTipLines[3][1] == "  Craft Profit (est.)"
+		and nearRGB(fakeTipLines[3][6], 0.28) and nearRGB(fakeTipLines[3][7], 0.88) and nearRGB(fakeTipLines[3][8], 0.45),
+		"Positive Craft Profit must use '  Craft Profit (est.)' with positive green RGB")
+
+	stubCost = 3000 -- 95% net = 1900 -> -1100 loss
+	if ns.InvalidateEconTooltipCache then ns.InvalidateEconTooltipCache() end
+	fakeTipLines = {}
+	check(ns.AppendEconTooltip(fakeTip) == true and #fakeTipLines == 3
+		and nearRGB(fakeTipLines[3][6], 1.00) and nearRGB(fakeTipLines[3][7], 0.38) and nearRGB(fakeTipLines[3][8], 0.36),
+		"Negative Craft Profit must use negative red RGB")
+
+	MerchantMasterDB.ttCraftProfit = false
+	if ns.InvalidateEconTooltipCache then ns.InvalidateEconTooltipCache() end
+	fakeTipLines = {}
+	check(ns.AppendEconTooltip(fakeTip) == true and #fakeTipLines == 2
+		and fakeTipLines[2][1] == "  Craft Cost (est.)",
+		"ttCraftProfit = false must hide Craft Profit while keeping Craft Cost")
+
+	MerchantMasterDB.ttCraftProfit = true
+	app.setTooltipCraftCost(false)
+	ns.GetTooltipCraftCost = origCraftCostFn
+	matPrices[90002] = origMkt90002
+	if ns.InvalidateEconTooltipCache then ns.InvalidateEconTooltipCache() end
+end
 
 -- Turning off DE value adds 0 lines
 app.setTooltipDEValue(false)
 fakeTipLines = {}
-fakeTip._mmLastItem = nil
 check(ns.AppendEconTooltip(fakeTip) == false and #fakeTipLines == 0, "Disabled DE tooltip toggle must add 0 lines")
 
 -- Re-enable and verify ineligible / blacklisted item adds 0 lines
@@ -522,6 +594,211 @@ do
 	_G.UnitAura = origUnitAura
 	MerchantMasterDB.disenchantHelperAS = origHelperAS
 	MerchantMasterDB.disenchantCrafterArcaneSalvager = origCrafterAS
+end
+
+-- 11. Expanded DB2 packed equipment catalog, DB2 no-DE merge, hintMeta synthesis, estimated fallbacks, fast EV, obs check & mat price coverage
+do
+	MerchantMasterDB.deObservations = nil
+	ns.ClearDECache()
+	check(ns._defaultGetItemDEBreakdown == ns.GetItemDEBreakdown,
+		"ns._defaultGetItemDEBreakdown must reference default ns.GetItemDEBreakdown")
+
+	-- 11a. Packed DB2 world-drop BoE lookup (absent from craftable DE_ITEM_META)
+	check(type(ns.DE_EQUIP_PACKED) == "table" and ns.DE_EQUIP_PACKED[763] ~= nil and ns.DE_ITEM_META[763] == nil,
+		"World-drop BoE item 763 must be in DE_EQUIP_PACKED and absent from DE_ITEM_META")
+	check(ns.DE_EQUIP_PACKED[810] ~= nil and ns.DE_ITEM_META[810] == nil,
+		"World-drop Epic weapon 810 must be in DE_EQUIP_PACKED and absent from DE_ITEM_META")
+	local ok763, err763, meta763 = ns.IsItemDisenchantable(763)
+	check(ok763 == true and err763 == nil and meta763
+		and meta763.metaSource == "static_db2"
+		and meta763.quality == 2 and meta763.ilvl == 12
+		and meta763.classID == 4 and meta763.subclassID == 2
+		and meta763.equipLoc == "INVTYPE_WRIST",
+		"Packed DB2 item 763 must unpack exact armor metadata on cold GetItemInfo cache")
+	local bd763 = ns.GetItemDEBreakdown(763, nil, true)
+	check(bd763 and bd763.grossCopper == 270 and bd763.netCopper == 257 and bd763.isEstimated == false and bd763.estimateReason == nil,
+		"Packed DB2 item 763 must compute exact DE breakdown (257c net)")
+
+	local ok810, err810, meta810 = ns.IsItemDisenchantable(810)
+	check(ok810 == true and err810 == nil and meta810
+		and meta810.metaSource == "static_db2"
+		and meta810.quality == 4 and meta810.ilvl == 54
+		and meta810.classID == 2 and meta810.equipLoc == "INVTYPE_WEAPONMAINHAND",
+		"Packed DB2 item 810 must unpack exact weapon metadata")
+
+	-- 11b. DB2 ITEM_FLAG_NO_DISENCHANT merge into DE_NON_DISENCHANTABLE
+	check(type(ns.DE_DB2_NON_DISENCHANTABLE) == "table" and ns.DE_DB2_NON_DISENCHANTABLE[4614] == true,
+		"DB2 ITEM_FLAG_NO_DISENCHANT table must contain item 4614")
+	check(ns.DE_NON_DISENCHANTABLE[4614] == true,
+		"DE_DB2_NON_DISENCHANTABLE must be merged into DE_NON_DISENCHANTABLE at load time")
+	local ok4614, err4614 = ns.IsItemDisenchantable(4614)
+	check(ok4614 == false and err4614 == "blacklisted",
+		"DB2 NO_DISENCHANT item 4614 must be rejected as blacklisted")
+
+	-- 11c. hintMeta + GetItemInfoInstant synthesis for brand-new uncached item & scaled Browse ilvl override
+	MerchantMasterDB.deItemMetaCache = {}
+	local origInstant = _G.C_Item.GetItemInfoInstant
+	_G.C_Item.GetItemInfoInstant = function(arg)
+		if arg == 998001 then
+			return 998001, "Armor", "Plate", "INVTYPE_CHEST", 132630, 4, 4
+		end
+		if arg == 998002 then
+			return 998002, "Consumable", "Potion", "", 134830, 0, 1
+		end
+		if origInstant then return origInstant(arg) end
+		return nil
+	end
+	local okHint, errHint, metaHint = ns.IsItemDisenchantable(998001, nil, { quality = 2, ilvl = 12 })
+	check(okHint == true and errHint == nil and metaHint
+		and metaHint.metaSource == "browse_hint"
+		and metaHint.classID == 4 and metaHint.subclassID == 4
+		and metaHint.equipLoc == "INVTYPE_CHEST"
+		and metaHint.quality == 2 and metaHint.ilvl == 12,
+		"Brand-new uncached item with GetItemInfoInstant + hintMeta must synthesize browse_hint metadata")
+	check(MerchantMasterDB.deItemMetaCache[998001] == nil,
+		"browse_hint synthesis must not pollute MerchantMasterDB.deItemMetaCache")
+	local bdHint = ns.GetItemDEBreakdown(998001, nil, true, { quality = 2, ilvl = 12 })
+	check(bdHint and bdHint.netCopper == 257 and bdHint.isEstimated == false,
+		"GetItemDEBreakdown must forward hintMeta and price browse_hint item cleanly")
+
+	-- Ineligible item via GetItemInfoInstant + hintMeta must reject immediately (not uncached)
+	local okHintInelig, errHintInelig = ns.IsItemDisenchantable(998002, nil, { quality = 2, ilvl = 20 })
+	check(okHintInelig == false and errHintInelig == "ineligible",
+		"Consumable with GetItemInfoInstant + hintMeta must be rejected as ineligible")
+
+	-- Scaled Browse hintMeta.ilvl override on static item 763 (base ilvl 12 -> scaled ilvl 58) without cache collision or DB pollution
+	local bd763Base = ns.GetItemDEBreakdown(763, nil, true)
+	local bd763Scaled = ns.GetItemDEBreakdown(763, nil, true, { ilvl = 58 })
+	check(bd763Base and bd763Scaled and bd763Base.ilvl == 12 and bd763Scaled.ilvl == 58
+		and bd763Scaled.netCopper > bd763Base.netCopper,
+		"hintMeta.ilvl override must produce scaled breakdown without colliding with base memo")
+	check(MerchantMasterDB.deItemMetaCache[763] == nil,
+		"hintMeta.ilvl override must not pollute MerchantMasterDB.deItemMetaCache")
+	_G.C_Item.GetItemInfoInstant = origInstant
+
+	-- 11d. Estimated bracket fallbacks (ilvl > 99, low Epic 20..39, ilvl < 5)
+	matPrices[10978] = 2000 -- Small Glimmering Shard
+	matPrices[11084] = 3000 -- Large Glimmering Shard
+	matPrices[11138] = 4000 -- Small Glowing Shard
+	matPrices[11139] = 5000 -- Large Glowing Shard
+	ns.InvalidatePriceCache()
+
+	-- ilvl > 99 clamped to 99 (61..99 bracket)
+	stubItems[998010] = { "High Ilvl Chest", nil, 4, 105, 60, "Armor", "Plate", 1, "INVTYPE_CHEST", 1, 1000, 4, 4 }
+	local rowsHi, errHi, metaHi, estHi, reasonHi = ns.GetItemDEProfile(998010)
+	check(rowsHi ~= nil and errHi == nil and metaHi and metaHi.ilvl == 105
+		and estHi == true and reasonHi == "clamped_high_ilvl"
+		and rowsHi[1].matID == 20725 and rowsHi[1].amountOfMats == 1.666,
+		"ilvl > 99 must clamp to 61..99 bracket with isEstimated=true and reason='clamped_high_ilvl'")
+	local bdHi = ns.GetItemDEBreakdown(998010, nil, false)
+	check(bdHi and bdHi.isEstimated == true and bdHi.estimateReason == "clamped_high_ilvl"
+		and bdHi.grossCopper == 166600,
+		"GetItemDEBreakdown must stamp isEstimated & estimateReason for clamped_high_ilvl")
+
+	-- Low Epic ilvl 20..39 mapped to matching Rare shard (2-4, avg 3.0)
+	local lowEpicCases = {
+		{ id = 998011, ilvl = 24, shard = 10978 },
+		{ id = 998012, ilvl = 30, shard = 11084 },
+		{ id = 998013, ilvl = 34, shard = 11138 },
+		{ id = 998014, ilvl = 39, shard = 11139 },
+	}
+	for _, tc in ipairs(lowEpicCases) do
+		stubItems[tc.id] = { "Low Epic", nil, 4, tc.ilvl, 20, "Armor", "Cloth", 1, "INVTYPE_HEAD", 1, 500, 4, 1 }
+		local rLE, eLE, _, estLE, reasonLE = ns.GetItemDEProfile(tc.id)
+		check(rLE ~= nil and eLE == nil and #rLE == 1 and rLE[1].matID == tc.shard
+			and rLE[1].matRate == 1.0 and rLE[1].minAmount == 2 and rLE[1].maxAmount == 4 and rLE[1].amountOfMats == 3.0
+			and estLE == true and reasonLE == "estimated_low_epic",
+			"Low Epic ilvl " .. tc.ilvl .. " must map to shard " .. tc.shard .. " with estimated_low_epic")
+	end
+	local bdLE30 = ns.GetItemDEBreakdown(998012, nil, false)
+	check(bdLE30 and bdLE30.isEstimated == true and bdLE30.estimateReason == "estimated_low_epic"
+		and bdLE30.grossCopper == 9000,
+		"Low Epic ilvl 30 breakdown must price 3.0 x 3000c = 9000c")
+
+	-- ilvl < 5 clamped to 5 (5..15 bracket)
+	stubItems[998015] = { "Tiny Green Boots", nil, 2, 2, 1, "Armor", "Leather", 1, "INVTYPE_FEET", 1, 20, 4, 2 }
+	local rowsLo, errLo, _, estLo, reasonLo = ns.GetItemDEProfile(998015)
+	check(rowsLo ~= nil and errLo == nil and #rowsLo == 2
+		and estLo == true and reasonLo == "clamped_low_ilvl",
+		"ilvl 1..4 must clamp to 5..15 bracket with isEstimated=true and reason='clamped_low_ilvl'")
+	local bdLo = ns.GetItemDEBreakdown(998015, nil, true)
+	check(bdLo and bdLo.isEstimated == true and bdLo.estimateReason == "clamped_low_ilvl" and bdLo.netCopper == 257,
+		"ilvl 2 armor breakdown must match 5..15 bracket (257c net)")
+
+	-- 11e. GetFastDEExpectedValue parity with GetItemDEBreakdown & edge cases
+	MerchantMasterDB.deObservations = nil
+	ns.ClearDECache()
+	local parityItems = { 90001, 90002, 90003, 90004, 998010, 998012, 998015 }
+	for _, pid in ipairs(parityItems) do
+		for _, applyCut in ipairs({ true, false }) do
+			local bdP = ns.GetItemDEBreakdown(pid, nil, applyCut)
+			check(bdP ~= nil, "Parity breakdown must resolve for " .. tostring(pid))
+			local fvBase, fvEstBase = ns.GetFastDEExpectedValue(bdP.classID, bdP.quality, bdP.ilvl, false, applyCut)
+			local fvAS, fvEstAS = ns.GetFastDEExpectedValue(bdP.classID, bdP.quality, bdP.ilvl, true, applyCut)
+			check(fvBase == bdP.netCopper and fvEstBase == bdP.isEstimated,
+				"GetFastDEExpectedValue base parity failed for item " .. tostring(pid) .. " cut=" .. tostring(applyCut)
+					.. " (fast=" .. tostring(fvBase) .. " bd=" .. tostring(bdP.netCopper) .. ")")
+			check(fvAS == bdP.asNetCopper and fvEstAS == bdP.isEstimated,
+				"GetFastDEExpectedValue AS parity failed for item " .. tostring(pid) .. " cut=" .. tostring(applyCut)
+					.. " (fast=" .. tostring(fvAS) .. " bd=" .. tostring(bdP.asNetCopper) .. ")")
+		end
+	end
+	-- Edge cases: invalid quality/class/ilvl, out-of-band, and unpriced mats
+	local fvInvQ, fvInvQEst = ns.GetFastDEExpectedValue(4, 1, 20, false, true)
+	check(fvInvQ == nil and fvInvQEst == false, "Invalid quality 1 must return nil, false")
+	local fvInvC, fvInvCEst = ns.GetFastDEExpectedValue(0, 2, 20, false, true)
+	check(fvInvC == nil and fvInvCEst == false, "Invalid classID 0 must return nil, false")
+	local fvOOB, fvOOBEst = ns.GetFastDEExpectedValue(4, 4, 10, false, true)
+	check(fvOOB == nil and fvOOBEst == false, "Out-of-band Epic ilvl 10 must return nil, false")
+	local orig11084 = matPrices[11084]
+	matPrices[11084] = false
+	ns.InvalidatePriceCache()
+	local fvUnp, fvUnpEst = ns.GetFastDEExpectedValue(4, 4, 30, false, true)
+	check(fvUnp == nil and fvUnpEst == true, "Unpriced estimated bucket must return nil, true")
+	matPrices[11084] = orig11084
+	ns.InvalidatePriceCache()
+
+	-- 11f. HasDEObservations O(1) check
+	MerchantMasterDB.deObservations = nil
+	ns.ClearDECache()
+	check(ns.HasDEObservations(90001, 4, 2, 12) == false, "HasDEObservations false with 0 casts")
+	ns.RecordDEObservation(90001, { [10940] = 2 }, { source = "manual" })
+	ns.RecordDEObservation(90001, { [10940] = 2 }, { source = "manual" })
+	check(ns.HasDEObservations(90001, 4, 2, 12) == false, "HasDEObservations false below 3 casts")
+	ns.RecordDEObservation(90001, { [10940] = 2 }, { source = "manual" })
+	check(ns.HasDEObservations(90001, 4, 2, 12) == true, "HasDEObservations true at 3 casts")
+	check(ns.HasDEObservations(763, 4, 2, 12) == true, "HasDEObservations true via shared c:q:ilvl bucket")
+	check(ns.HasDEObservations(90002, 2, 2, 12) == false, "HasDEObservations false for unrecorded bucket")
+
+	-- 11g. GetDEMaterialPriceCoverage across all 24 enchanting mats
+	local cov1 = ns.GetDEMaterialPriceCoverage()
+	check(type(cov1) == "table" and cov1.total == 24
+		and cov1.priced + cov1.missing == 24 and #cov1.missingNames == cov1.missing,
+		"GetDEMaterialPriceCoverage must cover all 24 mats cleanly")
+	local savedMatPrices = {}
+	for matID in pairs(ns.DE_MAT_INFO) do
+		savedMatPrices[matID] = matPrices[matID]
+		matPrices[matID] = 1000
+	end
+	ns.InvalidatePriceCache()
+	local covFull = ns.GetDEMaterialPriceCoverage()
+	check(covFull.total == 24 and covFull.priced == 24 and covFull.missing == 0 and #covFull.missingNames == 0,
+		"GetDEMaterialPriceCoverage reports 24/24 priced when all mats have prices")
+	matPrices[10940] = false
+	matPrices[20725] = false
+	ns.InvalidatePriceCache()
+	local covMiss2 = ns.GetDEMaterialPriceCoverage()
+	check(covMiss2.total == 24 and covMiss2.priced == 22 and covMiss2.missing == 2 and #covMiss2.missingNames == 2,
+		"GetDEMaterialPriceCoverage reports 22/24 priced and 2 missingNames when 2 mats are unpriced")
+	for matID in pairs(ns.DE_MAT_INFO) do
+		matPrices[matID] = savedMatPrices[matID]
+	end
+	stubItems[998010] = nil
+	stubItems[998011] = nil
+	stubItems[998012] = nil
+	stubItems[998013] = nil
+	stubItems[998014] = nil
+	stubItems[998015] = nil
 end
 
 -- Clean up learner state & restore stubs

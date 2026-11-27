@@ -532,17 +532,34 @@ end
 local function buildCharWealthDetail(char,snap)
     local wTbl=db().wealth
     local stored=wTbl and wTbl[char]
-    if type(stored)=="table" and type(stored.cats)=="table" then
-        local liveCats={
-            bags=dedupeWealthList(stored.cats.bags,"bags"),
-            bank=dedupeWealthList(stored.cats.bank,"bank"),
-            mail=dedupeWealthList(stored.cats.mail,"mail"),
-            gear=dedupeWealthList(stored.cats.gear,"gear"),
-        }
-        appendLiveListed(char,liveCats)
-        return {at=stored.at,econ=stored.econ,cats=liveCats}
-    end
     local h=H(); local hostDB=_G.MerchantMasterDB or {}
+    if type(stored)=="table" and type(stored.cats)=="table" then
+        local charEcon=Store.DeriveEcon(char,stored.econ or (snap and snap.econ))
+        local active=(h and h.DetectActiveEconomy and h.DetectActiveEconomy()) or charEcon
+        local liveCats={bags={},bank={},mail={},gear={}}
+        local canValue=(ns.Capture and ns.Capture.ValueWealthItem and h~=nil)
+        for _,catKey in ipairs({"bags","bank","mail","gear"}) do
+            local deduped=dedupeWealthList(stored.cats[catKey],catKey)
+            local dst=liveCats[catKey]
+            for _,it in ipairs(deduped) do
+                if type(it)=="table" then
+                    local copy={}; for k,v in pairs(it) do copy[k]=v end
+                    local id=tonumber(copy.id)
+                    if id and id>0 and canValue then
+                        local unit,basis=ns.Capture.ValueWealthItem(h,hostDB,charEcon,active,id,copy.bound,catKey)
+                        unit=floor((tonumber(unit) or 0)+0.5)
+                        copy.unit=unit
+                        copy.total=floor((copy.qty or 0)*unit+0.5)
+                        if basis and basis~="" then copy.basis=basis end
+                    end
+                    dst[#dst+1]=copy
+                end
+            end
+            tsort(dst,function(a,b) if (a.total or 0)~=(b.total or 0) then return (a.total or 0)>(b.total or 0) end; return tostring(a.name or "")<tostring(b.name or "") end)
+        end
+        appendLiveListed(char,liveCats)
+        return {at=stored.at,econ=stored.econ or charEcon,cats=liveCats,revalued=canValue}
+    end
     local charTbl=hostDB.chars and hostDB.chars[char]
     local cats={bags={},bank={},mail={},gear={},listed={}}
     local charEcon=Store.DeriveEcon(char,snap and snap.econ)
@@ -747,14 +764,15 @@ local function portfolio(f,from,to,seriesOnly)
                     end
                 end
             end
-            local cBags=s.bags~=nil and s.bags or charItemSum.bags
-            local cBank=s.bank~=nil and s.bank or charItemSum.bank
-            local cMail=s.mail~=nil and s.mail or charItemSum.mail
-            local cGear=s.gear~=nil and s.gear or charItemSum.gear
-            latestBags=latestBags+cBags; latestBank=latestBank+cBank; latestMail=latestMail+cMail; latestGear=latestGear+cGear
+            local isRevalued=(detail and (detail.synthetic or detail.revalued)) and true or false
             local accountedInv=charItemSum.bags+charItemSum.bank+charItemSum.mail+charItemSum.gear
+            local cBags=(isRevalued and accountedInv>0) and charItemSum.bags or (s.bags~=nil and s.bags or charItemSum.bags)
+            local cBank=(isRevalued and accountedInv>0) and charItemSum.bank or (s.bank~=nil and s.bank or charItemSum.bank)
+            local cMail=(isRevalued and accountedInv>0) and charItemSum.mail or (s.mail~=nil and s.mail or charItemSum.mail)
+            local cGear=(isRevalued and accountedInv>0) and charItemSum.gear or (s.gear~=nil and s.gear or charItemSum.gear)
+            latestBags=latestBags+cBags; latestBank=latestBank+cBank; latestMail=latestMail+cMail; latestGear=latestGear+cGear
             local invItems=s.items or 0
-            if detail and detail.synthetic and accountedInv>0 and accountedInv~=invItems then
+            if isRevalued and (accountedInv>0 or detail.revalued) and accountedInv~=invItems then
                 invItems=accountedInv; reconciledSynthetic=true
             end
             if accountedInv==0 and invItems>0 and needle=="" then
@@ -764,7 +782,7 @@ local function portfolio(f,from,to,seriesOnly)
             end
             local cListed=s.listed or 0
             local hasLotTable=db().lots and db().lots[char]~=nil
-            if (hasLotTable or (detail and detail.synthetic and charItemSum.listed>0)) and charItemSum.listed~=cListed then
+            if (hasLotTable or (isRevalued and charItemSum.listed>0)) and charItemSum.listed~=cListed then
                 cListed=charItemSum.listed; reconciledSynthetic=true
             end
             if charItemSum.listed==0 and cListed>0 and needle=="" then
@@ -1237,9 +1255,11 @@ end
 function Model.Compute(view,filters)
     filters=filters or {}; view=view or "overview"; local h=H()
     local priceSrc=_G.MerchantMasterDB and tostring(_G.MerchantMasterDB.priceSource or "auto") or "auto"
-    -- These two views value synthetic loot at today's price; item history does not.
-    local marketView=view=="overview" or view=="ledger"
-    local sig=tconcat({view=="items" and (Store.accountingVersion or Store.version) or Store.version,view,filters.char or "all",filters.type or "all",filters.zone or "all",filters.period or "30d",filters.search or "",tostring(filters.knownCostOnly~=false),marketView and h and tostring(h.priceCacheEpoch or 0) or "0",marketView and priceSrc or ""},"|")
+    local bgMode=_G.MerchantMasterDB and tostring(_G.MerchantMasterDB.backgroundPriceMode or "local") or "local"
+    -- These views value synthetic/held items at current price; historical item ledgers do not.
+    local marketView=view=="overview" or view=="ledger" or view=="portfolio"
+    local priceRev=marketView and h and tostring((h.GetPriceDataRevision and h.GetPriceDataRevision()) or h.priceCacheEpoch or 0) or "0"
+    local sig=tconcat({view=="items" and (Store.accountingVersion or Store.version) or Store.version,view,filters.char or "all",filters.type or "all",filters.zone or "all",filters.period or "30d",filters.search or "",tostring(filters.knownCostOnly~=false),priceRev,marketView and (priceSrc..":"..bgMode) or ""},"|")
         .."|"..Store.DayKey().."|"..tostring(filters.mode or filters.itemMode or "").."|"..tostring(filters.rankSeparate)
         .."|"..filterSetKey(filters.source or filters.sources).."|"..filterSetKey(filters.types).."|"..tostring(filters.groupBy).."|"..tostring(filters.minRarity).."|"..filterSetKey(filters.rarities)
         .."|"..tostring(filters.prof or filters.group).."|"..tostring(filters.econ).."|"..tostring(filters.faction).."|"..filterSetKey(filters.chars)
@@ -1265,7 +1285,9 @@ function Model.Compute(view,filters)
 end
 
 local function ledgerRows(filters)
-    local key=tconcat({tostring(Store.version),tostring(filters.char),tostring(filters.econ),tostring(filters.faction),filterSetKey(filters.chars),tostring(filters.period),tostring(filters.type),tostring(filters.ledgerPreset),tostring(filters.zone),tostring(filters.search),filterSetKey(filters.sources or filters.source),filterSetKey(filters.types),tostring(filters.minRarity),filterSetKey(filters.rarities),tostring(filters.prof or filters.group),tostring(filters.coalesce)},"|")
+    local h=H()
+    local priceRev=tostring((h and h.GetPriceDataRevision and h.GetPriceDataRevision()) or (h and h.priceCacheEpoch) or 0)
+    local key=tconcat({tostring(Store.version),priceRev,tostring(filters.char),tostring(filters.econ),tostring(filters.faction),filterSetKey(filters.chars),tostring(filters.period),tostring(filters.type),tostring(filters.ledgerPreset),tostring(filters.zone),tostring(filters.search),filterSetKey(filters.sources or filters.source),filterSetKey(filters.types),tostring(filters.minRarity),filterSetKey(filters.rarities),tostring(filters.prof or filters.group),tostring(filters.coalesce)},"|")
     local cached=ledgerCache[key]; if cached then return cached.rows,cached.totals end
     local from,to=Model.PeriodBounds(filters.period); local rows={}; local needle=strlower(filters.search or "")
     local days={}; for d in pairs(db().days or {}) do if d>=from and d<=to then days[#days+1]=d end end; tsort(days,function(a,b)return a>b end)
@@ -1330,7 +1352,8 @@ function Model.QueryLedger(filters,cursor,limit)
             r.auctionsCount=count>0 and count or 1; r.stackSize=(r.extra and r.extra.stackSize) or eventStackSizes[tostring((r.rawEventIDs or {})[1])] or r.qty
         end
     end
-    local cacheKey=tconcat({tostring(Store.version),tostring(filters.char),tostring(filters.econ),tostring(filters.faction),filterSetKey(filters.chars),tostring(filters.period),tostring(filters.type),tostring(filters.ledgerPreset),tostring(filters.zone),tostring(filters.search),filterSetKey(filters.sources or filters.source),filterSetKey(filters.types),tostring(filters.minRarity),filterSetKey(filters.rarities),tostring(filters.prof or filters.group),tostring(filters.coalesce)},"|")
+    local h=H()
+    local cacheKey=tconcat({tostring(Store.version),tostring((h and h.GetPriceDataRevision and h.GetPriceDataRevision()) or (h and h.priceCacheEpoch) or 0),tostring(filters.char),tostring(filters.econ),tostring(filters.faction),filterSetKey(filters.chars),tostring(filters.period),tostring(filters.type),tostring(filters.ledgerPreset),tostring(filters.zone),tostring(filters.search),filterSetKey(filters.sources or filters.source),filterSetKey(filters.types),tostring(filters.minRarity),filterSetKey(filters.rarities),tostring(filters.prof or filters.group),tostring(filters.coalesce)},"|")
     local cached=ledgerCache[cacheKey]; local totals=cached and cached.queryTotals
     if not totals then totals={qty=0,inflow=0,outflow=0,net=0,fee=0,cogs=0,profit=0}
     for _,r in ipairs(matchedRows) do

@@ -726,7 +726,7 @@ do
 
     local function seedHouse(ek, minB, mktV, qty, numA)
         _G.MERCHANTMASTER_LOAD_SNAPSHOTS("META", ek,
-            string.format([[return {v=1,updatedAt=%d,source="blizzard",windowDays=30,itemCount=1,heatmapCount=0}]], nowTs - 120))
+            string.format([[return {v=1,updatedAt=%d,source="blizzard",windowDays=30,itemCount=1,heatmapCount=0}]], nowTs - 60))
         local entry = string.format("13468:%s,%s,%s,%s,%s,%s",
             encB32(minB), encB32(mktV), encB32(0), encB32(qty), encB32(numA), encB32(0))
         _G.MERCHANTMASTER_LOAD_SNAPSHOTS("LATEST", ek, entry)
@@ -1121,6 +1121,249 @@ do
 
     app.setTab("dashboard")
     drain()
+    if Theme.SetSkin then Theme.SetSkin(origSkin) end
+    Theme.SetMode(origMode)
+end
+
+-- 13. Permanent CRAFTING BREAKDOWN + USED IN Sections (Shadow Oil, Vendor, Drop, Unused)
+do
+    local origSkin = Theme.GetSkin and Theme.GetSkin() or "standard"
+    local origMode = Theme.GetMode and Theme.GetMode() or "dark"
+    local left = assert(DA.leftCard, "DA.leftCard must exist for Crafting Breakdown tests")
+
+    local extraSeed = {
+        [3824]  = { 11000, 11400, 11800, 12200, 12600, 13000, 13500 }, -- Shadow Oil
+        [3818]  = { 1500,  1550,  1600,  1680,  1720,  1780,  1850  }, -- Fadeleaf
+        [3369]  = { 900,   920,   950,   980,   1000,  1050,  1100  }, -- Grave Moss
+        [3372]  = { 40,    40,    40,    40,    40,    40,    40    }, -- Leaded Vial
+        [13459] = { 82000, 84000, 86000, 89000, 91000, 93000, 95000 }, -- Greater Shadow Protection Potion
+        [4304]  = { 1100,  1150,  1200,  1250,  1300,  1350,  1400  }, -- Thick Leather
+    }
+    local savedPrices, savedDaily = {}, {}
+    for id, series in pairs(extraSeed) do
+        savedPrices[id] = db.ahPrices[econ][id]
+        savedDaily[id] = db.ahDaily[econ][id]
+        local buckets = {}
+        for i = 1, 7 do
+            buckets[i] = { d = day - 7 + i, lastP = series[i], lastQ = 18 - i, at = nowTs - (7 - i) * 86400 }
+        end
+        db.ahDaily[econ][id] = buckets
+        db.ahPrices[econ][id] = { price = series[7], qty = 14, at = nowTs - 90 }
+    end
+    ns.InvalidatePriceCache()
+
+    -- 13a. Shadow Oil (itemID=3824) opened as kind="item" from Watchlist shows full Crafting Breakdown + Used In
+    app.openDeepAnalysis({ kind = "item", itemID = 3824, name = "Shadow Oil" }, { tab = "watchlist", wasQuickLookOpen = false })
+    drain()
+    local stSO = DA.GetState()
+    check(btnText(DA.header.returnBtn) == "< Back to Watchlist",
+        "Watchlist return button displays '< Back to Watchlist', got: " .. btnText(DA.header.returnBtn))
+    check(stSO.target and stSO.target.kind == "item" and stSO.target.itemID == 3824,
+        "Shadow Oil retains kind='item' target identity while showing crafting breakdown")
+    check(stSO.hasCraftBreakdown == true and stSO.craftSourceKind == "crafted" and stSO.reagentUsedCount == 3,
+        string.format("Shadow Oil displays Crafting Breakdown with 3 reagents (hasCraft=%s, src=%s, reagents=%s)",
+            tostring(stSO.hasCraftBreakdown), tostring(stSO.craftSourceKind), tostring(stSO.reagentUsedCount)))
+    check(left.econBarCard.craftFrame:IsShown() and not left.econBarCard.rangeFrame:IsShown(),
+        "Craftable item Shadow Oil switches econBarCard to 3-bar Craft Cost / Net Sale / Net Profit")
+    check(plain(left.reagTitle:GetText()):find("CRAFTING BREAKDOWN", 1, true) ~= nil
+        and plain(left.reagTitle:GetText()):find("Alchemy", 1, true) ~= nil,
+        "Shadow Oil Crafting Breakdown title names Alchemy: " .. plain(left.reagTitle:GetText()))
+    check(DA.chart7d._lastSeries and #DA.chart7d._lastSeries >= 2,
+        "Shadow Oil 7d chart plots both Sell Price and Craft Cost series")
+    check(left.colHeaders[1]:IsShown() and select(4, left.reagTitle:GetTextColor()) >= 0.9,
+        "Active Crafting Breakdown keeps full column headers and un-muted title opacity")
+
+    local soShareCount = 0
+    for _, f in ipairs(createdFrames) do
+        if f._parent == left and f:IsShown() and f._hasShareBar == true then
+            soShareCount = soShareCount + 1
+        end
+    end
+    check(soShareCount >= 2, "Shadow Oil market reagents render Cost Share bars, got: " .. tostring(soShareCount))
+
+    check(stSO.usedInTotalCount >= 6 and stSO.usedInShownCount >= 6,
+        "Shadow Oil shows downstream Used In recipes, total=" .. tostring(stSO.usedInTotalCount))
+    check(left.usedInTitle:IsShown() and plain(left.usedInTitle:GetText()):find("USED IN", 1, true) ~= nil,
+        "Used In section header renders directly below Crafting Breakdown")
+    check(DA.usedInRows[1] and DA.usedInRows[1]:IsShown() and DA.usedInRows[1].itemID == 13459,
+        "Used In sorts highest-priced downstream product (Greater Shadow Protection Potion 13459) first, got: "
+        .. tostring(DA.usedInRows[1] and DA.usedInRows[1].itemID))
+
+    local function pointYLocal(f)
+        local pt = f and f._points and f._points[1]
+        return tonumber(pt and (pt[5] or pt.y)) or 0
+    end
+    local lastReagBtn
+    for _, f in ipairs(createdFrames) do
+        if f._parent == left and f:IsShown() and f._hasShareBar ~= nil and f.qtyFs and f.itemID == 3372 then
+            lastReagBtn = f
+        end
+    end
+    check(lastReagBtn ~= nil, "Shadow Oil Leaded Vial (3372) reagent row must be visible")
+    local divY = pointYLocal(left.usedInDivider)
+    local lrY = pointYLocal(lastReagBtn)
+    check(math.abs(divY) >= math.abs(lrY) + 26,
+        "Used In divider sits cleanly below last Shadow Oil reagent row without overlap")
+
+    -- Clicking Used In row drills into Greater Shadow Protection Potion and Back returns to Shadow Oil
+    DA.usedInRows[1]:Click("LeftButton")
+    drain()
+    check(DA.GetState().stackDepth == 1 and DA.GetState().target and DA.GetState().target.itemID == 13459,
+        "Clicking Shadow Oil Used In row drills into Greater Shadow Protection Potion (13459)")
+    check(btnText(DA.header.returnBtn):find("< Back to Shadow Oil", 1, true) ~= nil,
+        "Return button after Used In drill-down names Shadow Oil, got: " .. btnText(DA.header.returnBtn))
+    DA.header.returnBtn:Click("LeftButton")
+    drain()
+    check(DA.GetState().stackDepth == 0 and DA.GetState().target and DA.GetState().target.itemID == 3824,
+        "< Return restores Shadow Oil (3824)")
+
+    -- 13b. Non-craftable Vendor item Crystal Vial (8925) shows muted 'Not craftable | Vendor' + active Used In
+    app.openDeepAnalysis({ kind = "item", itemID = 8925, name = "Crystal Vial" })
+    drain()
+    local stVial = DA.GetState()
+    check(stVial.hasCraftBreakdown == false and stVial.craftSourceKind == "vendor",
+        "Crystal Vial classifies as non-craftable Vendor, got: " .. tostring(stVial.craftSourceKind))
+    local vialTxt = plain(left.reagEmptyFs:GetText())
+    check(left.reagEmptyFs:IsShown() and vialTxt:find("Not craftable", 1, true) ~= nil and vialTxt:find("Vendor", 1, true) ~= nil,
+        "Crystal Vial shows 'Not craftable | Vendor', got: " .. vialTxt)
+    check(select(4, left.reagTitle:GetTextColor()) < 0.8 and select(4, left.reagEmptyFs:GetTextColor()) < 0.8,
+        "Non-craftable Vendor Crafting Breakdown renders grayed-out muted text")
+    check(not left.colHeaders[1]:IsShown(), "Non-craftable Crafting Breakdown hides reagent column headers")
+    check(stVial.usedInTotalCount > 0 and DA.usedInRows[1]:IsShown(),
+        "Vendor item Crystal Vial still renders downstream Used In recipes")
+
+    -- 13c. Thick Leather (4304): craftable from Heavy Leather AND >10 Used In recipes + Show All toggle
+    app.openDeepAnalysis({ kind = "item", itemID = 4304, name = "Thick Leather" })
+    drain()
+    local stTL = DA.GetState()
+    check(stTL.hasCraftBreakdown == true and stTL.craftSourceKind == "crafted" and stTL.reagentUsedCount >= 1,
+        "Thick Leather shows Leatherworking craft breakdown from Heavy Leather")
+    check(stTL.usedInTotalCount > 10 and stTL.usedInShownCount == 10 and left.usedInToggleBtn:IsShown(),
+        string.format("Thick Leather caps initial Used In to top 10 of %s with Show all toggle", tostring(stTL.usedInTotalCount)))
+    left.usedInToggleBtn:Click("LeftButton")
+    drain()
+    local stTLExp = DA.GetState()
+    check(stTLExp.usedInExpanded == true and stTLExp.usedInShownCount == stTLExp.usedInTotalCount,
+        "Clicking Show all expands all Used In recipes for Thick Leather")
+
+    -- 13c2. Genuine Non-craftable Drop items: Runecloth (14047) & Black Lotus (13468) show muted Drop + active Used In
+    app.openDeepAnalysis({ kind = "item", itemID = 14047, name = "Runecloth" })
+    drain()
+    local stRC = DA.GetState()
+    local rcTxt = plain(left.reagEmptyFs:GetText())
+    check(stRC.hasCraftBreakdown == false and stRC.craftSourceKind == "drop"
+        and rcTxt:find("Not craftable", 1, true) ~= nil and rcTxt:find("Drop", 1, true) ~= nil,
+        "Runecloth shows 'Not craftable | Drop', got: " .. rcTxt)
+    check(select(4, left.reagTitle:GetTextColor()) < 0.8 and select(4, left.reagEmptyFs:GetTextColor()) < 0.8,
+        "Non-craftable Drop Runecloth renders grayed-out muted text")
+    check(stRC.usedInTotalCount > 10 and stRC.usedInShownCount == 10,
+        "Runecloth shows Used In recipes downstream, total=" .. tostring(stRC.usedInTotalCount))
+
+    app.openDeepAnalysis({ kind = "item", itemID = 13468, name = "Black Lotus" })
+    drain()
+    local stBL = DA.GetState()
+    local blTxt = plain(left.reagEmptyFs:GetText())
+    check(stBL.hasCraftBreakdown == false and stBL.craftSourceKind == "drop"
+        and blTxt:find("Drop (Herbalism 300)", 1, true) ~= nil,
+        "Black Lotus shows 'Drop (Herbalism 300)', got: " .. blTxt)
+    check(stBL.usedInTotalCount > 0 and DA.usedInRows[1]:IsShown(),
+        "Black Lotus displays downstream Flask Used In recipes")
+
+    -- 13d. Non-craftable and Unused item Unscanned Relic (999991) shows both muted grayed-out states
+    app.openDeepAnalysis({ kind = "item", itemID = 999991, name = "Unscanned Relic" })
+    drain()
+    local stNone = DA.GetState()
+    check(stNone.craftSourceKind == "not_craftable" and plain(left.reagEmptyFs:GetText()) == "Not craftable",
+        "Unknown/unused item displays exact 'Not craftable', got: " .. plain(left.reagEmptyFs:GetText()))
+    check(stNone.usedInTotalCount == 0 and stNone.usedInShownCount == 0 and left.usedInEmptyFs:IsShown()
+        and plain(left.usedInEmptyFs:GetText()):find("Not used in any", 1, true) ~= nil,
+        "Unused item displays muted 'Not used in any crafting recipes.', got: " .. plain(left.usedInEmptyFs:GetText()))
+    check(select(4, left.usedInTitle:GetTextColor()) < 0.8 and select(4, left.usedInEmptyFs:GetTextColor()) < 0.8,
+        "Empty Used In section renders grayed-out muted title and message")
+
+    -- 13e. Craftable end-game weapon Sageblade (22383): active Crafting Breakdown + muted empty Used In
+    app.openDeepAnalysis({ kind = "item", itemID = 22383, name = "Sageblade" })
+    drain()
+    local stSage = DA.GetState()
+    check(stSage.hasCraftBreakdown == true and stSage.reagentUsedCount >= 4
+        and stSage.usedInTotalCount == 0 and left.usedInEmptyFs:IsShown()
+        and select(4, left.usedInEmptyFs:GetTextColor()) < 0.8,
+        "Craftable end-game gear Sageblade shows active Crafting Breakdown and grayed-out empty Used In underneath")
+
+    -- 14. Back-button restores parent scroll offset, Crafting Breakdown section, and Used In expanded state
+    local function findClickableReagentRow(minItemID)
+        for _, f in ipairs(createdFrames) do
+            if f._parent == left and f:IsShown() and f._hasShareBar ~= nil and f.qtyFs and f.clickable == true then
+                if not minItemID or f.itemID == minItemID then return f end
+            end
+        end
+        return nil
+    end
+    app.setTab("recipes")
+    drain()
+    app.openDeepAnalysis({ kind = "recipe", itemID = 13512, name = "Flask of Supreme Power" })
+    drain()
+    local mw = DA.scrollFrame and DA.scrollFrame:GetScript("OnMouseWheel")
+    check(type(mw) == "function", "DA.scrollFrame exposes OnMouseWheel for scroll restoration check")
+    mw(DA.scrollFrame, -4)
+    local scrolledBefore = DA.GetState().scrollOffset or 0
+    check(scrolledBefore > 0, "Mouse wheel scrolls Flask Deep Analysis down (offset=" .. tostring(scrolledBefore) .. ")")
+    local flaskReagBtn = findClickableReagentRow()
+    check(flaskReagBtn ~= nil, "Flask clickable Crafting Breakdown reagent row is visible")
+    flaskReagBtn:Click("LeftButton")
+    drain()
+    check(DA.GetState().stackDepth == 1 and DA.GetState().target and DA.GetState().target.itemID == flaskReagBtn.itemID,
+        "Clicking reagent drilled into child item " .. tostring(flaskReagBtn.itemID))
+    DA.header.returnBtn:Click("LeftButton")
+    drain()
+    local restoredOff = DA.GetState().scrollOffset or 0
+    check(DA.GetState().stackDepth == 0 and DA.GetState().target and DA.GetState().target.itemID == 13512
+        and math.abs(restoredOff - scrolledBefore) <= 2,
+        "Back button restores parent Flask item at prior scroll offset (" .. tostring(restoredOff) .. " vs " .. tostring(scrolledBefore) .. ")")
+
+    -- 14b. Drilling from Crafting Breakdown at scroll=0 jumps back straight to Crafting Breakdown section
+    app.setTab("recipes")
+    drain()
+    app.openDeepAnalysis({ kind = "recipe", itemID = 13512, name = "Flask of Supreme Power" })
+    drain()
+    check((DA.GetState().scrollOffset or 0) == 0, "Fresh Deep Analysis starts at scrollOffset=0")
+    local topReagBtn = findClickableReagentRow()
+    check(topReagBtn ~= nil, "Reagent row visible for un-scrolled drill check")
+    topReagBtn:Click("LeftButton")
+    drain()
+    DA.header.returnBtn:Click("LeftButton")
+    drain()
+    check((DA.GetState().scrollOffset or 0) > 0,
+        "Back after un-scrolled Crafting Breakdown click jumps straight to Crafting Breakdown (offset=" .. tostring(DA.GetState().scrollOffset) .. ")")
+
+    -- 14c. Used In Show All expansion and Used In scroll section restore cleanly on Back
+    app.setTab("recipes")
+    drain()
+    app.openDeepAnalysis({ kind = "item", itemID = 4304, name = "Thick Leather" })
+    drain()
+    if left.usedInToggleBtn and left.usedInToggleBtn:IsShown() then
+        left.usedInToggleBtn:Click("LeftButton")
+        drain()
+    end
+    check(DA.GetState().usedInExpanded == true, "Thick Leather Used In expanded before drill-down")
+    check(DA.usedInRows[1] and DA.usedInRows[1]:IsShown(), "Thick Leather Used In row[1] visible")
+    DA.usedInRows[1]:Click("LeftButton")
+    drain()
+    DA.header.returnBtn:Click("LeftButton")
+    drain()
+    check(DA.GetState().target and DA.GetState().target.itemID == 4304
+        and DA.GetState().usedInExpanded == true
+        and (DA.GetState().scrollOffset or 0) > 0,
+        "Back from Thick Leather Used In drill-down restores usedInExpanded and scrolls to Used In section")
+
+    -- Restore seeded prices & dashboard state
+    app.setTab("dashboard")
+    drain()
+    for id in pairs(extraSeed) do
+        db.ahPrices[econ][id] = savedPrices[id]
+        db.ahDaily[econ][id] = savedDaily[id]
+    end
+    ns.InvalidatePriceCache()
     if Theme.SetSkin then Theme.SetSkin(origSkin) end
     Theme.SetMode(origMode)
 end

@@ -386,8 +386,8 @@ for _, mode in ipairs({ "dark", "light" }) do
 		check(ui.brandTitleFs:GetParent() == ui.skinHeader and ui.toolbar:GetParent() == ui.skinHeader, key .. " header hosts brand and toolbar")
 		check(ui.searchWrap and ui.searchWrap:IsShown(), key .. " shows sidebar searchWrap")
 		check(#ui.sidebarSections == 6, key .. " has all 6 sidebar sections")
-		check(#ui.navOrder == 17, key .. " has all 17 sidebar nav buttons")
-		check(ui.navBtns.watchlist ~= nil, key .. " has watchlist nav button")
+		check(#ui.navOrder == 18, key .. " has all 18 sidebar nav buttons")
+		check(ui.navBtns.watchlist ~= nil and ui.navBtns.sniper_de ~= nil, key .. " has watchlist and sniper_de nav buttons")
 		check(ui.navBtns.auction_house == nil, key .. " has no auction_house nav button")
 		local sidebarH = 730 - top - bottom - ui.skinHeader:GetHeight()
 		local walletTopOffset = -(sidebarH - 24 - ui.walletCard:GetHeight())
@@ -438,7 +438,7 @@ for _, mode in ipairs({ "dark", "light" }) do
 					key, tostring(basketY), tostring(basketY - basketH), si, band.title, tostring(band.top), tostring(band.bottom)))
 		end
 		local _, _, _, _, lastNavY = ui.navOrder[#ui.navOrder]:GetPoint(1)
-		check(lastNavY == -466, key .. " 17th sidebar nav button sits at customNavY[17] = -466, got " .. tostring(lastNavY))
+		check(lastNavY == -468, key .. " 18th sidebar nav button sits at customNavY[18] = -468, got " .. tostring(lastNavY))
 		check(lastNavY - ui.navOrder[#ui.navOrder]:GetHeight() > walletTopOffset,
 			key .. " final sidebar nav button stays clear above walletCard")
 		check(ui.skinBasketNav:IsShown(), key .. " exposes the Shopping Basket navigation row")

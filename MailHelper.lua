@@ -93,6 +93,11 @@ local function formatCopperSimple(copper)
     return string.format("%dc", c)
 end
 
+local function trimOuter(raw)
+    if hasSecret(raw) or type(raw) ~= "string" then return "" end
+    return (raw:match("^%s*(.-)%s*$")) or ""
+end
+
 local state = {
     active = false,
     mode = nil,
@@ -102,21 +107,152 @@ local state = {
     clickStepper = false,
     serial = 0,
     lastSlot = nil,
+    lastAttTake = nil,
     slotRetries = {},
     seenCOD = {},
     seenBlocked = {},
     lootedCount = 0,
     lootedCopper = 0,
+    fetchedUnits = 0,
+    targetMailID = nil,
+    targetMailSig = nil,
+    openMailFinished = false,
+    targetItemID = nil,
+    targetItemName = nil,
+    targetTotalUnits = 0,
+    targetMaxStacks = nil,
     skippedCOD = 0,
     skippedBlocked = 0,
     skippedBagsFull = false,
     statusText = "Ready",
     statusKind = "muted",
     lastCheckInboxAt = 0,
+    refreshPending = false,
+    refreshSerial = 0,
     presetPage = 1,
+    itemCategory = "all",
+    itemPage = 1,
     pendingConfirm = nil,
     bypassConfirmRecipient = nil,
+    scanCursor = nil,
+    lastScanNumItems = nil,
+    hadUnloadedAboveCursor = false,
 }
+
+MH.ITEM_CATEGORIES = {
+    { key = "all",        label = "All" },
+    { key = "mats",       label = "Mats" },
+    { key = "gear",       label = "Gear" },
+    { key = "consumable", label = "Cons" },
+    { key = "other",      label = "Other" },
+}
+MH.ITEM_PICKER_PAGE_SIZE = 6
+
+local QUALITY_COLORS = {
+    [0] = { 0.62, 0.62, 0.62 },
+    [1] = { 1.00, 1.00, 1.00 },
+    [2] = { 0.12, 1.00, 0.00 },
+    [3] = { 0.00, 0.44, 0.87 },
+    [4] = { 0.64, 0.21, 0.93 },
+    [5] = { 1.00, 0.50, 0.00 },
+}
+
+local function maxAttachmentsReceive()
+    local n = tonumber(_G.ATTACHMENTS_MAX_RECEIVE)
+    return (n and n > 0) and math.floor(n) or 12
+end
+
+local function readInboxAttachment(mailIdx, attachIdx)
+    if type(_G.GetInboxItem) ~= "function" then return nil end
+    local ok, aName, a2, a3, a4, a5, a6 = pcall(_G.GetInboxItem, mailIdx, attachIdx)
+    if not ok or hasSecret(aName, a2, a3, a4, a5, a6) or type(aName) ~= "string" or aName == "" then
+        return nil
+    end
+    local link, linkID = nil, nil
+    if type(_G.GetInboxItemLink) == "function" then
+        local okL, rawL = pcall(_G.GetInboxItemLink, mailIdx, attachIdx)
+        if okL and not hasSecret(rawL) and type(rawL) == "string" and rawL ~= "" then
+            link = rawL
+            linkID = tonumber(rawL:match("item:(%d+)"))
+        end
+    end
+    local itemID, icon, count, quality
+    if linkID then
+        itemID = linkID
+        if tonumber(a2) == linkID then
+            icon = a3
+            count = tonumber(a4) or 1
+            quality = tonumber(a5)
+        else
+            icon = a2
+            count = tonumber(a3) or 1
+            quality = tonumber(a4)
+        end
+    elseif a6 ~= nil then
+        itemID = tonumber(a2)
+        icon = a3
+        count = tonumber(a4) or 1
+        quality = tonumber(a5)
+    elseif type(a2) == "number" and (type(a4) == "number" or (type(a3) == "string" and a3 ~= "")) and type(a5) == "number" then
+        itemID = a2
+        icon = a3
+        count = tonumber(a4) or 1
+        quality = tonumber(a5)
+    else
+        icon = a2
+        count = tonumber(a3) or tonumber(a4) or 1
+        quality = tonumber(a4) or tonumber(a5)
+        if type(a2) == "number" and a2 > 0 and type(a3) ~= "number" and type(a4) == "number" then
+            itemID = a2
+            icon = a3
+            count = tonumber(a4) or 1
+            quality = tonumber(a5)
+        end
+    end
+    if not itemID or not icon then
+        local instFn = (_G.C_Item and _G.C_Item.GetItemInfoInstant) or _G.GetItemInfoInstant
+        if type(instFn) == "function" then
+            local okI, instID, _, _, _, instIcon = pcall(instFn, link or itemID or aName)
+            if okI and not hasSecret(instID, instIcon) then
+                if not itemID and tonumber(instID) then itemID = tonumber(instID) end
+                if not icon and instIcon then icon = instIcon end
+            end
+        end
+    end
+    count = math.max(1, math.floor(tonumber(count) or 1))
+    return {
+        name = aName,
+        itemID = (itemID and tonumber(itemID) and tonumber(itemID) > 0) and math.floor(tonumber(itemID)) or nil,
+        icon = icon or 134400,
+        count = count,
+        quality = quality or 1,
+        link = link,
+    }
+end
+
+local function classifyItemCategory(itemID, itemLink, fallbackName)
+    local classID = nil
+    local instFn = (_G.C_Item and _G.C_Item.GetItemInfoInstant) or _G.GetItemInfoInstant
+    if type(instFn) == "function" then
+        local ok, _, _, _, _, _, cid = pcall(instFn, itemLink or itemID or fallbackName)
+        if ok and not hasSecret(cid) and tonumber(cid) ~= nil then
+            classID = tonumber(cid)
+        end
+    end
+    if classID == nil then
+        local infoFn = (_G.C_Item and _G.C_Item.GetItemInfo) or _G.GetItemInfo
+        if type(infoFn) == "function" then
+            local ok2, _, _, _, _, _, _, _, _, _, _, _, cid2 = pcall(infoFn, itemLink or itemID or fallbackName)
+            if ok2 and not hasSecret(cid2) and tonumber(cid2) ~= nil then
+                classID = tonumber(cid2)
+            end
+        end
+    end
+    if classID == 7 then return "mats" end
+    if classID == 2 or classID == 4 then return "gear" end
+    if classID == 0 then return "consumable" end
+    return "other"
+end
 
 function MH.IsActive()
     return state.active == true
@@ -131,14 +267,23 @@ function MH.GetState()
         clickStepper = state.clickStepper,
         lootedCount = state.lootedCount,
         lootedCopper = state.lootedCopper,
+        fetchedUnits = state.fetchedUnits,
+        targetMailID = state.targetMailID,
+        targetItemID = state.targetItemID,
+        targetItemName = state.targetItemName,
+        itemCategory = state.itemCategory,
+        itemPage = state.itemPage,
         skippedCOD = state.skippedCOD,
         skippedBlocked = state.skippedBlocked,
         skippedBagsFull = state.skippedBagsFull,
         statusText = state.statusText,
+        refreshPending = state.refreshPending == true,
         lastCheckInboxAt = state.lastCheckInboxAt,
         presetPage = state.presetPage,
         barShown = (MH.bar ~= nil and MH.bar.IsShown and MH.bar:IsShown()) == true,
         presetsPanelShown = (MH.presetsPanel ~= nil and MH.presetsPanel.IsShown and MH.presetsPanel:IsShown()) == true,
+        itemPickerShown = (MH.itemPickerPanel ~= nil and MH.itemPickerPanel.IsShown and MH.itemPickerPanel:IsShown()) == true,
+        openMailBtnShown = (MH.openMailBtn ~= nil and MH.openMailBtn.IsShown and MH.openMailBtn:IsShown()) == true,
         inboxQuickStripShown = (MH.inboxQuickStrip ~= nil and MH.inboxQuickStrip.IsShown and MH.inboxQuickStrip:IsShown()) == true,
         pendingConfirm = state.pendingConfirm and state.pendingConfirm.recipient or nil,
         bypassConfirmRecipient = state.bypassConfirmRecipient,
@@ -201,6 +346,7 @@ function MH.ClassifySlot(index)
     end
 
     local itemCount = (hasItem == true and 1) or (tonumber(hasItem) or 0)
+    local itemCountExact = (type(hasItem) == "number" and hasItem >= 0) and math.floor(hasItem) or nil
     local moneyAmt = tonumber(money) or 0
     local info = {
         index = index,
@@ -209,6 +355,7 @@ function MH.ClassifySlot(index)
         money = moneyAmt,
         codAmount = 0,
         itemCount = itemCount,
+        itemCountExact = itemCountExact,
         invoiceType = invoiceType,
         daysLeft = tonumber(daysLeft),
     }
@@ -269,11 +416,45 @@ local function buildSummaryStatus(reason)
     if reason == "mail_closed" then
         return "Mailbox closed", "muted"
     end
+    if reason == "mail_changed" then
+        return "Mail changed - stopped", "warning"
+    end
     if reason == "user_stop" then
+        if state.mode == "item_type" and (state.fetchedUnits or 0) > 0 then
+            return string.format("Stopped (%dx %s)", state.fetchedUnits, tostring(state.targetItemName or "item")), "warning"
+        elseif state.mode == "gold_only" and (state.lootedCopper or 0) > 0 then
+            return string.format("Stopped (%s)", formatCopperSimple(state.lootedCopper)), "warning"
+        end
         return string.format("Stopped (%d looted)", state.lootedCount), "warning"
     end
     local parts = {}
-    if state.lootedCount > 0 then
+    if state.mode == "item_type" then
+        if (state.fetchedUnits or 0) > 0 then
+            if state.targetMaxStacks == 1 then
+                parts[#parts + 1] = string.format("Took 1 stack: %dx %s", state.fetchedUnits, tostring(state.targetItemName or "item"))
+            else
+                parts[#parts + 1] = string.format("Fetched %dx %s", state.fetchedUnits, tostring(state.targetItemName or "item"))
+            end
+        else
+            parts[#parts + 1] = "No matching items"
+        end
+    elseif state.mode == "gold_only" then
+        if (state.lootedCopper or 0) > 0 then
+            if state.lootedCount == 1 then
+                parts[#parts + 1] = string.format("Collected %s", formatCopperSimple(state.lootedCopper))
+            else
+                parts[#parts + 1] = string.format("Collected %s (%d mails)", formatCopperSimple(state.lootedCopper), state.lootedCount)
+            end
+        else
+            parts[#parts + 1] = "No gold to collect"
+        end
+    elseif state.mode == "open_mail" then
+        if state.lootedCount > 0 then
+            parts[#parts + 1] = string.format("Looted %d stack%s (%dx)", state.lootedCount, state.lootedCount == 1 and "" or "s", state.fetchedUnits or state.lootedCount)
+        else
+            parts[#parts + 1] = "No items to loot"
+        end
+    elseif state.lootedCount > 0 then
         if state.lootedCopper > 0 then
             parts[#parts + 1] = string.format("Looted %d (%s)", state.lootedCount, formatCopperSimple(state.lootedCopper))
         else
@@ -325,33 +506,132 @@ local function triggerFinalMailboxScan()
     end
 end
 
+local function armStepWatchdog(stepSerial)
+    if _G.C_Timer and type(_G.C_Timer.After) == "function" then
+        _G.C_Timer.After(MH.STALL_WATCHDOG_SEC, function()
+            if state.active and state.serial == stepSerial and state.waitingServer then
+                state.waitingServer = false
+                if not state.clickStepper then
+                    MH.Step()
+                else
+                    state.statusText = "Click Next to continue"
+                    state.statusKind = "warning"
+                    MH.UpdateUI()
+                end
+            end
+        end)
+    end
+end
+
+local function matchesItemTarget(att)
+    if not att then return false end
+    if state.targetItemID and att.itemID then
+        return att.itemID == state.targetItemID
+    end
+    if state.targetItemName and att.name then
+        return string.lower(att.name) == string.lower(state.targetItemName)
+    end
+    return false
+end
+
+local function reconcileLastAttTake(numItems)
+    local prev = state.lastAttTake
+    if not prev then return end
+    state.lastAttTake = nil
+    local unchanged = false
+    if numItems == prev.numItems and prev.mailIdx >= 1 and prev.mailIdx <= numItems then
+        local curAtt = readInboxAttachment(prev.mailIdx, prev.attachIdx)
+        if curAtt and curAtt.count == prev.count
+            and ((prev.itemID and curAtt.itemID == prev.itemID) or curAtt.name == prev.name) then
+            unchanged = true
+        end
+    end
+    if unchanged then
+        state.slotRetries[prev.instKey] = (state.slotRetries[prev.instKey] or 0) + 1
+        state.lootedCount = math.max(0, state.lootedCount - 1)
+        state.fetchedUnits = math.max(0, (state.fetchedUnits or 0) - (prev.count or 0))
+    else
+        state.slotRetries[prev.instKey] = nil
+        if prev.mode == "open_mail" and numItems < (prev.numItems or 0) then
+            state.openMailFinished = true
+        end
+    end
+end
+
+local function syncItemPickerRowButtons()
+    local picker = MH.itemPickerPanel
+    if not (picker and picker.rows) then return end
+    local isAllFetch = (state.active == true and state.mode == "item_type" and state.targetMaxStacks == nil)
+    local isGoldFetch = (state.active == true and state.mode == "gold_only" and state.targetMaxStacks == nil)
+    for _, row in ipairs(picker.rows) do
+        local btn = row and row.getAllBtn
+        local grp = row and row._group
+        if btn then
+            local match = false
+            if grp then
+                if grp.isGold then
+                    match = isGoldFetch
+                elseif isAllFetch then
+                    if state.targetItemID and grp.itemID then
+                        match = (grp.itemID == state.targetItemID)
+                    elseif state.targetItemName and grp.name then
+                        match = (string.lower(grp.name) == string.lower(state.targetItemName))
+                    end
+                end
+            end
+            if btn.SetText then btn:SetText(match and "Stop" or "Get All") end
+            if btn.SetActiveStyle then btn:SetActiveStyle(match) end
+            if btn.SetEnabled then
+                btn:SetEnabled(match or not (state.active and state.waitingServer))
+            end
+        end
+    end
+end
+
 function MH.UpdateUI()
-    local bar = MH.bar
-    if not bar then return end
     local colKey = (state.statusKind == "positive" and "hexPositive")
         or (state.statusKind == "warning" and "hexWarning")
         or (state.statusKind == "danger" and "hexDanger")
         or (state.statusKind == "blue" and "hexBlue")
         or "hexMuted"
-    if bar.statusFs and bar.statusFs.SetText then
-        bar.statusFs:SetText(palHex(colKey, "98989d") .. tostring(state.statusText or "Ready") .. "|r")
-    end
-    if bar.modeBtns then
-        for _, entry in ipairs(bar.modeBtns) do
-            if entry.btn and entry.btn.SetActive then
-                entry.btn:SetActive(state.active and state.mode == entry.mode)
+    local coloredStatus = palHex(colKey, "98989d") .. tostring(state.statusText or "Ready") .. "|r"
+
+    local bar = MH.bar
+    if bar then
+        if bar.statusFs and bar.statusFs.SetText then
+            bar.statusFs:SetText(coloredStatus)
+        end
+        if bar.modeBtns then
+            for _, entry in ipairs(bar.modeBtns) do
+                if entry.btn and entry.btn.SetActive then
+                    entry.btn:SetActive(state.active and state.mode == entry.mode)
+                end
             end
         end
-    end
-    if bar.stopBtn and bar.stopBtn.SetEnabled then
-        bar.stopBtn:SetEnabled(state.active == true)
-    end
-    if bar.refreshBtn and bar.refreshBtn.SetText then
-        if state.active and state.clickStepper then
-            bar.refreshBtn:SetText("Next")
-        else
-            bar.refreshBtn:SetText("Refresh")
+        if bar.stopBtn and bar.stopBtn.SetEnabled then
+            bar.stopBtn:SetEnabled(state.active == true)
         end
+        if bar.refreshBtn and bar.refreshBtn.SetText then
+            bar.refreshBtn:SetText((state.active and state.clickStepper) and "Next" or "Refresh")
+        end
+    end
+
+    local picker = MH.itemPickerPanel
+    if picker then
+        if picker.statusFs and picker.statusFs.SetText then
+            picker.statusFs:SetText(coloredStatus)
+        end
+        if picker.stopBtn and picker.stopBtn.SetEnabled then
+            picker.stopBtn:SetEnabled(state.active == true)
+        end
+        if picker.refreshBtn and picker.refreshBtn.SetText then
+            picker.refreshBtn:SetText((state.active and state.clickStepper) and "Next" or "Refresh")
+        end
+    end
+    syncItemPickerRowButtons()
+
+    if MH.UpdateOpenMailButton then
+        MH.UpdateOpenMailButton()
     end
 end
 
@@ -359,17 +639,385 @@ function MH.Stop(reason)
     local wasActive = state.active == true
     state.active = false
     state.waitingServer = false
+    state.refreshPending = false
     state.clickStepper = false
     state.serial = state.serial + 1
     state.lastSlot = nil
+    state.lastAttTake = nil
+    state.targetMailID = nil
+    state.targetMailSig = nil
+    state.openMailFinished = false
+    state.scanCursor = nil
+    state.lastScanNumItems = nil
+    state.hadUnloadedAboveCursor = false
     local text, kind = buildSummaryStatus(reason)
+    state.targetMaxStacks = nil
     state.statusText = text
     state.statusKind = kind
     MH.UpdateUI()
+    if MH.RefreshItemPickerUI then
+        MH.RefreshItemPickerUI()
+    end
     if wasActive and reason ~= "mail_closed" then
+        if state.mailOpen and MH.RefreshPresetsUI then
+            MH.RefreshPresetsUI({ skipItemPicker = true })
+        end
+        if ns.app and type(ns.app.flushDeferredMailBagResync) == "function" then
+            pcall(ns.app.flushDeferredMailBagResync)
+        end
         triggerFinalMailboxScan()
     end
     return true
+end
+
+function MH.ScanInboxItems()
+    local emptyCounts = { all = 0, mats = 0, gear = 0, consumable = 0, other = 0 }
+    if type(_G.GetInboxNumItems) ~= "function" then
+        return {}, emptyCounts, { totalUnits = 0, totalMails = 0, codSkipped = 0, totalGoldCopper = 0, goldMails = 0 }
+    end
+    local numItems = _G.GetInboxNumItems()
+    if hasSecret(numItems) then
+        return {}, emptyCounts, { totalUnits = 0, totalMails = 0, codSkipped = 0, totalGoldCopper = 0, goldMails = 0 }
+    end
+    numItems = tonumber(numItems) or 0
+    local maxAtt = maxAttachmentsReceive()
+    local byKey = {}
+    local groups = {}
+    local catCounts = { all = 0, mats = 0, gear = 0, consumable = 0, other = 0 }
+    local totalUnits, mailWithItems, codSkipped = 0, {}, 0
+    local goldCopper, goldMails, goldOnlyMails, goldSlots = 0, 0, 0, {}
+
+    for mailIdx = 1, numItems do
+        local kind, info = MH.ClassifySlot(mailIdx)
+        if kind == "cod" then
+            codSkipped = codSkipped + 1
+        elseif kind ~= "skip_unloaded" then
+            local money = (info and tonumber(info.money)) or 0
+            if money > 0 then
+                goldCopper = goldCopper + money
+                goldMails = goldMails + 1
+                if info and (info.itemCount or 0) == 0 then
+                    goldOnlyMails = goldOnlyMails + 1
+                end
+                mailWithItems[mailIdx] = true
+                goldSlots[#goldSlots + 1] = {
+                    mailIdx = mailIdx,
+                    money = money,
+                }
+            end
+            if info and (info.itemCount or 0) > 0 then
+                local foundAtts = 0
+                local exactAtts = info.itemCountExact
+                for attIdx = 1, maxAtt do
+                    local att = readInboxAttachment(mailIdx, attIdx)
+                    if att then
+                        foundAtts = foundAtts + 1
+                        local gKey = att.itemID and ("id:" .. tostring(att.itemID)) or ("name:" .. string.lower(att.name))
+                        local grp = byKey[gKey]
+                        if not grp then
+                            local cat = classifyItemCategory(att.itemID, att.link, att.name)
+                            grp = {
+                                key = gKey,
+                                itemID = att.itemID,
+                                name = att.name,
+                                icon = att.icon,
+                                quality = att.quality,
+                                link = att.link,
+                                category = cat,
+                                totalQty = 0,
+                                stackCount = 0,
+                                mailCount = 0,
+                                _mails = {},
+                                slots = {},
+                            }
+                            byKey[gKey] = grp
+                            groups[#groups + 1] = grp
+                            catCounts.all = catCounts.all + 1
+                            if catCounts[cat] ~= nil then
+                                catCounts[cat] = catCounts[cat] + 1
+                            end
+                        end
+                        grp.totalQty = grp.totalQty + att.count
+                        grp.stackCount = grp.stackCount + 1
+                        if not grp._mails[mailIdx] then
+                            grp._mails[mailIdx] = true
+                            grp.mailCount = grp.mailCount + 1
+                        end
+                        mailWithItems[mailIdx] = true
+                        totalUnits = totalUnits + att.count
+                        grp.slots[#grp.slots + 1] = {
+                            mailIdx = mailIdx,
+                            attachIdx = attIdx,
+                            count = att.count,
+                        }
+                        if exactAtts and foundAtts >= exactAtts then
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    for _, grp in ipairs(groups) do
+        grp._mails = nil
+    end
+    table.sort(groups, function(a, b)
+        if a.totalQty ~= b.totalQty then return a.totalQty > b.totalQty end
+        if a.name ~= b.name then return a.name < b.name end
+        return tostring(a.itemID or "") < tostring(b.itemID or "")
+    end)
+
+    if goldCopper > 0 then
+        table.insert(groups, 1, {
+            key = "gold",
+            isGold = true,
+            itemID = nil,
+            name = "Gold",
+            icon = 133784,
+            quality = 1,
+            link = nil,
+            category = "other",
+            totalQty = goldCopper,
+            totalCopper = goldCopper,
+            stackCount = goldMails,
+            mailCount = goldMails,
+            goldOnlyCount = goldOnlyMails,
+            slots = goldSlots,
+        })
+        catCounts.all = catCounts.all + 1
+        catCounts.other = catCounts.other + 1
+    end
+
+    local totalMails = 0
+    for _ in pairs(mailWithItems) do totalMails = totalMails + 1 end
+    return groups, catCounts, {
+        totalUnits = totalUnits,
+        totalMails = totalMails,
+        codSkipped = codSkipped,
+        totalGoldCopper = goldCopper,
+        goldMails = goldMails,
+    }
+end
+
+function MH.CountOpenMailItems(mailID)
+    local mid = tonumber(mailID)
+        or tonumber(_G.InboxFrame and _G.InboxFrame.openMailID)
+        or tonumber(_G.OpenMailFrame and _G.OpenMailFrame.openMailID)
+    if not mid or mid < 1 then return 0, 0, "no_mail" end
+    local kind = MH.ClassifySlot(mid)
+    if kind == "cod" or kind == "skip_unloaded" then
+        return 0, 0, kind
+    end
+    local maxAtt = maxAttachmentsReceive()
+    local slots, units = 0, 0
+    for attIdx = 1, maxAtt do
+        local att = readInboxAttachment(mid, attIdx)
+        if att then
+            slots = slots + 1
+            units = units + att.count
+        end
+    end
+    return slots, units, kind
+end
+
+function MH.SetItemCategory(catKey)
+    local valid = false
+    for _, c in ipairs(MH.ITEM_CATEGORIES) do
+        if c.key == catKey then valid = true; break end
+    end
+    state.itemCategory = valid and catKey or "all"
+    state.itemPage = 1
+    if MH.RefreshItemPickerUI then MH.RefreshItemPickerUI() end
+    return state.itemCategory
+end
+
+function MH.StartOpenMailLoot(mailID)
+    if _G.MailFrame and type(_G.MailFrame.IsShown) == "function" and not _G.MailFrame:IsShown() and not state.mailOpen then
+        state.statusText = "Open mailbox first"
+        state.statusKind = "warning"
+        MH.UpdateUI()
+        return false, "mail_closed"
+    end
+    local mid = tonumber(mailID)
+        or tonumber(_G.InboxFrame and _G.InboxFrame.openMailID)
+        or tonumber(_G.OpenMailFrame and _G.OpenMailFrame.openMailID)
+    if not mid or mid < 1 then
+        state.statusText = "Open a mail first"
+        state.statusKind = "warning"
+        MH.UpdateUI()
+        return false, "no_mail"
+    end
+    local slots, _, kind = MH.CountOpenMailItems(mid)
+    if kind == "cod" then
+        state.statusText = "Skipped COD mail"
+        state.statusKind = "warning"
+        MH.UpdateUI()
+        return false, "cod"
+    end
+    if slots <= 0 then
+        state.statusText = "No items in open mail"
+        state.statusKind = "muted"
+        MH.UpdateUI()
+        return false, "no_items"
+    end
+    pauseOrderFlowMail()
+    state.refreshPending = false
+    local _, hdrInfo = MH.ClassifySlot(mid)
+    state.active = true
+    state.mode = "open_mail"
+    state.targetMailID = mid
+    state.targetMailSig = hdrInfo and (tostring(hdrInfo.sender or "") .. "|" .. tostring(hdrInfo.subject or "")) or nil
+    state.openMailFinished = false
+    state.targetItemID = nil
+    state.targetItemName = nil
+    state.targetTotalUnits = 0
+    state.targetMaxStacks = nil
+    state.waitingServer = false
+    state.clickStepper = false
+    state.serial = state.serial + 1
+    state.lastSlot = nil
+    state.lastAttTake = nil
+    state.slotRetries = {}
+    state.seenCOD = {}
+    state.seenBlocked = {}
+    state.lootedCount = 0
+    state.lootedCopper = 0
+    state.fetchedUnits = 0
+    state.skippedCOD = 0
+    state.skippedBlocked = 0
+    state.skippedBagsFull = false
+    state.scanCursor = nil
+    state.lastScanNumItems = nil
+    state.hadUnloadedAboveCursor = false
+    state.statusText = "Taking items from open mail..."
+    state.statusKind = "blue"
+    MH.UpdateUI()
+    return MH.Step()
+end
+
+function MH.StartItemFetch(itemID, itemName, opts)
+    if _G.MailFrame and type(_G.MailFrame.IsShown) == "function" and not _G.MailFrame:IsShown() and not state.mailOpen then
+        state.statusText = "Open mailbox first"
+        state.statusKind = "warning"
+        MH.UpdateUI()
+        return false, "mail_closed"
+    end
+    if state.active and state.waitingServer then
+        return false, "busy"
+    end
+    local tid = tonumber(itemID)
+    tid = (tid and tid > 0) and math.floor(tid) or nil
+    local tname = (type(itemName) == "string" and trimOuter(itemName) ~= "") and trimOuter(itemName) or nil
+    if not tid and not tname then
+        return false, "no_item"
+    end
+    local maxStacks = (type(opts) == "table" and tonumber(opts.maxStacks)) or nil
+    maxStacks = (maxStacks and maxStacks > 0) and math.floor(maxStacks) or nil
+    local hintedTotal = (type(opts) == "table" and tonumber(opts.totalUnits)) or nil
+    local totalUnits = 0
+    if hintedTotal and hintedTotal > 0 and tname then
+        totalUnits = math.floor(hintedTotal)
+    else
+        local groups = MH.ScanInboxItems()
+        for _, grp in ipairs(groups) do
+            if (tid and grp.itemID == tid) or (tname and grp.name and string.lower(grp.name) == string.lower(tname)) then
+                totalUnits = totalUnits + (grp.totalQty or 0)
+                if not tname then tname = grp.name end
+            end
+        end
+    end
+    pauseOrderFlowMail()
+    state.refreshPending = false
+    state.active = true
+    state.mode = "item_type"
+    state.targetMailID = nil
+    state.targetMailSig = nil
+    state.openMailFinished = false
+    state.scanCursor = nil
+    state.lastScanNumItems = nil
+    state.hadUnloadedAboveCursor = false
+    state.targetItemID = tid
+    state.targetItemName = tname or ("Item #" .. tostring(tid))
+    state.targetTotalUnits = totalUnits
+    state.targetMaxStacks = maxStacks
+    state.waitingServer = false
+    state.clickStepper = false
+    state.serial = state.serial + 1
+    state.lastSlot = nil
+    state.lastAttTake = nil
+    state.slotRetries = {}
+    state.seenCOD = {}
+    state.seenBlocked = {}
+    state.lootedCount = 0
+    state.lootedCopper = 0
+    state.fetchedUnits = 0
+    state.skippedCOD = 0
+    state.skippedBlocked = 0
+    state.skippedBagsFull = false
+    state.statusText = (maxStacks == 1)
+        and ("Taking 1 stack of " .. tostring(state.targetItemName) .. "...")
+        or ("Fetching " .. tostring(state.targetItemName) .. "...")
+    state.statusKind = "blue"
+    MH.UpdateUI()
+    return MH.Step()
+end
+
+function MH.TakeOneItemStack(itemID, itemName, opts)
+    return MH.StartItemFetch(itemID, itemName, {
+        maxStacks = 1,
+        totalUnits = type(opts) == "table" and opts.totalUnits or nil,
+    })
+end
+
+function MH.StartGoldFetch(opts)
+    if _G.MailFrame and type(_G.MailFrame.IsShown) == "function" and not _G.MailFrame:IsShown() and not state.mailOpen then
+        state.statusText = "Open mailbox first"
+        state.statusKind = "warning"
+        MH.UpdateUI()
+        return false, "mail_closed"
+    end
+    if state.active and state.waitingServer then
+        return false, "busy"
+    end
+    local maxStacks = (type(opts) == "table" and tonumber(opts.maxStacks)) or nil
+    maxStacks = (maxStacks and maxStacks > 0) and math.floor(maxStacks) or nil
+    pauseOrderFlowMail()
+    state.refreshPending = false
+    state.active = true
+    state.mode = "gold_only"
+    state.targetMailID = nil
+    state.targetMailSig = nil
+    state.openMailFinished = false
+    state.targetItemID = nil
+    state.targetItemName = "Gold"
+    state.targetTotalUnits = 0
+    state.targetMaxStacks = maxStacks
+    state.waitingServer = false
+    state.clickStepper = false
+    state.serial = state.serial + 1
+    state.lastSlot = nil
+    state.lastAttTake = nil
+    state.slotRetries = {}
+    state.seenCOD = {}
+    state.seenBlocked = {}
+    state.lootedCount = 0
+    state.lootedCopper = 0
+    state.fetchedUnits = 0
+    state.skippedCOD = 0
+    state.skippedBlocked = 0
+    state.skippedBagsFull = false
+    state.scanCursor = nil
+    state.lastScanNumItems = nil
+    state.hadUnloadedAboveCursor = false
+    state.statusText = (maxStacks == 1) and "Taking gold..." or "Collecting gold..."
+    state.statusKind = "blue"
+    MH.UpdateUI()
+    return MH.Step()
+end
+
+function MH.TakeOneGoldMail()
+    return MH.StartGoldFetch({ maxStacks = 1 })
 end
 
 function MH.Start(mode)
@@ -380,20 +1028,33 @@ function MH.Start(mode)
         return false, "mail_closed"
     end
     pauseOrderFlowMail()
+    state.refreshPending = false
     state.active = true
     state.mode = mode or "all"
+    state.targetMailID = nil
+    state.targetMailSig = nil
+    state.openMailFinished = false
+    state.targetItemID = nil
+    state.targetItemName = nil
+    state.targetTotalUnits = 0
+    state.targetMaxStacks = nil
     state.waitingServer = false
     state.clickStepper = false
     state.serial = state.serial + 1
     state.lastSlot = nil
+    state.lastAttTake = nil
     state.slotRetries = {}
     state.seenCOD = {}
     state.seenBlocked = {}
     state.lootedCount = 0
     state.lootedCopper = 0
+    state.fetchedUnits = 0
     state.skippedCOD = 0
     state.skippedBlocked = 0
     state.skippedBagsFull = false
+    state.scanCursor = nil
+    state.lastScanNumItems = nil
+    state.hadUnloadedAboveCursor = false
     state.statusText = "Scanning inbox..."
     state.statusKind = "blue"
     MH.UpdateUI()
@@ -415,6 +1076,176 @@ function MH.Step()
     numItems = tonumber(numItems) or 0
     totalItems = tonumber(totalItems) or numItems
     local freeSlots = MH.GetFreeBagSlots()
+
+    reconcileLastAttTake(numItems)
+
+    if state.mode == "open_mail" then
+        local openFrame = _G.OpenMailFrame
+        if openFrame and type(openFrame.IsShown) == "function" and not openFrame:IsShown() then
+            MH.Stop("mail_closed")
+            return false, "mail_closed"
+        end
+        if state.openMailFinished then
+            MH.Stop("done")
+            return false, "done"
+        end
+        local mid = state.targetMailID
+        local curOpen = tonumber(_G.InboxFrame and _G.InboxFrame.openMailID) or tonumber(openFrame and openFrame.openMailID)
+        if curOpen and mid and curOpen ~= mid then
+            MH.Stop("mail_changed")
+            return false, "mail_changed"
+        end
+        if not mid or mid < 1 or mid > numItems then
+            MH.Stop("done")
+            return false, "done"
+        end
+        local kind, info = MH.ClassifySlot(mid)
+        if kind == "cod" then
+            state.skippedCOD = state.skippedCOD + 1
+            MH.Stop("done")
+            return false, "cod"
+        elseif kind == "skip_unloaded" then
+            state.skippedBlocked = state.skippedBlocked + 1
+            MH.Stop("done")
+            return false, "unloaded"
+        end
+        if state.targetMailSig and info then
+            local curSig = tostring(info.sender or "") .. "|" .. tostring(info.subject or "")
+            if curSig ~= state.targetMailSig then
+                MH.Stop("done")
+                return false, "done"
+            end
+        end
+        local maxAtt = maxAttachmentsReceive()
+        for attIdx = maxAtt, 1, -1 do
+            local att = readInboxAttachment(mid, attIdx)
+            if att then
+                local instKey = string.format("om:%d:%d:%s:%d", mid, attIdx, tostring(att.itemID or att.name), att.count)
+                local retries = state.slotRetries[instKey] or 0
+                if retries >= MH.MAX_SLOT_RETRIES then
+                    if not state.seenBlocked[instKey] then
+                        state.seenBlocked[instKey] = true
+                        state.skippedBlocked = state.skippedBlocked + 1
+                    end
+                else
+                    if freeSlots <= 0 then
+                        state.skippedBagsFull = true
+                        MH.Stop("done")
+                        return false, "bags_full"
+                    end
+                    if type(_G.TakeInboxItem) ~= "function" then
+                        MH.Stop("no_api")
+                        return false, "no_api"
+                    end
+                    state.waitingServer = true
+                    state.lastAttTake = {
+                        mode = "open_mail",
+                        mailIdx = mid,
+                        attachIdx = attIdx,
+                        numItems = numItems,
+                        itemID = att.itemID,
+                        name = att.name,
+                        count = att.count,
+                        instKey = instKey,
+                    }
+                    state.lootedCount = state.lootedCount + 1
+                    state.fetchedUnits = (state.fetchedUnits or 0) + att.count
+                    state.serial = state.serial + 1
+                    local stepSerial = state.serial
+                    pcall(_G.TakeInboxItem, mid, attIdx)
+                    state.statusText = string.format("Taking %dx %s...", att.count, tostring(att.name))
+                    state.statusKind = "blue"
+                    MH.UpdateUI()
+                    armStepWatchdog(stepSerial)
+                    return true, "open_mail_item", mid, attIdx
+                end
+            end
+        end
+        MH.Stop("done")
+        return false, "done"
+    end
+
+    if state.mode == "item_type" then
+        if state.targetMaxStacks and (state.lootedCount or 0) >= state.targetMaxStacks then
+            MH.Stop("done")
+            return false, "done"
+        end
+        local maxAtt = maxAttachmentsReceive()
+        local startIdx = numItems
+        if state.scanCursor and not state.hadUnloadedAboveCursor and numItems <= (state.lastScanNumItems or numItems) then
+            startIdx = math.min(numItems, state.scanCursor)
+        end
+        state.hadUnloadedAboveCursor = false
+        state.lastScanNumItems = numItems
+        for mailIdx = startIdx, 1, -1 do
+            local kind, info = MH.ClassifySlot(mailIdx)
+            if kind == "cod" then
+                local sig = slotSignature(info)
+                if not state.seenCOD[sig] then
+                    state.seenCOD[sig] = true
+                    state.skippedCOD = state.skippedCOD + 1
+                end
+            elseif kind == "skip_unloaded" then
+                state.hadUnloadedAboveCursor = true
+            elseif kind ~= "empty" and info and (info.itemCount or 0) > 0 then
+                local seenAtts = 0
+                local exactAtts = info.itemCountExact
+                for attIdx = maxAtt, 1, -1 do
+                    local att = readInboxAttachment(mailIdx, attIdx)
+                    if att then
+                        seenAtts = seenAtts + 1
+                        if matchesItemTarget(att) then
+                            local instKey = string.format("it:%d:%d:%s:%d", mailIdx, attIdx, tostring(att.itemID or att.name), att.count)
+                            local retries = state.slotRetries[instKey] or 0
+                            if retries >= MH.MAX_SLOT_RETRIES then
+                                if not state.seenBlocked[instKey] then
+                                    state.seenBlocked[instKey] = true
+                                    state.skippedBlocked = state.skippedBlocked + 1
+                                end
+                            else
+                                if freeSlots <= 0 then
+                                    state.skippedBagsFull = true
+                                    MH.Stop("done")
+                                    return false, "bags_full"
+                                end
+                                if type(_G.TakeInboxItem) ~= "function" then
+                                    MH.Stop("no_api")
+                                    return false, "no_api"
+                                end
+                                state.scanCursor = mailIdx
+                                state.waitingServer = true
+                                state.lastAttTake = {
+                                    mode = "item_type",
+                                    mailIdx = mailIdx,
+                                    attachIdx = attIdx,
+                                    numItems = numItems,
+                                    itemID = att.itemID,
+                                    name = att.name,
+                                    count = att.count,
+                                    instKey = instKey,
+                                }
+                                state.lootedCount = state.lootedCount + 1
+                                state.fetchedUnits = (state.fetchedUnits or 0) + att.count
+                                state.serial = state.serial + 1
+                                local stepSerial = state.serial
+                                pcall(_G.TakeInboxItem, mailIdx, attIdx)
+                                state.statusText = string.format("Fetching %s (%d/%d)...",
+                                    tostring(att.name or state.targetItemName), state.fetchedUnits, math.max(state.fetchedUnits, state.targetTotalUnits or state.fetchedUnits))
+                                state.statusKind = "blue"
+                                MH.UpdateUI()
+                                armStepWatchdog(stepSerial)
+                                return true, "item_type", mailIdx, attIdx
+                            end
+                        elseif exactAtts and seenAtts >= exactAtts then
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        MH.Stop("done")
+        return false, "done"
+    end
 
     -- Reconcile previous step: only count a retry when the exact same uncollected mail
     -- remained unchanged; clear/retire retries when the take succeeded (inbox shrunk or slot mutated).
@@ -472,9 +1303,87 @@ function MH.Step()
         end
     end
 
-    for i = numItems, 1, -1 do
+    if state.mode == "gold_only" then
+        if state.targetMaxStacks and (state.lootedCount or 0) >= state.targetMaxStacks then
+            MH.Stop("done")
+            return false, "done"
+        end
+        local startIdx = numItems
+        if state.scanCursor and not state.hadUnloadedAboveCursor and numItems <= (state.lastScanNumItems or numItems) then
+            startIdx = math.min(numItems, state.scanCursor)
+        end
+        state.hadUnloadedAboveCursor = false
+        state.lastScanNumItems = numItems
+        for i = startIdx, 1, -1 do
+            local kind, info = MH.ClassifySlot(i)
+            if kind == "skip_unloaded" then
+                state.hadUnloadedAboveCursor = true
+                local bKey = "unloaded:" .. tostring(i)
+                if not state.seenBlocked[bKey] then
+                    state.seenBlocked[bKey] = true
+                    state.skippedBlocked = state.skippedBlocked + 1
+                end
+            elseif kind == "cod" then
+                local sig = slotSignature(info)
+                if not state.seenCOD[sig] then
+                    state.seenCOD[sig] = true
+                    state.skippedCOD = state.skippedCOD + 1
+                end
+            elseif info and (info.money or 0) > 0 then
+                local sig = slotSignature(info)
+                local instKey = tostring(i) .. "|" .. sig
+                local retries = state.slotRetries[instKey] or 0
+                if retries >= MH.MAX_SLOT_RETRIES then
+                    if not state.seenBlocked[instKey] then
+                        state.seenBlocked[instKey] = true
+                        state.skippedBlocked = state.skippedBlocked + 1
+                    end
+                else
+                    if type(_G.TakeInboxMoney) ~= "function" then
+                        MH.Stop("no_api")
+                        return false, "no_api"
+                    end
+                    state.scanCursor = i
+                    state.waitingServer = true
+                    state.lastSlot = {
+                        index = i,
+                        numItems = numItems,
+                        sig = sig,
+                        instKey = instKey,
+                        money = info.money or 0,
+                        itemCount = info.itemCount or 0,
+                        action = "money",
+                        copper = info.money or 0,
+                    }
+                    state.lootedCount = state.lootedCount + 1
+                    state.lootedCopper = state.lootedCopper + (info.money or 0)
+                    state.serial = state.serial + 1
+                    local stepSerial = state.serial
+                    pcall(_G.TakeInboxMoney, i)
+                    state.statusText = (state.targetMaxStacks == 1)
+                        and ("Taking " .. formatCopperSimple(info.money) .. "...")
+                        or string.format("Collecting gold (%s)...", formatCopperSimple(state.lootedCopper))
+                    state.statusKind = "blue"
+                    MH.UpdateUI()
+                    armStepWatchdog(stepSerial)
+                    return true, "money", i
+                end
+            end
+        end
+        MH.Stop("done")
+        return false, "done"
+    end
+
+    local startIdx = numItems
+    if state.scanCursor and not state.hadUnloadedAboveCursor and numItems <= (state.lastScanNumItems or numItems) then
+        startIdx = math.min(numItems, state.scanCursor)
+    end
+    state.hadUnloadedAboveCursor = false
+    state.lastScanNumItems = numItems
+    for i = startIdx, 1, -1 do
         local kind, info = MH.ClassifySlot(i)
         if kind == "skip_unloaded" then
+            state.hadUnloadedAboveCursor = true
             local bKey = "unloaded:" .. tostring(i)
             if not state.seenBlocked[bKey] then
                 state.seenBlocked[bKey] = true
@@ -516,6 +1425,7 @@ function MH.Step()
                 end
 
                 if action then
+                    state.scanCursor = i
                     state.waitingServer = true
                     state.lastSlot = {
                         index = i,
@@ -552,21 +1462,7 @@ function MH.Step()
                         state.statusKind = "blue"
                     end
                     MH.UpdateUI()
-
-                    if _G.C_Timer and type(_G.C_Timer.After) == "function" then
-                        _G.C_Timer.After(MH.STALL_WATCHDOG_SEC, function()
-                            if state.active and state.serial == stepSerial and state.waitingServer then
-                                state.waitingServer = false
-                                if not state.clickStepper then
-                                    MH.Step()
-                                else
-                                    state.statusText = "Click Next to continue"
-                                    state.statusKind = "warning"
-                                    MH.UpdateUI()
-                                end
-                            end
-                        end)
-                    end
+                    armStepWatchdog(stepSerial)
                     return true, action, i
                 end
             end
@@ -581,6 +1477,25 @@ function MH.Step()
     return false, "done"
 end
 
+local function finishPendingRefresh(fromTimeout)
+    if not state.refreshPending then return false end
+    state.refreshPending = false
+    if state.active then return false end
+    state.statusText = "Ready"
+    state.statusKind = "muted"
+    if MH.RefreshItemPickerUI then
+        MH.RefreshItemPickerUI()
+    end
+    if fromTimeout and state.statusText == "Ready" then
+        state.statusText = "Inbox up to date"
+        state.statusKind = "muted"
+        MH.UpdateUI()
+    elseif not MH.itemPickerPanel then
+        MH.UpdateUI()
+    end
+    return true
+end
+
 function MH.RequestRefresh()
     local now = nowSec()
     local elapsed = now - (state.lastCheckInboxAt or 0)
@@ -588,16 +1503,26 @@ function MH.RequestRefresh()
         local rem = math.max(1, math.ceil(MH.REFRESH_COOLDOWN_SEC - elapsed))
         state.statusText = string.format("Refresh ready in %ds", rem)
         state.statusKind = "muted"
-        MH.UpdateUI()
+        if MH.RefreshItemPickerUI then MH.RefreshItemPickerUI() else MH.UpdateUI() end
         return false, "cooldown", rem
     end
     state.lastCheckInboxAt = now
-    if type(_G.CheckInbox) == "function" then
-        pcall(_G.CheckInbox)
-    end
+    state.refreshPending = true
+    state.refreshSerial = (state.refreshSerial or 0) + 1
+    local rSerial = state.refreshSerial
     state.statusText = "Refreshing inbox..."
     state.statusKind = "blue"
     MH.UpdateUI()
+    if type(_G.CheckInbox) == "function" then
+        pcall(_G.CheckInbox)
+    end
+    if state.refreshPending and _G.C_Timer and type(_G.C_Timer.After) == "function" then
+        _G.C_Timer.After(2.0, function()
+            if state.refreshPending and state.refreshSerial == rSerial and not state.active then
+                finishPendingRefresh(true)
+            end
+        end)
+    end
     return true
 end
 
@@ -625,6 +1550,121 @@ local function makeBarButton(parent, label, w, h, variant, onClick)
     return btn
 end
 
+local function makeBaronCrimsonButton(parent, label, w, h, fontSize, onClick, opts)
+    opts = opts or {}
+    local bw = w or 74
+    local bh = h or 21
+    local btn = _G.CreateFrame("Button", nil, parent)
+    btn:SetSize(bw, bh)
+    btn._enabled = true
+    btn._label = tostring(label or "")
+    btn._baseCol = opts.subtle and { 0.36, 0.06, 0.10, 0.94 } or { 0.44, 0.06, 0.11, 0.98 }
+    btn._activeCol = { 0.64, 0.08, 0.12, 0.98 }
+
+    if parent and parent.GetFrameLevel and btn.SetFrameLevel then
+        btn:SetFrameLevel((parent:GetFrameLevel() or 1) + (opts.levelBoost or 2))
+    end
+
+    local bg = btn:CreateTexture(nil, "BACKGROUND", nil, 0)
+    bg:SetPoint("TOPLEFT", btn, "TOPLEFT", 1, -1)
+    bg:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -1, 1)
+    bg:SetColorTexture(btn._baseCol[1], btn._baseCol[2], btn._baseCol[3], btn._baseCol[4])
+    btn._bgTex = bg
+
+    local cushion = btn:CreateTexture(nil, "ARTWORK", nil, 0)
+    cushion:SetPoint("TOPLEFT", btn, "TOPLEFT", 1, -1)
+    cushion:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -1, 1)
+    local theme = ns.Theme
+    local texPath = (theme and type(theme.GetSkinAsset) == "function") and theme.GetSkinAsset("goblin", "header_tile") or nil
+    if texPath then
+        cushion:SetTexture(texPath, "REPEAT", "REPEAT")
+        if cushion.SetHorizTile then cushion:SetHorizTile(false) end
+        if cushion.SetVertTile then cushion:SetVertTile(false) end
+        if cushion.SetTexCoord then cushion:SetTexCoord(0, bw / 72, 0, bh / 72) end
+        cushion:SetVertexColor(1.0, 0.80, 0.80, opts.subtle and 0.46 or 0.62)
+    else
+        cushion:SetColorTexture(0.54, 0.09, 0.15, opts.subtle and 0.40 or 0.55)
+    end
+    btn._cushionTex = cushion
+
+    local bevel = btn:CreateTexture(nil, "ARTWORK", nil, 1)
+    bevel:SetPoint("TOPLEFT", btn, "TOPLEFT", 1, -1)
+    bevel:SetPoint("TOPRIGHT", btn, "TOPRIGHT", -1, -1)
+    bevel:SetHeight(1)
+    bevel:SetColorTexture(1.0, 0.92, 0.78, 0.22)
+
+    local gold = opts.borderCol or { 0.83, 0.64, 0.24, 0.92 }
+    local topB = btn:CreateTexture(nil, "OVERLAY", nil, 0)
+    topB:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, 0)
+    topB:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 0, 0)
+    topB:SetHeight(1)
+    topB:SetColorTexture(gold[1], gold[2], gold[3], gold[4])
+
+    local botB = btn:CreateTexture(nil, "OVERLAY", nil, 0)
+    botB:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 0, 0)
+    botB:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
+    botB:SetHeight(1)
+    botB:SetColorTexture(gold[1], gold[2], gold[3], gold[4])
+
+    local leftB = btn:CreateTexture(nil, "OVERLAY", nil, 0)
+    leftB:SetSize(1, 1)
+    leftB:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, 0)
+    leftB:SetPoint("BOTTOMLEFT", btn, "BOTTOMLEFT", 0, 0)
+    leftB:SetColorTexture(gold[1], gold[2], gold[3], gold[4])
+
+    local rightB = btn:CreateTexture(nil, "OVERLAY", nil, 0)
+    rightB:SetSize(1, 1)
+    rightB:SetPoint("TOPRIGHT", btn, "TOPRIGHT", 0, 0)
+    rightB:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", 0, 0)
+    rightB:SetColorTexture(gold[1], gold[2], gold[3], gold[4])
+
+    local hl = btn:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetPoint("TOPLEFT", btn, "TOPLEFT", 1, -1)
+    hl:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -1, 1)
+    hl:SetColorTexture(1.0, 0.92, 0.72, 0.16)
+
+    local fs = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    fs:SetPoint("LEFT", btn, "LEFT", 4, 0)
+    fs:SetPoint("RIGHT", btn, "RIGHT", -4, 0)
+    if fs.SetJustifyH then fs:SetJustifyH("CENTER") end
+    if fs.SetWordWrap then fs:SetWordWrap(false) end
+    if fs.SetMaxLines then fs:SetMaxLines(1) end
+    if theme and type(theme.ApplyFont) == "function" then
+        theme.ApplyFont(fs, fontSize or 10, "semibold")
+    end
+    if fs.SetTextColor then
+        fs:SetTextColor(1.00, 0.95, 0.82, 1.00)
+    end
+    fs:SetText(btn._label)
+    if btn.SetFontString then btn:SetFontString(fs) end
+    btn.fs = fs
+
+    function btn:SetText(txt)
+        self._label = tostring(txt or "")
+        self.fs:SetText(self._label)
+    end
+    function btn:GetText()
+        return self._label
+    end
+    local rawSetEnabled = btn.SetEnabled
+    function btn:SetEnabled(en)
+        self._enabled = (en ~= false)
+        if rawSetEnabled then rawSetEnabled(self, self._enabled) end
+        if self.SetAlpha then self:SetAlpha(self._enabled and 1.0 or 0.50) end
+    end
+    function btn:IsEnabled()
+        return self._enabled ~= false
+    end
+    function btn:SetActiveStyle(isActive)
+        local c = isActive and self._activeCol or self._baseCol
+        self._bgTex:SetColorTexture(c[1], c[2], c[3], c[4])
+    end
+    if btn.SetScript then
+        btn:SetScript("OnClick", onClick)
+    end
+    return btn
+end
+
 -- =========================================================================
 -- Mail Recipients Presets, Quick-Pick Panels & Unsaved-Recipient Safety Net
 -- =========================================================================
@@ -638,17 +1678,18 @@ MH.DOCK_GAP_X = 6
 MH.DOCK_GAP_Y = 6
 
 MH.PRESET_ROLE_DEFS = {
-    { key = "bank",           label = "Bank",           shortLabel = "Bank",      icon = 133784, group = "core" },
-    { key = "auction",        label = "Auction",        shortLabel = "AH",        icon = 133785, group = "core" },
-    { key = "mainCrafter",    label = "Main Crafter",   shortLabel = "Crafter",   icon = 136241, group = "core" },
-    { key = "alchemy",        label = "Alchemy",        shortLabel = "Alch",      icon = 136240, group = "profession" },
-    { key = "blacksmithing",  label = "Blacksmithing",  shortLabel = "BS",        icon = 136241, group = "profession" },
-    { key = "enchanting",     label = "Enchanting",     shortLabel = "Ench",      icon = 136244, group = "profession" },
-    { key = "engineering",    label = "Engineering",    shortLabel = "Eng",       icon = 136243, group = "profession" },
-    { key = "leatherworking", label = "Leatherworking", shortLabel = "LW",        icon = 136247, group = "profession" },
-    { key = "tailoring",      label = "Tailoring",      shortLabel = "Tailor",    icon = 136249, group = "profession" },
-    { key = "cooking",        label = "Cooking",        shortLabel = "Cook",      icon = 133971, group = "profession" },
-    { key = "firstaid",       label = "First Aid",      shortLabel = "First Aid", icon = 135966, group = "profession" },
+    { key = "bank",              label = "Bank",               shortLabel = "Bank",      icon = 133784, group = "core" },
+    { key = "investmentStorage", label = "Investment Storage", shortLabel = "Invest",    icon = 133786, group = "core" },
+    { key = "auction",           label = "Auction",            shortLabel = "AH",        icon = 133785, group = "core" },
+    { key = "mainCrafter",       label = "Main Crafter",       shortLabel = "Crafter",   icon = 136241, group = "core" },
+    { key = "alchemy",           label = "Alchemy",            shortLabel = "Alch",      icon = 136240, group = "profession" },
+    { key = "blacksmithing",     label = "Blacksmithing",      shortLabel = "BS",        icon = 136241, group = "profession" },
+    { key = "enchanting",        label = "Enchanting",         shortLabel = "Ench",      icon = 136244, group = "profession" },
+    { key = "engineering",       label = "Engineering",        shortLabel = "Eng",       icon = 136243, group = "profession" },
+    { key = "leatherworking",    label = "Leatherworking",     shortLabel = "LW",        icon = 136247, group = "profession" },
+    { key = "tailoring",         label = "Tailoring",          shortLabel = "Tailor",    icon = 136249, group = "profession" },
+    { key = "cooking",           label = "Cooking",            shortLabel = "Cook",      icon = 133971, group = "profession" },
+    { key = "firstaid",          label = "First Aid",          shortLabel = "First Aid", icon = 135966, group = "profession" },
 }
 
 MH.PROFESSION_ROLE_KEYS = {
@@ -656,7 +1697,7 @@ MH.PROFESSION_ROLE_KEYS = {
     "leatherworking", "tailoring", "cooking", "firstaid",
 }
 
-local CORE_ROLE_MAP = { bank = true, auction = true, mainCrafter = true }
+local CORE_ROLE_MAP = { bank = true, investmentStorage = true, auction = true, mainCrafter = true }
 local PROF_ROLE_MAP = {
     alchemy = true, blacksmithing = true, enchanting = true, engineering = true,
     leatherworking = true, tailoring = true, cooking = true, firstaid = true,
@@ -667,11 +1708,6 @@ local DISPLAY_OPTION_KEYS = {
     showRole = true,
     warnUnsaved = true,
 }
-
-local function trimOuter(raw)
-    if hasSecret(raw) or type(raw) ~= "string" then return "" end
-    return (raw:match("^%s*(.-)%s*$")) or ""
-end
 
 local function getCurrentRealmParts()
     local rawRealm = (_G.GetRealmName and _G.GetRealmName()) or ""
@@ -779,6 +1815,7 @@ local function ensureEconTable(byEcon, econKey)
         byEcon[econKey] = rec
     end
     if type(rec.bank) ~= "string" then rec.bank = "" end
+    if type(rec.investmentStorage) ~= "string" then rec.investmentStorage = "" end
     if type(rec.auction) ~= "string" then rec.auction = "" end
     if type(rec.mainCrafter) ~= "string" then rec.mainCrafter = "" end
     if type(rec.professions) ~= "table" then rec.professions = {} end
@@ -1068,16 +2105,24 @@ local function shouldInterceptUnsavedSend()
 end
 
 local function hookBlizzardMailVisibility()
+    local function onVisChange()
+        MH.RefreshPresetsUI()
+        if MH.UpdateOpenMailButton then MH.UpdateOpenMailButton() end
+    end
     local function hookShowHide(frame)
         if not frame or frame._mmPresetsVisHooked then return end
         if type(frame.HookScript) ~= "function" then return end
         frame._mmPresetsVisHooked = true
-        frame:HookScript("OnShow", function() MH.RefreshPresetsUI() end)
-        frame:HookScript("OnHide", function() MH.RefreshPresetsUI() end)
+        frame:HookScript("OnShow", onVisChange)
+        frame:HookScript("OnHide", onVisChange)
     end
     hookShowHide(_G.SendMailFrame)
     hookShowHide(_G.InboxFrame)
     hookShowHide(_G.OpenMailFrame)
+    if type(_G.OpenMail_Update) == "function" and type(_G.hooksecurefunc) == "function" and not MH._openMailUpdateHooked then
+        MH._openMailUpdateHooked = true
+        pcall(_G.hooksecurefunc, "OpenMail_Update", onVisChange)
+    end
 
     local nameBox = _G.SendMailNameEditBox
     if nameBox and not nameBox._mmPresetsTextHooked and type(nameBox.HookScript) == "function" then
@@ -1292,21 +2337,22 @@ local function createPresetsPanel(mf)
     titleFs:SetText("Mail Recipients")
     panel.titleFs = titleFs
 
+    local gearIcon = theme and theme.ASSETS and (theme.ASSETS.icon_gear or theme.ASSETS.icon_settings) or nil
     local gearBtn
     if theme and type(theme.CreatePlateButton) == "function" then
-        gearBtn = theme.CreatePlateButton(panel, "", 20, 20, {
-            icon = (theme.ASSETS and theme.ASSETS.icon_settings) or nil,
-            iconSize = 12,
+        gearBtn = theme.CreatePlateButton(panel, "", 22, 22, {
+            icon = gearIcon,
+            iconSize = 13,
             variant = "ghost",
             pill = true,
         })
-        if not (theme.ASSETS and theme.ASSETS.icon_settings) and gearBtn.fs then
+        if not gearIcon and gearBtn.fs then
             gearBtn.fs:SetText("*")
         end
     else
         gearBtn = makeBarButton(panel, "Cfg", 28, 20, "secondary", openMailSettingsTab)
     end
-    gearBtn:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -8, -6)
+    gearBtn:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -8, -5)
     gearBtn:SetScript("OnClick", openMailSettingsTab)
     attachMailTooltip(gearBtn, "Mail Recipients & Safety", {
         "Open Console -> Mail to edit saved recipients, display options, and the unsaved-recipient popup.",
@@ -1530,6 +2576,522 @@ local function createInboxQuickStrip(inboxFrame)
     return strip
 end
 
+local function createItemPickerPanel(mf)
+    local panel = _G.CreateFrame("Frame", "MerchantMasterMailItemsPanel", mf)
+    panel:SetWidth(MH.DOCK_PANEL_WIDTH)
+    panel:SetHeight(112)
+    panel:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
+    panel:Hide()
+
+    local theme = ns.Theme
+    if theme and type(theme.NineApple) == "function" then
+        panel._bgSurf = theme.NineApple(panel, "glass_r12", "cardBg", "borderStrong", { noSpecular = true })
+    end
+
+    local titleFs = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    titleFs:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -9)
+    if titleFs.SetJustifyH then titleFs:SetJustifyH("LEFT") end
+    if theme and type(theme.ApplyFont) == "function" then
+        theme.ApplyFont(titleFs, 12, "semibold")
+    end
+    titleFs:SetText("Mail Items")
+    panel.titleFs = titleFs
+
+    local stopBtn = makeBarButton(panel, "Stop", 44, 20, "danger", function()
+        MH.Stop("user_stop")
+    end)
+    stopBtn:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -8, -6)
+    if stopBtn.SetEnabled then stopBtn:SetEnabled(false) end
+    attachMailTooltip(stopBtn, "Stop Collection", {
+        "Immediately cancels an in-progress Get All, Gold, or Open Mail fetch.",
+        "Disabled when idle.",
+    })
+    panel.stopBtn = stopBtn
+
+    local refreshBtn = makeBarButton(panel, "Refresh", 54, 20, "secondary", function()
+        if state.active and state.clickStepper then
+            MH.Step()
+        else
+            MH.RequestRefresh()
+            MH.RefreshItemPickerUI()
+        end
+    end)
+    refreshBtn:SetPoint("RIGHT", stopBtn, "LEFT", -4, 0)
+    attachMailTooltip(refreshBtn, "Refresh Mail Items", {
+        "Re-scan inbox attachments (and request CheckInbox when cooldown allows).",
+    })
+    panel.refreshBtn = refreshBtn
+    titleFs:SetPoint("RIGHT", refreshBtn, "LEFT", -6, 0)
+
+    -- Category filter pills: All | Mats | Gear | Cons | Other
+    panel.catButtons = {}
+    local catWidths = { all = 48, mats = 50, gear = 50, consumable = 50, other = 50 }
+    local cx = 8
+    for _, cat in ipairs(MH.ITEM_CATEGORIES) do
+        local cw = catWidths[cat.key] or 48
+        local cb = makeBarButton(panel, cat.label, cw, 20, "secondary", function()
+            MH.SetItemCategory(cat.key)
+        end)
+        cb:SetPoint("TOPLEFT", panel, "TOPLEFT", cx, -30)
+        cb._catKey = cat.key
+        panel.catButtons[cat.key] = cb
+        cx = cx + cw + 4
+    end
+
+    -- 6 item rows inside 280px width
+    panel.rows = {}
+    for i = 1, MH.ITEM_PICKER_PAGE_SIZE do
+        local row = _G.CreateFrame("Button", nil, panel)
+        row:SetHeight(28)
+        row:SetWidth(MH.DOCK_PANEL_WIDTH - 16)
+        row:SetPoint("TOPLEFT", panel, "TOPLEFT", 8, -(56 + (i - 1) * 31))
+        row:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -8, -(56 + (i - 1) * 31))
+        if theme and type(theme.NineApple) == "function" then
+            row._bgSurf = theme.NineApple(row, "glass_r8", "cardAltBg", "border", { noSpecular = true })
+        end
+        local hl = row:CreateTexture(nil, "HIGHLIGHT")
+        if hl.SetAllPoints then hl:SetAllPoints(row) else hl:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0) end
+        hl:SetColorTexture(1, 1, 1, 0.08)
+        row.hl = hl
+
+        local ic = row:CreateTexture(nil, "ARTWORK")
+        ic:SetSize(18, 18)
+        ic:SetPoint("LEFT", row, "LEFT", 6, 0)
+        ic:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        row.iconTex = ic
+
+        local getAllBtn = makeBaronCrimsonButton(row, "Get All", 48, 20, 9, function(self)
+            local grp = self:GetParent() and self:GetParent()._group
+            if not grp then return end
+            if grp.isGold then
+                if state.active and state.mode == "gold_only" and state.targetMaxStacks == nil then
+                    MH.Stop("user_stop")
+                else
+                    MH.StartGoldFetch()
+                end
+                return
+            end
+            if state.active and state.mode == "item_type" and state.targetMaxStacks == nil then
+                local same = false
+                if state.targetItemID and grp.itemID then
+                    same = (state.targetItemID == grp.itemID)
+                elseif state.targetItemName and grp.name then
+                    same = (string.lower(state.targetItemName) == string.lower(grp.name))
+                end
+                if same then
+                    MH.Stop("user_stop")
+                    return
+                end
+            end
+            MH.StartItemFetch(grp.itemID, grp.name, { totalUnits = grp.totalQty })
+        end, { subtle = true, levelBoost = 2 })
+        getAllBtn:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+        attachMailTooltip(getAllBtn,
+            function(self)
+                local grp = self:GetParent() and self:GetParent()._group
+                return "Get All" .. (grp and grp.name and (": " .. tostring(grp.name)) or "")
+            end,
+            function(self)
+                local grp = self:GetParent() and self:GetParent()._group
+                if not grp then return {} end
+                if grp.isGold then
+                    return {
+                        string.format("Collect all %s across %d non-COD mail%s via TakeInboxMoney only.",
+                            formatCopperSimple(grp.totalCopper),
+                            grp.mailCount or 1, (grp.mailCount or 1) == 1 and "" or "s"),
+                        "Does not touch attached items or COD mail.",
+                    }
+                end
+                return {
+                    string.format("Fetch all %dx (%d stack%s across %d mail%s) from your inbox.",
+                        grp.totalQty or 0,
+                        grp.stackCount or 1, (grp.stackCount or 1) == 1 and "" or "s",
+                        grp.mailCount or 1, (grp.mailCount or 1) == 1 and "" or "s"),
+                    "Never touches COD mail.",
+                }
+            end)
+        row.getAllBtn = getAllBtn
+
+        local qtyFs = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        qtyFs:SetPoint("RIGHT", getAllBtn, "LEFT", -5, 0)
+        if qtyFs.SetJustifyH then qtyFs:SetJustifyH("RIGHT") end
+        if qtyFs.SetWordWrap then qtyFs:SetWordWrap(false) end
+        if theme and type(theme.ApplyFont) == "function" then
+            theme.ApplyFont(qtyFs, 10, "semibold")
+        end
+        row.qtyFs = qtyFs
+
+        local nameFs = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        nameFs:SetPoint("LEFT", ic, "RIGHT", 5, 0)
+        nameFs:SetPoint("RIGHT", qtyFs, "LEFT", -4, 0)
+        if nameFs.SetJustifyH then nameFs:SetJustifyH("LEFT") end
+        if nameFs.SetWordWrap then nameFs:SetWordWrap(false) end
+        if nameFs.SetMaxLines then nameFs:SetMaxLines(1) end
+        if theme and type(theme.ApplyFont) == "function" then
+            theme.ApplyFont(nameFs, 11, "semibold")
+        end
+        row.nameFs = nameFs
+
+        row:SetScript("OnClick", function(self)
+            local grp = self._group
+            if not grp then return end
+            if grp.isGold then
+                MH.TakeOneGoldMail()
+                return
+            end
+            MH.TakeOneItemStack(grp.itemID, grp.name, { totalUnits = grp.totalQty })
+        end)
+        attachMailTooltip(row,
+            function(self) return self._group and self._group.name or "" end,
+            function(self)
+                local grp = self._group
+                if not grp then return {} end
+                if grp.isGold then
+                    return {
+                        string.format("In inbox: %s across %d non-COD mail%s",
+                            formatCopperSimple(grp.totalCopper),
+                            grp.mailCount or 1, (grp.mailCount or 1) == 1 and "" or "s"),
+                        "Click row to take gold from 1 mail. Click 'Get All' to collect gold from all non-COD mails while leaving item attachments untouched.",
+                    }
+                end
+                return {
+                    string.format("In inbox: %dx across %d stack%s (%d mail%s)",
+                        grp.totalQty or 0,
+                        grp.stackCount or 1, (grp.stackCount or 1) == 1 and "" or "s",
+                        grp.mailCount or 1, (grp.mailCount or 1) == 1 and "" or "s"),
+                    "Click row to collect 1 stack. Click 'Get All' on the right to fetch every stack.",
+                }
+            end)
+        row:Hide()
+        panel.rows[i] = row
+    end
+
+    local emptyFs = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    emptyFs:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -64)
+    emptyFs:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -10, -64)
+    if emptyFs.SetJustifyH then emptyFs:SetJustifyH("CENTER") end
+    if theme and type(theme.ApplyFont) == "function" then
+        theme.ApplyFont(emptyFs, 10, "regular")
+    end
+    emptyFs:SetText("No item attachments in inbox")
+    emptyFs:Hide()
+    panel.emptyFs = emptyFs
+
+    local prevBtn = makeBarButton(panel, "<", 26, 20, "secondary", function()
+        state.itemPage = math.max(1, (state.itemPage or 1) - 1)
+        MH.RefreshItemPickerUI()
+    end)
+    prevBtn:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 8, 26)
+    prevBtn:Hide()
+    panel.prevBtn = prevBtn
+
+    local nextBtn = makeBarButton(panel, ">", 26, 20, "secondary", function()
+        state.itemPage = (state.itemPage or 1) + 1
+        MH.RefreshItemPickerUI()
+    end)
+    nextBtn:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -8, 26)
+    nextBtn:Hide()
+    panel.nextBtn = nextBtn
+
+    local pageFs = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    pageFs:SetPoint("CENTER", panel, "BOTTOM", 0, 36)
+    if pageFs.SetJustifyH then pageFs:SetJustifyH("CENTER") end
+    if theme and type(theme.ApplyFont) == "function" then
+        theme.ApplyFont(pageFs, 10, "regular")
+    end
+    pageFs:Hide()
+    panel.pageFs = pageFs
+
+    local statusFs = panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statusFs:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 10, 7)
+    statusFs:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -10, 7)
+    statusFs:SetHeight(14)
+    if statusFs.SetJustifyH then statusFs:SetJustifyH("LEFT") end
+    if statusFs.SetWordWrap then statusFs:SetWordWrap(false) end
+    if statusFs.SetMaxLines then statusFs:SetMaxLines(1) end
+    if theme and type(theme.ApplyFont) == "function" then
+        theme.ApplyFont(statusFs, 10, "regular")
+    end
+    statusFs:SetText(palHex("hexMuted", "98989d") .. "Ready|r")
+    panel.statusFs = statusFs
+
+    if panel.EnableMouseWheel then panel:EnableMouseWheel(true) end
+    if panel.SetScript then
+        panel:SetScript("OnMouseWheel", function(_, delta)
+            if (delta or 0) > 0 then
+                state.itemPage = math.max(1, (state.itemPage or 1) - 1)
+            elseif (delta or 0) < 0 then
+                state.itemPage = (state.itemPage or 1) + 1
+            end
+            MH.RefreshItemPickerUI()
+        end)
+    end
+
+    local function paintPicker()
+        paintSurfaceFallback(panel._bgSurf)
+        local p = getPalette()
+        if titleFs.SetTextColor and p.text then
+            titleFs:SetTextColor(p.text[1], p.text[2], p.text[3], p.text[4] or 1)
+        end
+        if emptyFs.SetTextColor and p.textMuted then
+            emptyFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3], p.textMuted[4] or 1)
+        end
+        if pageFs.SetTextColor and p.textMuted then
+            pageFs:SetTextColor(p.textMuted[1], p.textMuted[2], p.textMuted[3], p.textMuted[4] or 1)
+        end
+        MH.RefreshItemPickerUI()
+    end
+    if theme and type(theme.RegisterWidget) == "function" then
+        theme.RegisterWidget(panel, paintPicker)
+    end
+    return panel
+end
+
+local function anchorOpenMailButton(btn, omf)
+    if not (btn and omf) then return end
+    if btn.ClearAllPoints then btn:ClearAllPoints() end
+    local replyBtn = _G.OpenMailReplyButton
+    local w = 68
+    if replyBtn then
+        if replyBtn.GetLeft and omf.GetLeft then
+            local rl, ol = tonumber(replyBtn:GetLeft()), tonumber(omf:GetLeft())
+            if rl and ol then
+                local avail = rl - ol - 12
+                if avail >= 52 then
+                    w = math.min(68, math.floor(avail))
+                end
+            end
+        end
+        btn:SetSize(w, 21)
+        btn:SetPoint("RIGHT", replyBtn, "LEFT", -4, 0)
+    else
+        btn:SetSize(w, 21)
+        btn:SetPoint("BOTTOMLEFT", omf, "BOTTOMLEFT", 8, 6)
+    end
+    if btn._cushionTex and btn._cushionTex.SetTexCoord then
+        btn._cushionTex:SetTexCoord(0, w / 72, 0, 21 / 72)
+    end
+end
+
+function MH.MountOpenMailButton()
+    if _G.InCombatLockdown and _G.InCombatLockdown() then
+        state.pendingMount = true
+        return false, "combat"
+    end
+    local omf = _G.OpenMailFrame
+    if not omf or type(_G.CreateFrame) ~= "function" then
+        return false, "no_open_mail"
+    end
+    if not MH.openMailBtn then
+        local btn = makeBaronCrimsonButton(omf, "Get All", 68, 21, 10, function()
+            if state.active and state.mode == "open_mail" then
+                MH.Stop("user_stop")
+            else
+                MH.StartOpenMailLoot()
+            end
+        end, { levelBoost = 5 })
+        anchorOpenMailButton(btn, omf)
+        attachMailTooltip(btn, "Get all items", {
+            "Collects all item attachments from this open mail.",
+            "Stops cleanly if your bags become full, and refuses COD mail.",
+        })
+        btn:Hide()
+        MH.openMailBtn = btn
+    end
+    return true, MH.openMailBtn
+end
+
+function MH.UpdateOpenMailButton()
+    local btn = MH.openMailBtn
+    if not btn then return false end
+    local omf = _G.OpenMailFrame
+    local openShown = (omf ~= nil and omf.IsShown and omf:IsShown()) == true
+    if not openShown then
+        if state.active and state.mode == "open_mail" then
+            MH.Stop("mail_closed")
+        end
+        btn:Hide()
+        return false
+    end
+    anchorOpenMailButton(btn, omf)
+    local mid = tonumber(_G.InboxFrame and _G.InboxFrame.openMailID) or tonumber(omf and omf.openMailID)
+    if state.active and state.mode == "open_mail" and state.targetMailID and mid and state.targetMailID ~= mid then
+        MH.Stop("mail_changed")
+    end
+    local slots, _, kind = MH.CountOpenMailItems(mid)
+    if state.active and state.mode == "open_mail" then
+        if btn.SetText then btn:SetText("Stop") end
+        if btn.SetActiveStyle then btn:SetActiveStyle(true) end
+        if btn.SetEnabled then btn:SetEnabled(true) end
+        btn:Show()
+        return true
+    elseif slots > 0 then
+        if btn.SetText then btn:SetText("Get All") end
+        if btn.SetActiveStyle then btn:SetActiveStyle(false) end
+        if btn.SetEnabled then btn:SetEnabled(kind ~= "cod") end
+        btn:Show()
+        return true
+    end
+    btn:Hide()
+    return false
+end
+
+function MH.RefreshItemPickerUI()
+    local picker = MH.itemPickerPanel
+    if not picker then return nil end
+    local groups, catCounts, meta = MH.ScanInboxItems()
+    local pal = getPalette()
+    local activeCat = state.itemCategory or "all"
+    for _, cat in ipairs(MH.ITEM_CATEGORIES) do
+        local cb = picker.catButtons and picker.catButtons[cat.key]
+        if cb then
+            local cnt = (catCounts and catCounts[cat.key]) or 0
+            local lbl = (cnt > 0 and cat.key ~= "all") and string.format("%s %d", cat.label, cnt) or cat.label
+            if cb.SetText then cb:SetText(lbl) end
+            if cb.SetActive then cb:SetActive(activeCat == cat.key) end
+        end
+    end
+
+    local filtered = {}
+    for _, grp in ipairs(groups) do
+        if activeCat == "all" or grp.category == activeCat then
+            filtered[#filtered + 1] = grp
+        end
+    end
+
+    local total = #filtered
+    local pageSize = MH.ITEM_PICKER_PAGE_SIZE
+    local totalPages = math.max(1, math.ceil(total / pageSize))
+    state.itemPage = math.max(1, math.min(totalPages, tonumber(state.itemPage) or 1))
+    local startIdx = (state.itemPage - 1) * pageSize + 1
+    local visibleCount = 0
+
+    local goldCol = pal.gold or { 1.0, 0.82, 0.20, 1 }
+    for i = 1, pageSize do
+        local row = picker.rows and picker.rows[i]
+        if row then
+            local grp = filtered[startIdx + i - 1]
+            row._group = grp
+            if grp then
+                visibleCount = visibleCount + 1
+                row:Show()
+                if row._bgSurf and row._bgSurf.UpdateTheme then row._bgSurf:UpdateTheme() end
+                if grp.isGold then
+                    if row.iconTex then row.iconTex:SetTexture(133784) end
+                    if row.nameFs then
+                        row.nameFs:SetText("Gold")
+                        if row.nameFs.SetTextColor then
+                            row.nameFs:SetTextColor(goldCol[1], goldCol[2], goldCol[3], goldCol[4] or 1)
+                        end
+                    end
+                    if row.qtyFs then
+                        local gTxt = formatCopperSimple(grp.totalCopper)
+                        if (grp.mailCount or 1) > 1 then
+                            gTxt = gTxt .. string.format(" (%dm)", grp.mailCount)
+                        end
+                        row.qtyFs:SetText(gTxt)
+                        if row.qtyFs.SetTextColor then
+                            row.qtyFs:SetTextColor(goldCol[1], goldCol[2], goldCol[3], goldCol[4] or 1)
+                        end
+                    end
+                else
+                    if row.iconTex then row.iconTex:SetTexture(grp.icon or 134400) end
+                    if row.nameFs then
+                        row.nameFs:SetText(grp.name or "")
+                        local qc = QUALITY_COLORS[grp.quality] or pal.text or { 1, 1, 1 }
+                        if row.nameFs.SetTextColor then
+                            row.nameFs:SetTextColor(qc[1], qc[2], qc[3], 1)
+                        end
+                    end
+                    if row.qtyFs then
+                        local qTxt = (grp.mailCount or 1) > 1
+                            and string.format("x%d (%dm)", grp.totalQty or 0, grp.mailCount)
+                            or string.format("x%d", grp.totalQty or 0)
+                        row.qtyFs:SetText(qTxt)
+                        local qCol = pal.accentGreen or { 0.30, 0.85, 0.45, 1 }
+                        if row.qtyFs.SetTextColor then
+                            row.qtyFs:SetTextColor(qCol[1], qCol[2], qCol[3], 1)
+                        end
+                    end
+                end
+            else
+                row:Hide()
+            end
+        end
+    end
+
+    if picker.emptyFs then
+        if visibleCount == 0 then
+            picker.emptyFs:SetText((catCounts and catCounts.all or 0) == 0
+                and "No items or gold in inbox"
+                or "No items in this category")
+            safeShow(picker.emptyFs)
+        else
+            safeHide(picker.emptyFs)
+        end
+    end
+
+    local hasPager = totalPages > 1
+    if picker.prevBtn then
+        if hasPager then
+            picker.prevBtn:Show()
+            if picker.prevBtn.SetEnabled then picker.prevBtn:SetEnabled(state.itemPage > 1) end
+        else
+            picker.prevBtn:Hide()
+        end
+    end
+    if picker.nextBtn then
+        if hasPager then
+            picker.nextBtn:Show()
+            if picker.nextBtn.SetEnabled then picker.nextBtn:SetEnabled(state.itemPage < totalPages) end
+        else
+            picker.nextBtn:Hide()
+        end
+    end
+    if picker.pageFs then
+        if hasPager then
+            safeShow(picker.pageFs)
+            picker.pageFs:SetText(string.format("%d / %d", state.itemPage, totalPages))
+        else
+            safeHide(picker.pageFs)
+        end
+    end
+
+    if not state.active and state.statusText == "Ready" and meta then
+        local hasGoldInFiltered = false
+        for _, grp in ipairs(filtered) do
+            if grp.isGold then
+                hasGoldInFiltered = true
+                break
+            end
+        end
+        local hasGold = hasGoldInFiltered and (meta.totalGoldCopper or 0) > 0
+        local itemGroups = total - (hasGold and 1 or 0)
+        if hasGold and itemGroups > 0 then
+            state.statusText = string.format("%d item%s + %s ready",
+                itemGroups, itemGroups == 1 and "" or "s", formatCopperSimple(meta.totalGoldCopper))
+            state.statusKind = "muted"
+        elseif hasGold then
+            state.statusText = string.format("%s in %d mail%s ready",
+                formatCopperSimple(meta.totalGoldCopper),
+                meta.goldMails or 1, (meta.goldMails or 1) == 1 and "" or "s")
+            state.statusKind = "muted"
+        elseif itemGroups > 0 then
+            state.statusText = string.format("%d item%s ready (%d units)",
+                itemGroups, itemGroups == 1 and "" or "s", meta.totalUnits or 0)
+            state.statusKind = "muted"
+        elseif (meta.codSkipped or 0) > 0 then
+            state.statusText = string.format("%d COD mail skipped", meta.codSkipped)
+            state.statusKind = "warning"
+        end
+    end
+    MH.UpdateUI()
+
+    local h = (visibleCount == 0) and 112 or (56 + visibleCount * 31 + (hasPager and 26 or 0) + 26)
+    picker:SetHeight(h)
+    return filtered, catCounts, meta
+end
+
 function MH.MountPresetPanels()
     if _G.InCombatLockdown and _G.InCombatLockdown() then
         state.pendingMount = true
@@ -1539,9 +3101,13 @@ function MH.MountPresetPanels()
         return false, "no_create_frame"
     end
     local mf = _G.MailFrame
+    if mf and not MH.itemPickerPanel then
+        MH.itemPickerPanel = createItemPickerPanel(mf)
+    end
     if mf and not MH.presetsPanel then
         MH.presetsPanel = createPresetsPanel(mf)
     end
+    MH.MountOpenMailButton()
     local inbox = _G.InboxFrame
     if inbox and not MH.inboxQuickStrip then
         MH.inboxQuickStrip = createInboxQuickStrip(inbox)
@@ -1550,7 +3116,8 @@ function MH.MountPresetPanels()
     return true
 end
 
-function MH.RefreshPresetsUI()
+function MH.RefreshPresetsUI(opts)
+    local skipItemPicker = (type(opts) == "table" and opts.skipItemPicker == true)
     local entries = MH.BuildPresetRecipientEntries()
     local disp = MH.GetDisplayOptions()
     local pal = getPalette()
@@ -1755,48 +3322,39 @@ function MH.RefreshPresetsUI()
         end
     end
 
-    -- 2. Unified Right-Side Vertical Stacking (Zero Bottom Attachment, Auto-Hide on Read Mail)
-    if dockMode == "hidden" then
-        safeHide(bar)
-        safeHide(panel)
-    elseif dockMode == "send" then
-        if showPanel and panel and mf then
-            if panel.ClearAllPoints then panel:ClearAllPoints() end
-            panel:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
-            panel:Show()
-            if bar then
-                if bar.ClearAllPoints then bar:ClearAllPoints() end
-                bar:SetPoint("TOPLEFT", panel, "BOTTOMLEFT", 0, -MH.DOCK_GAP_Y)
-                bar:Show()
-            end
-        else
-            safeHide(panel)
-            if bar and mf then
-                if bar.ClearAllPoints then bar:ClearAllPoints() end
-                bar:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
-                bar:Show()
-            end
-        end
-    elseif dockMode == "inbox" then
-        if bar and mf then
-            if bar.ClearAllPoints then bar:ClearAllPoints() end
-            bar:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
-            bar:Show()
-        end
-        if showPanel and panel then
-            if panel.ClearAllPoints then panel:ClearAllPoints() end
-            if bar then
-                panel:SetPoint("TOPLEFT", bar, "BOTTOMLEFT", 0, -MH.DOCK_GAP_Y)
-            elseif mf then
-                panel:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
-            end
-            panel:Show()
-        else
-            safeHide(panel)
-        end
+    -- 2. Dock Mail Items (Inbox tab) and Mail Recipients cleanly at TOPRIGHT of MailFrame
+    safeHide(bar)
+    local picker = MH.itemPickerPanel
+    if dockMode == "inbox" and picker and mf then
+        if not skipItemPicker and MH.RefreshItemPickerUI then MH.RefreshItemPickerUI() end
+        if picker.ClearAllPoints then picker:ClearAllPoints() end
+        picker:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
+        picker:Show()
+    elseif picker then
+        safeHide(picker)
     end
 
-    -- 3. Keep legacy Inbox quick strip hidden (presets panel now stacks cleanly on the right)
+    if dockMode == "hidden" or not showPanel then
+        safeHide(panel)
+    elseif dockMode == "send" and panel and mf then
+        if panel.ClearAllPoints then panel:ClearAllPoints() end
+        panel:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
+        panel:Show()
+    elseif dockMode == "inbox" and panel and mf then
+        if panel.ClearAllPoints then panel:ClearAllPoints() end
+        if picker and picker.IsShown and picker:IsShown() then
+            panel:SetPoint("TOPLEFT", picker, "BOTTOMLEFT", 0, -MH.DOCK_GAP_Y)
+        else
+            panel:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
+        end
+        panel:Show()
+    end
+
+    if MH.UpdateOpenMailButton then
+        MH.UpdateOpenMailButton()
+    end
+
+    -- 3. Keep legacy Inbox quick strip hidden
     local strip = MH.inboxQuickStrip
     if strip and strip.Hide then
         strip:Hide()
@@ -1814,111 +3372,12 @@ function MH.MountOnMailFrame()
     if not mf or type(_G.CreateFrame) ~= "function" then
         return false, "no_mail_frame"
     end
-    if MH.bar then
-        MH.MountPresetPanels()
-        MH.InstallSendMailGuard()
-        MH.UpdateUI()
-        MH.RefreshPresetsUI()
-        return true, MH.bar
-    end
-
-    local bar = _G.CreateFrame("Frame", "MerchantMasterMailHelperBar", mf)
-    bar:SetSize(MH.DOCK_PANEL_WIDTH, MH.HELPER_PANEL_HEIGHT)
-    bar:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
-
-    local theme = ns.Theme
-    if theme and type(theme.NineApple) == "function" then
-        bar._bgSurf = theme.NineApple(bar, "glass_r12", "cardBg", "borderStrong", { noSpecular = true })
-    end
-
-    local titleFs = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    titleFs:SetPoint("TOPLEFT", bar, "TOPLEFT", 10, -10)
-    titleFs:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -10, -10)
-    if titleFs.SetJustifyH then titleFs:SetJustifyH("LEFT") end
-    if titleFs.SetWordWrap then titleFs:SetWordWrap(false) end
-    if theme and type(theme.ApplyFont) == "function" then
-        theme.ApplyFont(titleFs, 12, "semibold")
-    end
-    titleFs:SetText("Mail Helper")
-    bar.titleFs = titleFs
-
-    local function paintBar()
-        paintSurfaceFallback(bar._bgSurf)
-        local p = getPalette()
-        if titleFs.SetTextColor and p.text then
-            titleFs:SetTextColor(p.text[1], p.text[2], p.text[3], p.text[4] or 1)
-        end
-        MH.UpdateUI()
-    end
-
-    if theme and type(theme.RegisterWidget) == "function" then
-        theme.RegisterWidget(bar, paintBar)
-    end
-
-    -- 2x2 grid of 128x24 action buttons inside 280px right-side panel (10 + 128 + 4 + 128 + 10 = 280).
-    local padX, gapX, gapY = 10, 4, 6
-    local btnW, btnH = 128, 24
-    local gridTopY = -32
-    local modeDefs = {
-        { mode = "all",        label = "Open All", variant = "primary",   col = 0, row = 0 },
-        { mode = "ah_sales",   label = "AH Sales", variant = "secondary", col = 1, row = 0 },
-        { mode = "ah_expired", label = "Expired",  variant = "secondary", col = 0, row = 1 },
-        { mode = "ah_won",     label = "Won",      variant = "secondary", col = 1, row = 1 },
-    }
-    bar.modeBtns = {}
-    for idx, def in ipairs(modeDefs) do
-        local m = def.mode
-        local b = makeBarButton(bar, def.label, btnW, btnH, def.variant, function()
-            if state.active and state.clickStepper and state.mode == m then
-                MH.Step()
-            else
-                MH.Start(m)
-            end
-        end)
-        local xOff = padX + def.col * (btnW + gapX)
-        local yOff = gridTopY - def.row * (btnH + gapY)
-        b:SetPoint("TOPLEFT", bar, "TOPLEFT", xOff, yOff)
-        bar.modeBtns[idx] = { mode = m, btn = b }
-    end
-
-    -- Bottom row (y = -92, height 22px): status FontString (left, ~138px) + Refresh (64px) + Stop (50px).
-    local bottomY = -92
-    local stopBtn = makeBarButton(bar, "Stop", 50, 22, "secondary", function()
-        MH.Stop("user_stop")
-    end)
-    stopBtn:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -padX, bottomY)
-    if stopBtn.SetEnabled then stopBtn:SetEnabled(false) end
-    bar.stopBtn = stopBtn
-
-    local refreshBtn = makeBarButton(bar, "Refresh", 64, 22, "secondary", function()
-        if state.active and state.clickStepper then
-            MH.Step()
-        else
-            MH.RequestRefresh()
-        end
-    end)
-    refreshBtn:SetPoint("RIGHT", stopBtn, "LEFT", -4, 0)
-    bar.refreshBtn = refreshBtn
-
-    local statusFs = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    statusFs:SetPoint("TOPLEFT", bar, "TOPLEFT", padX, bottomY)
-    statusFs:SetPoint("BOTTOMRIGHT", refreshBtn, "BOTTOMLEFT", -4, 0)
-    statusFs:SetHeight(22)
-    if statusFs.SetJustifyH then statusFs:SetJustifyH("LEFT") end
-    if statusFs.SetJustifyV then statusFs:SetJustifyV("MIDDLE") end
-    if statusFs.SetWordWrap then statusFs:SetWordWrap(false) end
-    if statusFs.SetMaxLines then statusFs:SetMaxLines(1) end
-    if theme and type(theme.ApplyFont) == "function" then
-        theme.ApplyFont(statusFs, 11, "regular")
-    end
-    bar.statusFs = statusFs
-
-    MH.bar = bar
-    paintBar()
+    safeHide(MH.bar)
     MH.MountPresetPanels()
     MH.InstallSendMailGuard()
     MH.RefreshPresetsUI()
-    return true, bar
+    MH.UpdateOpenMailButton()
+    return true, MH.presetsPanel
 end
 
 local function isMailActionBlocked(addonArg, funcName)
@@ -1937,17 +3396,24 @@ function MH.OnEvent(self, event, arg1, arg2)
     if hasSecret(event, arg1, arg2) then return end
     if event == "MAIL_SHOW" then
         state.mailOpen = true
+        if not state.active then
+            state.statusText = "Ready"
+            state.statusKind = "muted"
+        end
         MH.MountOnMailFrame()
         MH.UpdateUI()
         MH.RefreshPresetsUI()
     elseif event == "MAIL_CLOSED" then
         state.mailOpen = false
+        state.refreshPending = false
         clearUnsavedConfirm()
         if state.active then
             MH.Stop("mail_closed")
         end
         if MH.bar and MH.bar.Hide then MH.bar:Hide() end
+        if MH.itemPickerPanel and MH.itemPickerPanel.Hide then MH.itemPickerPanel:Hide() end
         if MH.presetsPanel and MH.presetsPanel.Hide then MH.presetsPanel:Hide() end
+        if MH.openMailBtn and MH.openMailBtn.Hide then MH.openMailBtn:Hide() end
         if MH.inboxQuickStrip and MH.inboxQuickStrip.Hide then MH.inboxQuickStrip:Hide() end
     elseif event == "MAIL_SEND_INFO_UPDATE" or event == "MAIL_FAILED" or event == "MAIL_SEND_SUCCESS" then
         clearUnsavedConfirm()
@@ -1964,9 +3430,22 @@ function MH.OnEvent(self, event, arg1, arg2)
                 MH.Step()
             end
         else
-            MH.UpdateUI()
+            if state.refreshPending then
+                finishPendingRefresh(false)
+            elseif MH.RefreshItemPickerUI then
+                MH.RefreshItemPickerUI()
+            else
+                MH.UpdateUI()
+            end
+            if not state.active then
+                MH.RefreshPresetsUI()
+            end
         end
-        MH.RefreshPresetsUI()
+    elseif event == "BAG_UPDATE_DELAYED" then
+        if state.mailOpen and not state.active then
+            if MH.RefreshItemPickerUI then MH.RefreshItemPickerUI() end
+            MH.UpdateOpenMailButton()
+        end
     elseif event == "ADDON_ACTION_BLOCKED" then
         if state.active and isMailActionBlocked(arg1, arg2) then
             state.clickStepper = true
@@ -1989,7 +3468,7 @@ if not MH.frame and type(_G.CreateFrame) == "function" then
     MH.frame = f
     f:SetScript("OnEvent", MH.OnEvent)
     for _, ev in ipairs({
-        "MAIL_SHOW", "MAIL_CLOSED", "MAIL_INBOX_UPDATE",
+        "MAIL_SHOW", "MAIL_CLOSED", "MAIL_INBOX_UPDATE", "BAG_UPDATE_DELAYED",
         "MAIL_SEND_INFO_UPDATE", "MAIL_FAILED", "MAIL_SEND_SUCCESS",
         "ADDON_ACTION_BLOCKED", "PLAYER_REGEN_ENABLED",
     }) do

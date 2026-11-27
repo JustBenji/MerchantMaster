@@ -992,7 +992,9 @@ do local _ = (function()
 
 	local function ensureLockPromptModal()
 		if papp.ui.lockPromptModal then return papp.ui.lockPromptModal end
-		local modal = Theme.CreateFloatingWindow("MerchantMasterProfLockModal", "Lock Leveling Guide?", 440, 148)
+		local modal = Theme.CreateFloatingWindow("MerchantMasterProfLockModal", "Lock Leveling Guide?", 440, 148, {
+			positionKey = "prof_lock",
+		})
 		modal:SetFrameStrata("FULLSCREEN_DIALOG")
 		local body = modal.body
 
@@ -1048,6 +1050,7 @@ do local _ = (function()
 		if modal.subFs and modal.subFs.SetTextColor and pal and pal.textSecondary then
 			modal.subFs:SetTextColor(pal.textSecondary[1], pal.textSecondary[2], pal.textSecondary[3], pal.textSecondary[4] or 0.78)
 		end
+		if modal.ApplySavedOrDefaultPosition then modal:ApplySavedOrDefaultPosition() end
 		modal:Show()
 		if modal.Raise then modal:Raise() end
 		return modal

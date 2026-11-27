@@ -805,24 +805,42 @@ do
         if hit then return hit end
 
         local lots, depthSource = nil, "none"
+        local savedClean, lotAt
         if ns.GetSavedItemLots then
-            local saved = ns.GetSavedItemLots(itemID, econKey)
-            local clean = H.sanitizeLots(saved)
-            if clean then
-                lots = clean
-                depthSource = "live_lots"
+            local saved, at = ns.GetSavedItemLots(itemID, econKey)
+            savedClean = H.sanitizeLots(saved)
+            lotAt = (type(at) == "number" and at > 0) and at or 0
+        end
+        local snapClean, snapAt = nil, 0
+        if ns.Pricing and type(ns.Pricing.GetItemSnapshotDepth) == "function" then
+            local snap = ns.Pricing.GetItemSnapshotDepth(itemID, econKey)
+            snapClean = H.sanitizeLots(snap)
+            if snapClean and type(ns.Pricing.GetSnapshotMeta) == "function" then
+                local meta = ns.Pricing.GetSnapshotMeta(econKey)
+                snapAt = (meta and type(meta.updatedAt) == "number" and meta.updatedAt > 0) and meta.updatedAt or 0
             end
         end
-        if not lots and ns.Pricing and type(ns.Pricing.GetItemSnapshotDepth) == "function" then
-            local snap = ns.Pricing.GetItemSnapshotDepth(itemID, econKey)
-            local clean = H.sanitizeLots(snap)
-            if clean then
-                lots = clean
+        local can = ns.GetCanonicalItemPrice and ns.GetCanonicalItemPrice(itemID, econKey) or nil
+        local canKind = can and can.kind or nil
+        local canTs = (can and type(can.timestamp) == "number" and can.timestamp > 0) and can.timestamp or 0
+        local absentNewer = (canKind == "absent" and canTs >= (lotAt or 0))
+        if not absentNewer then
+            local savedStaleSpot = savedClean and (canKind == "live" or canKind == "tsm") and canTs > (lotAt or 0)
+            if snapClean and (not savedClean or savedStaleSpot or snapAt > (lotAt or 0) or (canKind == "snap" and canTs > (lotAt or 0))) then
+                lots = snapClean
+                depthSource = "snapshot_depth"
+            elseif savedClean and not savedStaleSpot then
+                lots = savedClean
+                depthSource = "live_lots"
+            elseif snapClean then
+                lots = snapClean
                 depthSource = "snapshot_depth"
             end
         end
         local listed = nil
-        if not lots and ns.GetNumListed then
+        if absentNewer then
+            listed = 0
+        elseif not lots and ns.GetNumListed then
             local nListed = ns.GetNumListed(itemID)
             if numeric(nListed) and nListed > 0 then
                 listed = nListed
@@ -1821,7 +1839,9 @@ do
     end
 
     function H.buildSignature(context, legacy)
-        local priceVer = (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion()) or ns.priceCacheEpoch or 0
+        local priceVer = (ns.GetPriceDataRevision and ns.GetPriceDataRevision())
+            or (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion())
+            or ns.priceCacheEpoch or 0
         local econ = H.resolveEconKey(context) or ""
         local profMap = context.profMap or (ns.GetPlayerProfessions and ns.GetPlayerProfessions()) or nil
         local store = ns.Analytics and ns.Analytics.Store
@@ -3999,6 +4019,11 @@ do
         local state = states[context] or { econ = H.resolveEconKey(context), now = numeric(context.now) and context.now or (time and time()) or 0 }
         local changed = false
         if ns.BeginEval then state.bank = ns.BeginEval(state.bank) end
+        if ns.InvalidateEvalItem and state.bank then
+            for id, on in pairs(itemIDs) do
+                if on then ns.InvalidateEvalItem(state.bank, id) end
+            end
+        end
         local ok, err = pcall(function()
             for i = 1, #rows do
                 local row = rows[i]
@@ -4012,6 +4037,9 @@ do
                 if hit then
                     local entry = byID[row.itemID]
                     if entry then
+                        if ns.InvalidateEvalItem and state.bank and row.itemID then
+                            ns.InvalidateEvalItem(state.bank, row.itemID)
+                        end
                         rows[i] = AI.EvaluateItem(entry, context, state)
                         changed = true
                     end

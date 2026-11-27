@@ -292,12 +292,15 @@ end
 -- 6. Snapshot UI Surfaces Standalone Rules (Always-Visible Snapshot Settings vs Hidden Telemetry)
 ---------------------------------------------------------------------------------------------------
 do
-	-- 6a. Console Snapshot Settings sub-tab IS visible standalone (with standalonePanel),
+	-- 6a. Console Snapshot Sync sub-tab IS visible standalone, Legacy Snapshot Builder is completely removed,
 	-- while Overview Snapshot Storage KPI and Database SQLite rows stay hidden
 	app.setTab("console_overview")
 	local setupBtn = UIConsole._state.subTabBar and UIConsole._state.subTabBar.buttons.console_setup
-	check(setupBtn and setupBtn:IsShown() and setupBtn.fs and setupBtn.fs:GetText() == "Snapshot Settings",
-		"Console -> Snapshot Settings sub-tab is visible standalone")
+	check(setupBtn == nil and UIConsole._state.setupView == nil,
+		"Console -> Legacy Snapshot Builder sub-tab and view are completely removed")
+	local setup2Btn = UIConsole._state.subTabBar and UIConsole._state.subTabBar.buttons.console_setup2
+	check(setup2Btn and setup2Btn:IsShown() and setup2Btn.fs and setup2Btn.fs:GetText() == "Snapshot Sync",
+		"Console -> Snapshot Sync sub-tab is visible standalone")
 	check(UIConsole._state.overviewView and UIConsole._state.overviewView.kpis[2]
 		and not UIConsole._state.overviewView.kpis[2].frame:IsShown(),
 		"Console -> Overview Snapshot Storage card is hidden standalone")
@@ -309,16 +312,21 @@ do
 	check(not hasSqliteRow, "Console -> Database hides SQLite rows standalone")
 
 	SlashCmdList.MERCHANTMASTER("snapshots")
-	check(app.activeTab == "console_setup" and UIConsole.GetActiveSubTab() == "console_setup",
-		"/mm snapshots opens Snapshot Settings tab standalone")
-	local su = UIConsole._state.setupView
-	check(su and su.standalonePanel and su.standalonePanel:IsShown()
-		and su.connectedPanel and not su.connectedPanel:IsShown(),
-		"Standalone Snapshot Settings shows standalonePanel and hides connectedPanel")
-	check((su.winInstallBox:GetText() or ""):find("setup-gui", 1, true) ~= nil
-		and (su.linuxInstallBox:GetText() or ""):find("install_linux.py", 1, true) ~= nil
-		and (su.macInstallBox:GetText() or ""):find("python3 -m pip install", 1, true) ~= nil,
-		"Standalone Snapshot Settings displays Windows, Linux (install_linux.py), and macOS install commands")
+	local su2 = UIConsole._state.setupV2View
+	check(app.activeTab == "console_setup2" and UIConsole.GetActiveSubTab() == "console_setup2"
+		and su2 and (su2.winInstallBox:GetText() or ""):find("--sync-mode github --apply-task --sync-now", 1, true) ~= nil
+		and (su2.winRebuildBox:GetText() or ""):find("sync --source github --force", 1, true) ~= nil
+		and (su2.winUninstallBox:GetText() or ""):find("uninstall-task", 1, true) ~= nil
+		and (su2.linuxInstallBox:GetText() or ""):find("install_linux.py --sync-mode github", 1, true) ~= nil
+		and (su2.macInstallBox:GetText() or ""):find("--sync-mode github --apply-task --sync-now", 1, true) ~= nil
+		and su2.modeBtns and su2.modeBtns["local"] and su2.modeBtns["tsm"] and su2.modeBtns["none"],
+		"/mm snapshots opens Snapshot Sync standalone with OS commands and 3-way Price Refresh Mode")
+	SlashCmdList.MERCHANTMASTER("github")
+	check(app.activeTab == "console_setup2" and UIConsole.GetActiveSubTab() == "console_setup2",
+		"/mm github opens Snapshot Sync standalone")
+	SlashCmdList.MERCHANTMASTER("builder")
+	check(app.activeTab == "console_setup2" and UIConsole.GetActiveSubTab() == "console_setup2",
+		"/mm builder redirects cleanly to Snapshot Sync standalone")
 
 	-- 6b. Gap Sniper & Vendor Sniper [Scan Snapshot] buttons hidden
 	app.setTab("sniper_gap")
@@ -341,6 +349,119 @@ do
 		if f._text == "Scan Snapshot" and f:IsShown() then anyVisibleVendorSnapBtn = true end
 	end
 	check(not anyVisibleVendorSnapBtn, "All [Scan Snapshot] buttons stay hidden in Vendor Sniper standalone")
+
+	app.setTab("sniper_de")
+	local anyVisibleDESnapBtn = false
+	for _, f in ipairs(createdFrames) do
+		if f._text == "Scan Snapshot" and f:IsShown() then anyVisibleDESnapBtn = true end
+	end
+	check(not anyVisibleDESnapBtn, "All [Scan Snapshot] buttons stay hidden in Disenchant Sniper standalone")
+
+	-- 6b2. Disenchant Sniper view renders deals, cycles Quality, toggles AS +20%, and formats DE tooltip
+	do
+		local origCItem = _G.C_Item
+		local origGetDEBD = ns.GetItemDEBreakdown
+		local origAS = SE.GetSettings().deUseArcaneSalvager
+		local origQual = SE.GetSettings().deQualityFilter
+		local origMinP = SE.GetSettings().deMinProfitCopper
+		local origBrowseCache = {}
+		for k, v in pairs(SE.browseCache) do origBrowseCache[k] = v end
+
+		_G.C_Item = {
+			GetItemInfo = function(arg)
+				local id = type(arg) == "number" and arg or (type(arg) == "string" and tonumber(arg:match("item:(%d+)")))
+				if id == 99801 then
+					return "Synthetic Emerald Mantle", "|cff1eff00|Hitem:99801|h[Synthetic Emerald Mantle]|h|r", 2, 58, 53, "Armor", "Cloth", 1, "INVTYPE_SHOULDER", 132641, 8000, 4, 1
+				end
+				return origCItem and origCItem.GetItemInfo and origCItem.GetItemInfo(arg) or nil
+			end,
+			GetItemInfoInstant = function(arg)
+				local id = type(arg) == "number" and arg or (type(arg) == "string" and tonumber(arg:match("item:(%d+)")))
+				if id == 99801 then return id, "Armor", "Cloth", "INVTYPE_SHOULDER", 132641, 4, 1 end
+				return origCItem and origCItem.GetItemInfoInstant and origCItem.GetItemInfoInstant(arg)
+			end,
+		}
+		ns.GetItemDEBreakdown = function(itemID)
+			if itemID == 99801 then
+				return {
+					quality = 2, ilvl = 58, className = "Armor",
+					netCopper = 30000, asNetCopper = 36000, grossCopper = 31579, asGrossCopper = 37895,
+					minNetCopper = 15000, maxNetCopper = 45000, primarySummary = "75% Illusion Dust",
+					outcomes = { { matID = 16204, name = "Illusion Dust", matRate = 0.75, amountOfMats = 1.1, evNetRounded = 22500 } },
+				}, nil
+			end
+			return nil, "ineligible"
+		end
+
+		SE.ClearDEDeals()
+		SE.SetOption("deMinProfitCopper", 1000)
+		SE.SetOption("deUseArcaneSalvager", false)
+		SE.SetOption("deQualityFilter", "all")
+		SE.IngestBrowseBatch({
+			{ itemID = 99801, minPrice = 10000, totalQuantity = 1, quality = 2, isCommodity = false,
+				itemLink = "|cff1eff00|Hitem:99801|h[Synthetic Emerald Mantle]|h|r" },
+		}, econ)
+		SE.OnBrowseScanComplete(econ, false)
+		app.panel:Show()
+		app.setTab("sniper_de")
+		app.refresh()
+
+		local deRow = nil
+		for _, f in ipairs(createdFrames) do
+			if f._deal and f._deal.idKey == "de:99801" and f:IsShown() then
+				deRow = f
+				break
+			end
+		end
+		local maxProfTxt = (deRow and deRow.cells and deRow.cells[6] and deRow.cells[6]:GetText() or "")
+			:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+		check(deRow ~= nil and deRow.cells and deRow.cells[2] and deRow.cells[2]:GetText() == "1"
+			and maxProfTxt:find("2g", 1, true) ~= nil
+			and deRow.cells[7] and deRow.cells[7]:GetText() == "75% Illusion Dust",
+			"Disenchant Sniper UI renders Qty, Max Profit, and Expected Mat columns")
+
+		local asCheck, qualBtn = nil, nil
+		for _, f in ipairs(createdFrames) do
+			if f.label and f.label.GetText and f.label:GetText() == "AS +20%" then asCheck = f end
+			if f._mmLabel and f._mmLabel.GetText and f._mmLabel:GetText() == "All (Green+)" then qualBtn = f end
+		end
+		check(asCheck ~= nil and qualBtn ~= nil, "Disenchant Sniper filter strip exposes AS +20% and Quality controls")
+
+		asCheck:SetChecked(true)
+		asCheck:Click("LeftButton")
+		check(SE.GetSettings().deUseArcaneSalvager == true and SE.deDealsByKey["de:99801"].deValue == 36000,
+			"Clicking AS +20% updates DE Sniper deal value to 36000c (+20%)")
+
+		GameTooltip:ClearLines()
+		deRow:GetScript("OnEnter")(deRow)
+		local deTipRaw = table.concat(GameTooltip._lines or {}, "\n")
+		local deTip = deTipRaw:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+		check(deTip:find("Expected DE Value (AS +20%)", 1, true) ~= nil
+			and deTip:find("Buy Moat (Qty):", 1, true) ~= nil
+			and deTip:find("Max DE Revenue:", 1, true) ~= nil
+			and deTip:find("Max Total Profit:", 1, true) ~= nil
+			and deTip:find("Expected Disenchant Materials:", 1, true) ~= nil
+			and deTip:find("2g 70s", 1, true) ~= nil,
+			"Disenchant Sniper row tooltip displays Buy Moat, Max DE Revenue, Max Total Profit, and scaled material EV (2g 70s), got:\n" .. deTip)
+
+		qualBtn:Click("LeftButton")
+		check(SE.GetSettings().deQualityFilter == "green", "Quality pill cycles All -> Uncommon")
+		qualBtn:Click("LeftButton")
+		check(SE.GetSettings().deQualityFilter == "blue", "Quality pill cycles Uncommon -> Rare")
+		qualBtn:Click("LeftButton")
+		check(SE.GetSettings().deQualityFilter == "epic", "Quality pill cycles Rare -> Epic")
+		qualBtn:Click("LeftButton")
+		check(SE.GetSettings().deQualityFilter == "all", "Quality pill wraps Epic -> All")
+
+		SE.ClearDEDeals()
+		SE.browseCache = origBrowseCache
+		SE.SetOption("deUseArcaneSalvager", origAS)
+		SE.SetOption("deQualityFilter", origQual)
+		SE.SetOption("deMinProfitCopper", origMinP)
+		ns.GetItemDEBreakdown = origGetDEBD
+		_G.C_Item = origCItem
+		app.panel:Hide()
+	end
 
 	-- 6c. Deep Analysis heatmap timing drawer stays unmounted / hidden standalone
 	app.openDeepAnalysis({ itemID = 2447, name = "Peacebloom" })

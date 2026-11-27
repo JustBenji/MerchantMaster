@@ -1395,8 +1395,8 @@ app.getBagCountByID = origGetBagCountByID
 	fireEvent("MAIL_SHOW")
 	local _, dockRelM = modal:GetPoint(1)
 	check(dockRelM == uiMLF, "MAIL_SHOW auto-docks strip beside MailFrame")
-	check(modal.spotlightCard:IsShown() and modal.buyBtn:GetText() == "Collect from Mail",
-		"Stage 2 Mail open shows Collect from Mail button")
+	check(modal.spotlightCard:IsShown() and modal.buyBtn:GetText() == "Collect 1x" and modal.markBtn:GetText() == "All This Item",
+		"Stage 2 Mail open shows Collect 1x and All This Item buttons")
 	modal.buyBtn:Click("LeftButton")
 	check(#uiMailTakeCalls == 1, "Stage 2 UI click executes TakeInboxItem")
 	fireEvent("BAG_UPDATE_DELAYED")
@@ -1410,8 +1410,8 @@ app.getBagCountByID = origGetBagCountByID
 	fireEvent("BANKFRAME_OPENED")
 	local _, dockRelB = modal:GetPoint(1)
 	check(dockRelB == uiBF, "BANKFRAME_OPENED auto-docks strip beside BankFrame")
-	check(modal.spotlightCard:IsShown() and modal.buyBtn:GetText() == "Withdraw from Bank",
-		"Stage 2 Bank open shows Withdraw from Bank button")
+	check(modal.spotlightCard:IsShown() and modal.buyBtn:GetText() == "Take 1x" and modal.markBtn:GetText() == "All This Item",
+		"Stage 2 Bank open shows Take 1x and All This Item buttons")
 	modal.buyBtn:Click("LeftButton")
 	check(#uiBankUseCalls == 1, "Stage 2 UI click executes Bank withdrawal")
 	fireEvent("BAG_UPDATE_DELAYED")
@@ -3047,10 +3047,16 @@ local function runStage5AuctionatorParityTests()
 	check(tab.sellPricesBox:IsShown() and tab.sellPricesRows[1]:IsShown() and tab.sellPricesRows[2]:IsShown() and tab.sellPricesRows[3]:IsShown(),
 		"Current Prices panel renders 3 live commodity rows")
 	check(stripColors(tab.sellPricesCol1:GetText()) == "Unit Price" and stripColors(tab.sellPricesCol3:GetText()) == "Avail"
-		and stripColors(tab.sellPricesCol4:GetText()) == "You?",
-		"Current Prices commodity headers show Unit Price | Avail | You?")
-	check(stripColors(tab.sellPricesRows[2].c4:GetText()) == "Yes" and stripColors(tab.sellPricesRows[1].c4:GetText()) == "-",
+		and stripColors(tab.sellPricesCol5:GetText()) == "Owned?"
+		and not tab.sellPricesCol2:IsShown() and not tab.sellPricesCol4:IsShown(),
+		"Current Prices commodity headers show Unit Price | Avail | Owned?")
+	check(tab.sellPricesVDivs and tab.sellPricesVDivs[1]:IsShown() and tab.sellPricesVDivs[2]:IsShown()
+		and not tab.sellPricesVDivs[3]:IsShown() and not tab.sellPricesVDivs[4]:IsShown(),
+		"Current Prices commodity mode displays 2 vertical column guide lines")
+	check(stripColors(tab.sellPricesRows[2].c5:GetText()) == "Yes" and stripColors(tab.sellPricesRows[1].c5:GetText()) == "-",
 		"Current Prices marks own listing with 'Yes' and competitor with '-'")
+	check(tab.sellPricesRows[1].c1:GetText():find("UI-GoldIcon", 1, true) ~= nil,
+		"Current Prices formats money with WoW Gold/Silver/Copper coin icons")
 	check(of.ComputeSellUnitPrice(sl.items[1]) == 25000,
 		"Default Match (0% LIFO) matches competitor price 25000c")
 
@@ -3086,8 +3092,10 @@ local function runStage5AuctionatorParityTests()
 	if onTxtPrice then onTxtPrice(tab.sellPriceGBox, true) end
 	check(sl.items[1].customPrice == 25500,
 		"Typing in sellPriceGBox does NOT corrupt model mid-keystroke (stays 25500)")
-	check(stripColors(tab.sellTotalFs:GetText()):find("6g 17s 25c", 1, true) ~= nil,
-		"Typing updates Total Price live (5 * 1g23s45c = 6g 17s 25c), got: " .. tostring(stripColors(tab.sellTotalFs:GetText())))
+	local liveTotRaw = stripColors(tab.sellTotalFs:GetText())
+	check(liveTotRaw:find("UI-GoldIcon", 1, true) ~= nil and liveTotRaw:find("6|T", 1, true) ~= nil
+		and liveTotRaw:find("17|T", 1, true) ~= nil and liveTotRaw:find("25|T", 1, true) ~= nil,
+		"Typing updates Total Price live with coin icons (5 * 1g23s45c = 6g 17s 25c), got: " .. tostring(liveTotRaw))
 	local onLost = tab.sellPriceCBox:GetScript("OnEditFocusLost")
 	if onLost then onLost(tab.sellPriceCBox) end
 	check(sl.items[1].customPrice == 12345,
@@ -3125,22 +3133,89 @@ local function runStage5AuctionatorParityTests()
 	ns.MarketScan.HandleEvent("COMMODITY_SEARCH_RESULTS_UPDATED", 81001)
 	check(sl.items[1].priceThreshold and math.abs(sl.items[1].priceThreshold - 19000) < 1,
 		"Commodity PriceWarningThreshold computed accurately (19000c for 5g market), got: " .. tostring(sl.items[1].priceThreshold))
+	check(tab.postAllBtn == nil and tab.doneBtn == nil and tab.skipBtn == nil
+		and tab.sellChBtn == nil and tab.sellVendorBar == nil,
+		"Removed legacy UI buttons (postAllBtn/doneBtn/skipBtn/sellChBtn/sellVendorBar)")
+	check(tab.cancelBtn ~= nil and not tab.cancelBtn:IsShown(),
+		"Context-only cancelBtn is hidden when idle")
 	of.SetSellItemPrice(1, 15000, 0) -- 1g 50s <= 1g 90s threshold!
 	local okLow, errLow, whyLow = of.PostSellItem(1)
 	check(okLow == false and errLow == "confirm_low_price" and whyLow == "low_price",
 		"Posting <= PriceWarningThreshold triggers low_price confirmation gate")
-	check(tab.postBtn:GetText() == "Confirm Low Price" and tab.postAllBtn:GetText() == "Cancel",
-		"UI switches to 'Confirm Low Price' + 'Cancel' when warningConfirm is pending")
-	tab.postAllBtn:Click("LeftButton")
-	check(sl.warningConfirm == nil and tab.postBtn:GetText() == "Post",
-		"Clicking Cancel clears warningConfirm cleanly")
+	check(tab.postBtn:GetText() == "Confirm Low Price" and tab.cancelBtn:IsShown() and tab.cancelBtn:GetText() == "Cancel",
+		"UI switches to 'Confirm Low Price' and reveals context-only 'Cancel' when warningConfirm is pending")
+	tab.cancelBtn:Click("LeftButton")
+	check(sl.warningConfirm == nil and tab.postBtn:GetText() == "Post" and not tab.cancelBtn:IsShown(),
+		"Clicking context-only Cancel clears warningConfirm and hides cancelBtn cleanly")
 
-	-- Below-vendor guard: vendorSell=200c; posting at 205c -> after 5% cut floor(205*5*0.95)=973 < 200*5=1000 -> below_vendor!
+	-- Below-vendor guard: vendorSell=200c; posting at 205c -> after 5% cut floor(205*0.95)=194 < 200 -> below_vendor!
+	-- Also verify sellVendorRow warning tint + StaticPopup MERCHANTMASTER_CONFIRM_BELOW_VENDOR flow!
+	local savedPopupShow = _G.StaticPopup_Show
+	local savedPopupHide = _G.StaticPopup_Hide
+	local shownPopups, hiddenPopups = {}, {}
+	local dlgBV = _G.StaticPopupDialogs and _G.StaticPopupDialogs["MERCHANTMASTER_CONFIRM_BELOW_VENDOR"]
+	check(dlgBV ~= nil and dlgBV.button1 == "Post on AH" and dlgBV.button2 == "Cancel"
+		and type(dlgBV.text) == "string" and dlgBV.text:find("5%% AH cut", 1, true) ~= nil,
+		"StaticPopupDialogs['MERCHANTMASTER_CONFIRM_BELOW_VENDOR'] registered with exact buttons & 5% AH cut text")
+	_G.StaticPopup_Show = function(which, a1, a2, a3, a4)
+		check(a3 == nil and a4 == nil, "StaticPopup_Show passes strictly (which, arg1, arg2) with no 4th/5th args")
+		local formatted = string.format(dlgBV.text, a1, a2)
+		shownPopups[#shownPopups + 1] = { which = which, a1 = a1, a2 = a2, formatted = formatted }
+	end
+	_G.StaticPopup_Hide = function(which)
+		hiddenPopups[#hiddenPopups + 1] = which
+	end
 	of.SetSellItemPrice(1, 205, 0)
-	local okBV, errBV, whyBV = of.PostSellItem(1)
-	check(okBV == false and errBV == "confirm_low_price" and whyBV == "below_vendor",
-		"Posting below vendor value after 5% AH cut triggers below_vendor confirmation gate")
+	tab.Render()
+	check(tab.sellVendorRow ~= nil and tab.sellVendorRow._isBelowVendor == true
+		and stripColors(tab.sellVendorValFs:GetText()):find("(> AH Net!)", 1, true) ~= nil,
+		"sellVendorRow highlights warning and displays '(> AH Net!)' when 95% AH net < vendor value")
+	tab.postBtn:Click("LeftButton")
+	check(sl.warningConfirm ~= nil and sl.warningConfirm.reason == "below_vendor" and tab.cancelBtn:IsShown(),
+		"Clicking Post below vendor value (after 5% AH cut) triggers below_vendor confirmation gate")
+	check(#shownPopups == 1 and shownPopups[1].which == "MERCHANTMASTER_CONFIRM_BELOW_VENDOR"
+		and shownPopups[1].formatted:find("5% AH cut", 1, true) ~= nil
+		and shownPopups[1].formatted:find("more at vendor).", 1, true) ~= nil,
+		"Clicking Post on below_vendor shows MERCHANTMASTER_CONFIRM_BELOW_VENDOR StaticPopup with valid 2-arg WoW format")
+	-- Cancel via popup OnCancel clears warningConfirm and hides cancelBtn
+	dlgBV.OnCancel()
+	check(sl.warningConfirm == nil and not tab.cancelBtn:IsShown(),
+		"MERCHANTMASTER_CONFIRM_BELOW_VENDOR OnCancel clears warningConfirm cleanly")
+	-- Re-trigger via Enter key in price box, then verify item change auto-hides StaticPopup
+	tab.sellPriceGBox:GetScript("OnEnterPressed")(tab.sellPriceGBox)
+	check(#shownPopups == 2 and sl.warningConfirm ~= nil and sl.warningConfirm.reason == "below_vendor",
+		"Pressing Enter on below_vendor also shows MERCHANTMASTER_CONFIRM_BELOW_VENDOR StaticPopup")
+	of.SelectSellItem(2)
+	check(#hiddenPopups >= 1 and hiddenPopups[#hiddenPopups] == "MERCHANTMASTER_CONFIRM_BELOW_VENDOR",
+		"Changing active item auto-hides MERCHANTMASTER_CONFIRM_BELOW_VENDOR StaticPopup")
+	of.SelectSellItem(1)
+	-- Verify OnAccept ("Post on AH") confirms and dispatches PostCommodity, and OnAuctionHouseClosed auto-hides popup
+	tab.postBtn:Click("LeftButton")
+	check(#shownPopups == 3 and sl.warningConfirm ~= nil and sl.warningConfirm.reason == "below_vendor",
+		"Re-clicking Post below vendor opens popup #3")
+	local beforeHideAH = #hiddenPopups
+	tab.OnAuctionHouseClosed()
+	check(#hiddenPopups == beforeHideAH + 1 and hiddenPopups[#hiddenPopups] == "MERCHANTMASTER_CONFIRM_BELOW_VENDOR",
+		"OnAuctionHouseClosed auto-hides MERCHANTMASTER_CONFIRM_BELOW_VENDOR StaticPopup")
+	tab.SelectTab()
 	of.CancelPendingSellPost("clear")
+	postCommCalls = {}
+	tab.postBtn:Click("LeftButton")
+	check(sl.warningConfirm ~= nil and sl.warningConfirm.reason == "below_vendor",
+		"Below-vendor confirmation armed before popup OnAccept")
+	dlgBV.OnAccept()
+	check(sl.warningConfirm == nil and #postCommCalls == 1 and postCommCalls[1].unitPrice == 205,
+		"MERCHANTMASTER_CONFIRM_BELOW_VENDOR OnAccept ('Post on AH') dispatches PostCommodity at 205c")
+	of.CancelPendingSellPost("clear")
+	-- Direct backend check for exact floor(effectiveUnitPrice * 0.95) < vendorPrice (qty=1 edge)
+	local warnR1, warnMsg1 = of.GetSellConfirmationWarning(1, { qty = 1, unitPrice = 210 })
+	check(warnR1 == "below_vendor" and type(warnMsg1) == "string" and warnMsg1:find("5% AH cut", 1, true) ~= nil,
+		"GetSellConfirmationWarning checks per-unit floor(210*0.95)=199 < 200 -> below_vendor")
+	local warnR2 = of.GetSellConfirmationWarning(1, { qty = 1, unitPrice = 211 })
+	check(warnR2 ~= "below_vendor",
+		"GetSellConfirmationWarning allows floor(211*0.95)=200 >= 200 (not below_vendor)")
+	_G.StaticPopup_Show = savedPopupShow
+	_G.StaticPopup_Hide = savedPopupHide
 
 	-- 5. PostCommodity + needsConfirmation -> ConfirmPostCommodity + ComposeAuctionPostedMessage + auto-advance
 	of.SetSellItemPrice(1, 49999, 0)
@@ -3150,8 +3225,8 @@ local function runStage5AuctionatorParityTests()
 	local okP1, stP1 = of.PostSellItem(1)
 	check(okP1 == true and stP1 == "awaiting_confirm" and #postCommCalls == 1 and postCommCalls[1].qty == 5 and postCommCalls[1].unitPrice == 49999 and postCommCalls[1].dur == 2,
 		"PostCommodity passes exact (loc, dur=2, qty=5, unitPrice=49999) and enters awaiting_confirm")
-	check(tab.postBtn:GetText() == "Confirm Post" and tab.postAllBtn:GetText() == "Cancel",
-		"UI switches to 'Confirm Post' + 'Cancel' when needsConfirmation==true")
+	check(tab.postBtn:GetText() == "Confirm Post" and tab.cancelBtn:IsShown() and tab.cancelBtn:GetText() == "Cancel",
+		"UI switches to 'Confirm Post' and reveals context-only 'Cancel' when needsConfirmation==true")
 	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55499)
 	check(sl.pendingPost ~= nil and sl.pendingPost.state == "awaiting_confirm",
 		"AUCTION_HOUSE_AUCTION_CREATED ignored while awaiting_confirm")
@@ -3188,19 +3263,29 @@ local function runStage5AuctionatorParityTests()
 	check(stripColors(tab.sellPriceLbl:GetText()) == "Buyout Price" and tab.sellBidRow:IsShown(),
 		"Non-commodity shows 'Buyout Price' and displays Bid Price row")
 
-	-- Non-commodity Current Prices ladder filters by itemLevel (58 matches, 40 ignored!) and shows Buyout/Bid/iLvl/You?
+	-- Non-commodity Current Prices ladder filters by itemLevel (58 matches, 40 ignored!), aggregates identical rows (Avail=2), and shows 5 cols: Buyout Price | Bid Price | Avail | iLvl | Owned?
 	mockItemLadder[81005] = {
 		{ itemKey = { itemID = 81005, itemLevel = 40, itemSuffix = 0 }, buyoutAmount = 10000, bidAmount = 8000, quantity = 1, containsOwnerItem = false },
 		{ itemKey = { itemID = 81005, itemLevel = 58, itemSuffix = 0 }, buyoutAmount = 90000, bidAmount = 75000, quantity = 1, containsOwnerItem = false, owners = { "SmithX" } },
+		{ itemKey = { itemID = 81005, itemLevel = 58, itemSuffix = 0 }, buyoutAmount = 90000, bidAmount = 75000, quantity = 1, containsOwnerItem = false, owners = { "SmithY" } },
 		{ itemKey = { itemID = 81005, itemLevel = 58, itemSuffix = 0 }, buyoutAmount = 95000, bidAmount = 80000, quantity = 1, containsOwnerItem = true, owners = { "player" } },
 	}
 	of.ScanSellItemMarket(bladeIdx, "select")
 	ns.MarketScan.HandleEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 81005, itemLevel = 0, itemSuffix = 0 })
-	check(#(sl.items[bladeIdx].currentListings or {}) == 2 and sl.items[bladeIdx].liveUnit == 90000,
-		"Equipment search filters out mismatched iLvl 40 and keeps iLvl 58 rows (liveUnit=90000)")
-	check(stripColors(tab.sellPricesCol1:GetText()) == "Buyout" and stripColors(tab.sellPricesCol2:GetText()) == "Bid"
-		and stripColors(tab.sellPricesCol3:GetText()) == "iLvl",
-		"Equipment Current Prices columns show Buyout | Bid | iLvl | You?")
+	check(#(sl.items[bladeIdx].currentListings or {}) == 2 and sl.items[bladeIdx].liveUnit == 90000
+		and sl.items[bladeIdx].currentListings[1].quantity == 2 and sl.items[bladeIdx].currentListings[2].containsOwnerItem == true,
+		"Equipment search filters iLvl 40, aggregates duplicate competitor rows (Avail=2), and keeps owned row separate")
+	check(stripColors(tab.sellPricesCol1:GetText()) == "Buyout Price" and stripColors(tab.sellPricesCol2:GetText()) == "Bid Price"
+		and stripColors(tab.sellPricesCol3:GetText()) == "Avail" and stripColors(tab.sellPricesCol4:GetText()) == "iLvl"
+		and stripColors(tab.sellPricesCol5:GetText()) == "Owned?"
+		and tab.sellPricesCol2:IsShown() and tab.sellPricesCol4:IsShown(),
+		"Equipment Current Prices displays all 5 columns: Buyout Price | Bid Price | Avail | iLvl | Owned?")
+	check(stripColors(tab.sellPricesRows[1].c3:GetText()) == "2" and stripColors(tab.sellPricesRows[1].c4:GetText()) == "58"
+		and stripColors(tab.sellPricesRows[2].c5:GetText()) == "Yes",
+		"Equipment Current Prices renders aggregated Avail=2, iLvl=58, and Owned?=Yes")
+	check(tab.sellPricesVDivs and tab.sellPricesVDivs[1]:IsShown() and tab.sellPricesVDivs[2]:IsShown()
+		and tab.sellPricesVDivs[3]:IsShown() and tab.sellPricesVDivs[4]:IsShown(),
+		"Equipment Current Prices shows all 4 vertical column guide lines")
 	-- Click row 1 (90000 BO, 75000 Bid) under -1c -> sets BO=89999 and carries Bid=75000 (< 89999)
 	tab.sellPricesRows[1]:Click("LeftButton")
 	check(sl.items[bladeIdx].customPrice == 89999 and sl.items[bladeIdx].bidPrice == 75000,
@@ -3264,12 +3349,12 @@ local function runStage5AuctionatorParityTests()
 	of.RemoveSellItem(petIdx)
 	of.RemoveSellItem(bladeIdx)
 
-	-- 7. Skip (advances & disabled when no other pending) + Refresh (including lastItemInfo) + Bags grid + Sell Queue tab + Vendor channel
+	-- 7. Backend SkipSellItem + Refresh + Bags grid + Sell Queue tab + backend Vendor channel (AH form stays shown in MM Sell!)
 	of.SelectSellItem(2)
-	check(tab.skipBtn:IsEnabled() == true, "Skip button enabled while item 3 is also pending")
-	tab.skipBtn:Click("LeftButton")
-	check(sl.activeIndex == 3, "Clicking Skip advances to next pending item (3)")
-	-- Vendor channel immediately clears SPACE override binding and hides AH form/Current Prices!
+	local okSkip, nextSkipIdx = of.SkipSellItem()
+	check(okSkip == true and nextSkipIdx == 3 and sl.activeIndex == 3,
+		"Backend OrderFlow.SkipSellItem advances to next pending item (3)")
+	-- Vendor channel clears SPACE override binding while MM Sell keeps AH pricing form visible cleanly
 	clearOverrideCalls = 0
 	of.ToggleSellItemChannel(3)
 	check(sl.items[3].channel == "vendor", "ToggleSellItemChannel switches item 3 to Vendor")
@@ -3277,18 +3362,20 @@ local function runStage5AuctionatorParityTests()
 	of.OnMerchantShow()
 	tab.Render()
 	tab.SyncSpaceBinding()
-	check(clearOverrideCalls >= 1 and not tab.sellForm:IsShown() and tab.sellVendorBar:IsShown(),
-		"Vendor channel clears SPACE override, hides AH form, and shows Vendor controls")
+	check(clearOverrideCalls >= 1 and tab.sellForm:IsShown() and tab.sellVendorBar == nil,
+		"Vendor channel clears SPACE override while MM Sell keeps AH pricing form visible cleanly")
 	local soldVend = of.SellAllToVendor()
 	check(soldVend == 1 and #vendorUseCalls == 1 and sl.items[3].status == "done",
 		"SellAllToVendor sells vendor-flagged item 3 and marks it done")
 	mfShown = false
 	of.OnMerchantClosed()
 
-	-- Only item 2 remains pending -> Skip MUST be disabled!
+	-- Only item 2 remains pending -> backend SkipSellItem returns false
 	of.SelectSellItem(2)
 	tab.Render()
-	check(not tab.skipBtn:IsEnabled(), "Skip button is disabled when no other pending item exists")
+	local okSkip2, errSkip2 = of.SkipSellItem()
+	check(okSkip2 == false and errSkip2 == "no_other_pending",
+		"Backend OrderFlow.SkipSellItem returns no_other_pending when no other pending item exists")
 
 	-- Left-side Bags grid & Sell Queue mini-tab per-row X remove
 	bagState[0][7] = { itemID = 81004, stackCount = 9, isLocked = false, isBound = false }
@@ -3309,8 +3396,8 @@ local function runStage5AuctionatorParityTests()
 	for _, r in ipairs(tab.sellQueueRows or {}) do
 		if r:IsShown() and r._itemIndex == 4 then row4 = r; break end
 	end
-	check(row4 ~= nil and row4.removeBtn and row4.removeBtn:IsShown(),
-		"Sell Queue row displays per-row X remove button")
+	check(row4 ~= nil and row4.removeBtn and row4.removeBtn:IsShown() and row4.chBtn == nil,
+		"Sell Queue row displays per-row X remove button with channel toggle removed")
 	row4.removeBtn:Click("LeftButton")
 	check(#sl.items == 3, "Clicking per-row X removes item from Sell queue")
 	tab.SetSubTab("prices")
@@ -3323,6 +3410,11 @@ local function runStage5AuctionatorParityTests()
 	local okLowGold, errLowGold = of.PostSellItem(2)
 	check(okLowGold == false and errLowGold == "insufficient_money" and not tab.postBtn:IsEnabled(),
 		"GetMoney() < deposit blocks PostSellItem and disables Post button")
+	local lowDepRaw = tab.sellDepValFs:GetText()
+	local _, cOpen = lowDepRaw:gsub("|cff", "")
+	local _, cClose = lowDepRaw:gsub("|r", "")
+	check(cOpen > 0 and cOpen == cClose and lowDepRaw:find("UI-", 1, true) ~= nil,
+		"Low-money deposit applies override danger hex with balanced |cff/|r tags (no nested/unmatched |r): " .. tostring(lowDepRaw))
 	mockMoney = 5000000
 
 	-- Throttle gating across events + 8s safety valve
@@ -3493,7 +3585,8 @@ local function runStage5AuctionatorParityTests()
 	markBagsDirty()
 	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55701)
 
-	-- Fix #5: Completing the LAST item in queue refreshes Current Prices directly into the displayed ladder (You? = Yes)
+	-- Fix #5: Completing the LAST item in queue refreshes Current Prices directly into the displayed ladder (Owned? = Yes)
+	-- Also test backend PostAllNext and throttled post_complete_refresh 0.45s retry!
 	postCommCalls = {}
 	of.SetSellItemQty(rIdx, 6)
 	tab.Render()
@@ -3502,15 +3595,23 @@ local function runStage5AuctionatorParityTests()
 	tab.sellPriceSBox:SetText("45")
 	tab.sellPriceCBox:SetText("0")
 	tab.sellPriceGBox:GetScript("OnTextChanged")(tab.sellPriceGBox, true)
-	tab.postAllBtn:Click("LeftButton")
+	tab.commitSellInputsAndClearFocus()
+	of.PostAllNext()
 	check(#postCommCalls == 1 and postCommCalls[1].qty == 6 and postCommCalls[1].unitPrice == 24500,
-		"Fix #1: Clicking Post All while Price box focused commits 24500 BEFORE PostCommodity")
+		"Fix #1: Backend PostAllNext posts committed 24500 via PostCommodity")
 	bagState[0][7] = nil
 	markBagsDirty()
 	searchCalls = {}
+	-- Simulate AH throttle busy immediately after posting -> 0.45s retry MUST still dispatch post_complete_refresh even though item is done!
+	scheduledTimers = {}
+	mockThrottleReady = false
 	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55702)
-	check(sl.items[rIdx].status == "done" and #searchCalls >= 1,
-		"Fix #5: Completing last item triggers post_complete_refresh search")
+	check(sl.items[rIdx].status == "done" and #searchCalls == 0 and #scheduledTimers >= 1,
+		"Addendum #4: Throttled post_complete_refresh schedules 0.45s retry instead of dropping refresh")
+	mockThrottleReady = true
+	advanceTimers(1)
+	check(#searchCalls >= 1,
+		"Addendum #4: 0.45s throttled post_complete_refresh retry dispatches live refresh even when item status=='done'")
 	mockCommLadder[81004] = {
 		{ itemID = 81004, unitPrice = 24500, quantity = 6, owners = { "player" }, containsOwnerItem = true },
 		{ itemID = 81004, unitPrice = 25000, quantity = 15, owners = { "RivalHerb" }, containsOwnerItem = false },
@@ -3519,15 +3620,14 @@ local function runStage5AuctionatorParityTests()
 	tab.Render()
 	check(tab.sellPricesRows[1] and tab.sellPricesRows[1]:IsShown()
 		and tab.sellPricesRows[1]._listing and tab.sellPricesRows[1]._listing.containsOwnerItem == true
-		and stripColors(tab.sellPricesRows[1].c4:GetText()) == "Yes",
-		"Fix #5: Post-completion Current Prices immediately displays player's new listing (You? = Yes)")
+		and stripColors(tab.sellPricesRows[1].c5:GetText()) == "Yes",
+		"Fix #5: Post-completion Current Prices immediately displays player's new listing (Owned? = Yes)")
 
-	-- Fix #8: Post All disabled when 0 pending AH items remain + geometry widths & non-clipped spotSubFs/activeFs
-	check(tab.postAllBtn:GetText() == "Post All" and tab.postAllBtn:IsEnabled() == false,
-		"Fix #8: Post All is DISABLED when 0 pending AH items remain")
-	check(tab.sellChBtn:GetWidth() >= 78 and tab.sellRefreshBtn:GetWidth() >= 56
+	-- Fix #8: Action row geometry (postBtn + sellRefreshBtn height 30 + context-only cancelBtn hidden) & non-clipped spotSubFs/activeFs
+	check(tab.sellRefreshBtn:GetWidth() >= 56 and tab.sellRefreshBtn:GetHeight() == 30
+		and not tab.cancelBtn:IsShown()
 		and tab.sellQtyMinus:GetWidth() >= 22 and tab.sellQtyPlus:GetWidth() >= 22,
-		"Fix #8: Sell header and +/- buttons have non-truncating widths (ch>=78, refresh>=56, +/- >=22)")
+		"Fix #8: Sell Refresh (h=30) sits on Row 4 with cancelBtn hidden when idle and non-truncating widths")
 	local subH = tab.spotSubFs and tab.spotSubFs.GetHeight and tab.spotSubFs:GetHeight() or 0
 	local actH = tab.activeFs and tab.activeFs.GetHeight and tab.activeFs:GetHeight() or 0
 	check(subH >= 12 and actH >= 16,
@@ -3976,14 +4076,14 @@ local function runAuditFix46_47_48Regressions()
 	tab.Render()
 	check(tab.sellBagPane:IsShown() and modal.sellBagPane == nil, "MM Sell displays categorized Bags pane independently of Task Strip")
 
-	-- Vendor-flagged item hides AH form & shows Vendor bar
+	-- Vendor-flagged item keeps AH pricing form visible cleanly in MM Sell while backend SellToVendor guards oversell
 	of.SetSellItemChannel(2, "vendor")
 	of.SelectSellItem(2)
 	mfFrame:Show()
 	of.OnMerchantShow()
 	tab.Render()
-	check(not tab.sellForm:IsShown() and tab.sellVendorBar:IsShown(),
-		"Vendor-flagged item hides AH form and shows Vendor Qty bar in MM Sell")
+	check(tab.sellForm:IsShown() and tab.sellVendorBar == nil,
+		"Vendor-flagged item keeps AH pricing form visible cleanly in MM Sell (no sellVendorBar)")
 	of.SetSellItemQty(2, 2)
 	usedVendorSlots = {}
 	local okVendOver, errVendOver = of.SellToVendor(2)
@@ -3992,16 +4092,16 @@ local function runAuditFix46_47_48Regressions()
 	mfFrame:Hide()
 	of.OnMerchantClosed()
 
-	-- Legacy AH disables Post All (tab.postAllBtn) via both nil C_AuctionHouse and IsUsingLegacyAuctionClient()
+	-- Legacy AH disables Post button (tab.postBtn) via both nil C_AuctionHouse and IsUsingLegacyAuctionClient()
 	of.SelectSellItem(1)
 	_G.C_AuctionHouse = nil
 	tab.Render()
-	check(not tab.postAllBtn:IsEnabled(), "MM Sell disables 'Post All' when C_AuctionHouse is nil")
+	check(not tab.postBtn:IsEnabled(), "MM Sell disables 'Post' when C_AuctionHouse is nil")
 	_G.C_AuctionHouse = mockAH
 	local origLegacyClient = _G.IsUsingLegacyAuctionClient
 	_G.IsUsingLegacyAuctionClient = function() return true end
 	tab.Render()
-	check(not tab.postAllBtn:IsEnabled(), "MM Sell disables 'Post All' when IsUsingLegacyAuctionClient() == true")
+	check(not tab.postBtn:IsEnabled(), "MM Sell disables 'Post' when IsUsingLegacyAuctionClient() == true")
 	_G.IsUsingLegacyAuctionClient = origLegacyClient
 
 	-- Live-WoW Scan Resilience:
@@ -5162,32 +5262,67 @@ local function runSellAutoRefreshAndTopBarRedesignTests()
 	of.SelectSellItem(2)
 	sl.pendingSearch = nil
 	tab.Render()
-	check(tab.sellBidRow:IsShown() and not tab.sellUnitRow:IsShown(),
-		"RegD: Equipment shows Starting Bid row and hides Price/Item summary row")
+	check(tab.sellBidRow:IsShown() and tab.sellUnitRow:IsShown() and tab.sellSummaryCard:IsShown(),
+		"RegD: Equipment shows Starting Bid row and keeps Price/Item summary card visible")
 
+	-- Vendor-flagged item keeps AH form & Zone 3 Vendor Value alert bar visible cleanly; typing live updates Vendor Value warning!
 	of.SetSellItemChannel(1, "vendor")
 	of.SelectSellItem(1)
 	tab.Render()
-	check((not tab.sellForm:IsShown()) and tab.sellVendorBar:IsShown()
-		and (not tab.postBtn:IsShown()) and (not tab.postAllBtn:IsShown())
-		and (not tab.doneBtn:IsShown()) and (not tab.skipBtn:IsShown())
-		and (not tab.sellDurLbl:IsShown()) and (not tab.sellDurBtns[1]:IsShown())
-		and (not tab.sellRuleLbl:IsShown()) and (not tab.sellUcBtns[1]:IsShown()),
-		"RegD: Vendor channel hides AH form, action bar, Duration, and side-by-side Rule buttons")
-
-	-- Typing in vendQtyBox updates Vendor Value live
-	tab.vendQtyBox:SetText("3")
-	local vOnTxt = tab.vendQtyBox:GetScript("OnTextChanged")
-	if vOnTxt then vOnTxt(tab.vendQtyBox, true) end
-	check(stripColors(tab.sellTotalFs:GetText()):find("15s", 1, true) ~= nil,
-		"RegD: Typing in vendQtyBox updates Vendor Value live (3 * 5s = 15s), got: " .. tostring(stripColors(tab.sellTotalFs:GetText())))
+	check(tab.sellForm:IsShown() and tab.sellVendorBar == nil and tab.sellVendorRow:IsShown()
+		and tab.postBtn:IsShown() and tab.sellRefreshBtn:IsShown()
+		and tab.sellDurLbl:IsShown() and tab.sellDurBtns[1]:IsShown()
+		and tab.sellRuleLbl:IsShown() and tab.sellUcBtns[1]:IsShown(),
+		"RegD: MM Sell keeps AH form, Vendor Value bar, Duration, and Rule buttons visible cleanly")
 
 	of.SetSellItemChannel(1, "ah")
 	sl.pendingSearch = nil
 	tab.Render()
-	check(tab.sellForm:IsShown() and tab.sellDurLbl:IsShown() and tab.sellDurBtns[1]:IsShown()
-		and tab.sellRuleLbl:IsShown() and tab.sellUcBtns[1]:IsShown(),
-		"RegD: Switching back to AH restores AH form, Duration, and side-by-side Rule buttons")
+	-- Live typing in price boxes triggers sellVendorRow 5% AH cut warning live (vendorSell=500c -> 526c * 0.95 = 499c < 500c!)
+	tab.sellPriceGBox:SetText("0")
+	tab.sellPriceSBox:SetText("5")
+	tab.sellPriceCBox:SetText("26")
+	local pOnTxt = tab.sellPriceCBox:GetScript("OnTextChanged")
+	if pOnTxt then pOnTxt(tab.sellPriceCBox, true) end
+	check(tab.sellVendorRow._isBelowVendor == true and stripColors(tab.sellVendorValFs:GetText()):find("(> AH Net!)", 1, true) ~= nil,
+		"RegD: Live typing price 5s26c (95% net 499c < 500c vendor) flags sellVendorRow warning live")
+	tab.sellPriceCBox:SetText("27")
+	if pOnTxt then pOnTxt(tab.sellPriceCBox, true) end
+	check(tab.sellVendorRow._isBelowVendor == false and stripColors(tab.sellVendorValFs:GetText()):find("(> AH Net!)", 1, true) == nil,
+		"RegD: Live typing price 5s27c (95% net 500c >= 500c vendor) clears sellVendorRow warning live")
+
+	-- Scroll-perf assertion: 20 bag scrolls + 20 prices scrolls execute ZERO ScanSellableBags / GetContainerItemInfo calls!
+	local perfListings = {}
+	for i = 1, 30 do
+		perfListings[i] = { price = 10000 + i * 100, quantity = 5, containsOwnerItem = (i == 2) }
+	end
+	sl.items[1].currentListings = perfListings
+	sl.items[1].listingsScanned = true
+	tab.SetSubTab("prices")
+	tab.Render()
+	local scanCallsDuringScroll = 0
+	local contCallsDuringScroll = 0
+	local origScanBags = of.ScanSellableBags
+	local origGetCont = _G.C_Container.GetContainerItemInfo
+	of.ScanSellableBags = function(...)
+		scanCallsDuringScroll = scanCallsDuringScroll + 1
+		return origScanBags(...)
+	end
+	_G.C_Container.GetContainerItemInfo = function(...)
+		contCallsDuringScroll = contCallsDuringScroll + 1
+		return origGetCont(...)
+	end
+	local bagWheelFn = tab.sellBagGrid:GetScript("OnMouseWheel")
+	local pricesWheelFn = tab.sellPricesListArea:GetScript("OnMouseWheel")
+	for i = 1, 20 do
+		bagWheelFn(tab.sellBagGrid, (i % 2 == 1) and -1 or 1)
+		pricesWheelFn(tab.sellPricesListArea, (i % 2 == 1) and -1 or 1)
+	end
+	of.ScanSellableBags = origScanBags
+	_G.C_Container.GetContainerItemInfo = origGetCont
+	check(scanCallsDuringScroll == 0 and contCallsDuringScroll == 0,
+		"RegD Perf: 20 bag scrolls + 20 prices scrolls execute 0 ScanSellableBags ("
+			.. tostring(scanCallsDuringScroll) .. ") and 0 GetContainerItemInfo (" .. tostring(contCallsDuringScroll) .. ") calls")
 
 	-- 6. Wide (1080px host -> 1048px topBar) and Compact (796px host -> 764px topBar) layoutTopBar bounds: zero overflow past topDiv2
 	local function getPointX(widget)
@@ -5212,6 +5347,204 @@ local function runSellAutoRefreshAndTopBarRedesignTests()
 	local cmpDiv2X = getPointX(tab.topDiv2)
 	check(cmpDiv2X > 0 and cmpFormRight < cmpDiv2X,
 		"RegD: Compact (768px) layoutTopBar keeps sellForm strictly left of topDiv2 (" .. tostring(cmpFormRight) .. " < " .. tostring(cmpDiv2X) .. ")")
+
+	-- 7. Wave 2 MM Sell UX Upgrades: Zero-shift Notice Bar, hint removal, hover/press polish, Zone 2/3 layout, 5-row live Summary Card
+	mockAHF:SetSize(1080, 660)
+	tab.topBar:SetWidth(1048)
+
+	-- 7a. Always-shown noticeBar ("Waiting for first action..." when nil) & zero layout shift on sellBagPane
+	st.notice = nil
+	st.noticeKind = nil
+	tab.Render()
+	check(tab.noticeBar ~= nil and tab.noticeBar:IsShown() == true
+		and stripColors(tab.noticeFs:GetText()) == "Waiting for first action...",
+		"Sell UX: noticeBar stays visible with 'Waiting for first action...' when st.notice is nil")
+	local bagP1, bagRel1, bagRp1, bagX1, bagY1 = tab.sellBagPane:GetPoint(1)
+
+	st.notice = "Added [Refresh Elixir] x12 to Sell Queue"
+	st.noticeKind = "positive"
+	tab.Render()
+	check(tab.noticeBar:IsShown() == true
+		and stripColors(tab.noticeFs:GetText()):find("Added [Refresh Elixir]", 1, true) ~= nil,
+		"Sell UX: noticeBar renders active positive notice text")
+	local bagP2, bagRel2, bagRp2, bagX2, bagY2 = tab.sellBagPane:GetPoint(1)
+	check(bagP1 == bagP2 and bagRel1 == tab.noticeBar and bagRel2 == tab.noticeBar
+		and bagRp1 == bagRp2 and bagX1 == bagX2 and bagY1 == bagY2,
+		"Sell UX: sellBagPane anchor never shifts between nil notice and active notice")
+
+	-- 7b. Removed dropHintBox / sellBagHintFs while iconDropBtn drag/click drop still works
+	check(tab.dropHintBox == nil and tab.sellBagHintFs == nil,
+		"Sell UX: dropHintBox and sellBagHintFs are removed (nil)")
+	local origGetCursorInfo = _G.GetCursorInfo
+	local origCCursor = _G.C_Cursor
+	local origClearCursor = _G.ClearCursor
+	_G.GetCursorInfo = function() return "item", 97001, "|cffffffff|Hitem:97001|h[Refresh Elixir]|h|r" end
+	_G.C_Cursor = { GetCursorItem = function() return { bagID = 0, slotIndex = 1 } end }
+	_G.ClearCursor = function() end
+	local dropOk = false
+	local origDropPulse = tab.iconDropBtn.PlayPressPulse
+	local dropPulsed = false
+	tab.iconDropBtn.PlayPressPulse = function(self, ...)
+		dropPulsed = true
+		return origDropPulse(self, ...)
+	end
+	if tab.iconDropBtn:GetScript("OnReceiveDrag") then
+		tab.iconDropBtn:GetScript("OnReceiveDrag")(tab.iconDropBtn)
+		dropOk = true
+	end
+	tab.iconDropBtn.PlayPressPulse = origDropPulse
+	_G.GetCursorInfo = origGetCursorInfo
+	_G.C_Cursor = origCCursor
+	_G.ClearCursor = origClearCursor
+	runTimers(0.12)
+	check(dropOk and dropPulsed and sl.items[1] and sl.items[1].itemID == 97001,
+		"Sell UX: iconDropBtn OnReceiveDrag triggers PlayPressPulse and stages cursor item cleanly")
+
+	-- 7c. Hover highlight (hoverTex), press micro-animation (pressTex, OnMouseDown/OnMouseUp/PostClick, PlayPressPulse) & ZERO OnUpdate
+	local function verifyInteractivePolish(widget, label, isTile)
+		check(widget ~= nil, "Sell UX: " .. label .. " exists")
+		check(widget.hoverTex ~= nil and widget.pressTex ~= nil,
+			"Sell UX: " .. label .. " pre-allocates hoverTex and pressTex")
+		check(type(widget.PlayPressPulse) == "function",
+			"Sell UX: " .. label .. " exposes PlayPressPulse()")
+		check(widget.GetScript and widget:GetScript("OnUpdate") == nil,
+			"Sell UX: " .. label .. " has ZERO OnUpdate script")
+		local onEnter = widget:GetScript("OnEnter")
+		local onLeave = widget:GetScript("OnLeave")
+		local onDown = widget:GetScript("OnMouseDown")
+		local onUp = widget:GetScript("OnMouseUp")
+		local postClick = widget:GetScript("PostClick")
+		check(type(onEnter) == "function" and type(onLeave) == "function"
+			and type(onDown) == "function" and type(onUp) == "function",
+			"Sell UX: " .. label .. " defines OnEnter, OnLeave, OnMouseDown, OnMouseUp")
+		if not isTile then
+			check(type(postClick) == "function", "Sell UX: " .. label .. " defines PostClick press pulse")
+		end
+		onEnter(widget)
+		check(widget.hoverTex:IsShown() == true, "Sell UX: " .. label .. " OnEnter shows hoverTex")
+		onLeave(widget)
+		check(widget.hoverTex:IsShown() == false, "Sell UX: " .. label .. " OnLeave hides hoverTex")
+		onDown(widget)
+		check(widget._pressed == true, "Sell UX: " .. label .. " OnMouseDown sets _pressed")
+		if not isTile then
+			check(widget.pressTex:IsShown() == true, "Sell UX: " .. label .. " OnMouseDown shows pressTex")
+		end
+		onUp(widget)
+		check(widget._pressed == false and widget.pressTex:IsShown() == false,
+			"Sell UX: " .. label .. " OnMouseUp clears _pressed and hides pressTex")
+		widget:PlayPressPulse()
+		check(widget.pressTex:IsShown() == true, "Sell UX: " .. label .. " PlayPressPulse shows pressTex")
+		runTimers(0.12)
+		check(widget.pressTex:IsShown() == false, "Sell UX: " .. label .. " PlayPressPulse restores pressTex after timer")
+	end
+
+	of.SelectSellItem(1)
+	sl.pendingSearch = nil
+	tab.Render()
+	verifyInteractivePolish(tab.sellBagTiles[1], "sellBagTiles[1]", true)
+	verifyInteractivePolish(tab.postBtn, "postBtn", false)
+	verifyInteractivePolish(tab.sellRefreshBtn, "sellRefreshBtn", false)
+	verifyInteractivePolish(tab.sellUcBtns[1], "sellUcBtns[1]", false)
+	verifyInteractivePolish(tab.sellDurBtns[1], "sellDurBtns[1]", false)
+
+	-- 7d. Layout hierarchy: sellUcBtns in sellForm below sellPriceRow; sellDurBtns in sellZone3 between sellVendorRow and sellSummaryCard
+	local function getPointY(widget)
+		if widget and widget.GetPoint then
+			local _, _, _, _, y = widget:GetPoint(1)
+			return tonumber(y) or 0
+		end
+		return 0
+	end
+	check(tab.sellRuleRow:GetParent() == tab.sellForm
+		and tab.sellUcBtns[1]:GetParent() == tab.sellRuleRow
+		and getPointY(tab.sellRuleRow) < getPointY(tab.sellPriceRow),
+		"Sell UX: sellUcBtns sit inside sellForm strictly below sellPriceRow")
+	check(tab.sellDurRow:GetParent() == tab.sellZone3
+		and tab.sellDurBtns[1]:GetParent() == tab.sellDurRow
+		and tab.sellDepRow and tab.sellDepRow:GetParent() == tab.sellZone3
+		and getPointY(tab.sellDurRow) < getPointY(tab.sellVendorRow)
+		and getPointY(tab.sellDepRow) < getPointY(tab.sellDurRow)
+		and getPointY(tab.sellSummaryCard) < getPointY(tab.sellDepRow),
+		"Sell UX: sellDepRow stands alone in sellZone3 strictly between sellDurRow and sellSummaryCard")
+
+	local function fsSizeOf(fs)
+		if fs and fs.GetFont then return select(2, fs:GetFont()) end
+		return nil
+	end
+	check(fsSizeOf(tab.sellVendorLbl) == 10 and fsSizeOf(tab.sellVendorValFs) == 10
+		and fsSizeOf(tab.sellDepLbl) == 10 and fsSizeOf(tab.sellDepValFs) == 10
+		and fsSizeOf(tab.sellUnitLbl) == 10 and fsSizeOf(tab.sellUnitSummaryFs) == 10
+		and fsSizeOf(tab.sellTotalLbl) == 10 and fsSizeOf(tab.sellTotalValFs) == 10
+		and fsSizeOf(tab.sellCutLbl) == 10 and fsSizeOf(tab.sellCutValFs) == 10
+		and fsSizeOf(tab.sellNetLbl) == 10.5 and fsSizeOf(tab.sellNetValFs) == 10.5,
+		"Sell UX: uniform 10pt summary/deposit row fonts and 10.5pt Net Payout font")
+
+	-- 7e. sellSummaryCard renders all 5 summary rows and updates live on Price/Qty typing & Duration switch
+	check(tab.sellSummaryCard:IsShown() == true and tab.sellUnitRow:IsShown() == true,
+		"Sell UX: sellSummaryCard and sellUnitRow are visible")
+	check(stripColors(tab.sellUnitLbl:GetText()):find("Price / Item", 1, true) ~= nil
+		and stripColors(tab.sellTotalLbl:GetText()):find("Total Price", 1, true) ~= nil
+		and stripColors(tab.sellCutLbl:GetText()):find("AH Cut (5%)", 1, true) ~= nil
+		and stripColors(tab.sellDepLbl:GetText()):find("Deposit", 1, true) ~= nil
+		and stripColors(tab.sellNetLbl:GetText()):find("Net Payout (95%)", 1, true) ~= nil,
+		"Sell UX: sellSummaryCard displays all 5 summary row labels")
+
+	of.SelectSellItem(1)
+	sl.pendingSearch = nil
+	tab.Render()
+	tab.sellQtyBox:SetText("3")
+	local qOnTxt = tab.sellQtyBox:GetScript("OnTextChanged")
+	if qOnTxt then qOnTxt(tab.sellQtyBox, true) end
+	tab.sellPriceGBox:SetText("10")
+	tab.sellPriceSBox:SetText("0")
+	tab.sellPriceCBox:SetText("0")
+	if pOnTxt then pOnTxt(tab.sellPriceCBox, true) end
+	-- 3 * 10g = 30g gross; 5% cut = 1g 50s; 95% net = 28g 50s
+	local function normCoin(s)
+		return stripColors(s)
+			:gsub("|T[^|]*GoldIcon[^|]*|t", "g")
+			:gsub("|T[^|]*SilverIcon[^|]*|t", "s")
+			:gsub("|T[^|]*CopperIcon[^|]*|t", "c")
+	end
+	local unitTxt = normCoin(tab.sellUnitSummaryFs:GetText())
+	local totalTxt = normCoin(tab.sellTotalValFs:GetText())
+	local cutTxt = normCoin(tab.sellCutValFs:GetText())
+	local netTxt = normCoin(tab.sellNetValFs:GetText())
+	check(unitTxt:find("10g", 1, true) ~= nil and unitTxt:find("9g 50s", 1, true) ~= nil,
+		"Sell UX: Price/Item summary updates live to 10g (Net 9g 50s), got: " .. unitTxt)
+	check(totalTxt:find("30g", 1, true) ~= nil,
+		"Sell UX: Total Price updates live to 30g, got: " .. totalTxt)
+	check(cutTxt:find("1g 50s", 1, true) ~= nil,
+		"Sell UX: AH Cut (5%) updates live to -1g 50s, got: " .. cutTxt)
+	check(netTxt:find("28g 50s", 1, true) ~= nil,
+		"Sell UX: Net Payout (95%) updates live to 28g 50s, got: " .. netTxt)
+
+	local depBeforeDur = stripColors(tab.sellDepValFs:GetText())
+	tab.sellDurBtns[3]:Click("LeftButton") -- switch 8h -> 24h
+	local depLblAfter = stripColors(tab.sellDepLbl:GetText())
+	local depAfterDur = stripColors(tab.sellDepValFs:GetText())
+	check(depLblAfter:find("24h", 1, true) ~= nil and depAfterDur ~= depBeforeDur,
+		"Sell UX: switching duration to 24h updates Deposit label and value live")
+
+	-- 7f. Bottom AH MerchantMaster logo button next to MM Sell opens AH Buying Task Strip
+	if app.ensureAuctionHouseMMTab then
+		local ahMMTab = app.ensureAuctionHouseMMTab()
+		check(ahMMTab ~= nil and ahMMTab == _G.MerchantMasterAHTabBtn and ahMMTab:IsShown(),
+			"AH bottom MerchantMaster logo tab button is created and visible beside MM Sell")
+		local pt = ahMMTab._points and ahMMTab._points[1]
+		check(pt and pt[1] == "TOPLEFT" and pt[3] == "TOPRIGHT",
+			"MerchantMasterAHTabBtn anchors TOPLEFT -> TOPRIGHT beside MM Sell tab")
+		local onClick = ahMMTab:GetScript("OnClick")
+		check(type(onClick) == "function", "MerchantMasterAHTabBtn registers Left/Right OnClick")
+		onClick(ahMMTab, "LeftButton")
+		check(app.ui and app.ui.cartBuyerModal and app.ui.cartBuyerModal:IsShown(),
+			"Clicking MerchantMasterAHTabBtn opens the AH Buying Task Strip")
+		if app.exitAHBuyingMode then app.exitAHBuyingMode(false) end
+		if app.ui and app.ui.cartBuyerModal and app.ui.cartBuyerModal.Hide then
+			app.ui.cartBuyerModal:Hide()
+		end
+		ahMMTab:Hide()
+	end
 
 	-- Cleanup
 	tab.HideTab()
@@ -5628,7 +5961,8 @@ local function runCollectAllTests()
 	mf:Hide()
 	of.OnMailClosed()
 
-	-- 7. UI Button Wiring & Layout Assertions on Collect Stage (Collect All / Stop / Mark Done / Skip)
+	-- 7. UI Button Wiring & Layout Assertions on Collect Stage
+	-- Spotlight: Take 1x | All This Item | Mark Done | Skip, plus bottom-left Collect All
 	if modal and modal.Render then
 		clearCont(0); clearCont(1); clearCont(-1)
 		of.ClearSavedState()
@@ -5643,45 +5977,124 @@ local function runCollectAllTests()
 			end,
 		})
 		of.SetActiveStage("collect")
-		-- Open Bank with 0 matching items -> spotlight renders with Collect All disabled, Mark Done enabled, Skip shown & enabled
+		-- Open Bank with 0 matching items -> Spotlight shows Take 1x / All This Item disabled, Mark Done enabled, Skip shown & enabled, bottom Collect All disabled
 		bf:Show()
 		of.OnBankShow()
 		modal.Render()
-		check(modal.markBtn:GetText() == "Collect All" and not modal.markBtn:IsEnabled()
+		check(modal.buyBtn:GetText() == "Take 1x" and not modal.buyBtn:IsEnabled()
+			and modal.markBtn:GetText() == "All This Item" and not modal.markBtn:IsEnabled()
 			and modal.nextBtn:GetText() == "Mark Done" and modal.nextBtn:IsEnabled()
-			and modal.extraBtn:GetText() == "Skip" and modal.extraBtn:IsShown() and modal.extraBtn:IsEnabled(),
-			"CollectAll UI: Open Bank with 0 matches shows Collect All (disabled), Mark Done, and visible Skip")
+			and modal.extraBtn:GetText() == "Skip" and modal.extraBtn:IsShown() and modal.extraBtn:IsEnabled()
+			and modal.collectAllBtn ~= nil and not modal.collectAllBtn:IsEnabled(),
+			"CollectAll UI: Open Bank with 0 matches shows Take 1x, All This Item, Mark Done, Skip, and disabled bottom Collect All")
 
-		-- Check 4-button row fits cleanly inside 332px span (no overlap!)
+		-- Check 4-button row fits cleanly inside 332px span (no overlap! 3 gaps * 5px = 15px)
 		local totalW = (modal.buyBtn:GetWidth() or 0) + (modal.markBtn:GetWidth() or 0)
-			+ (modal.nextBtn:GetWidth() or 0) + (modal.extraBtn:GetWidth() or 0) + 18
+			+ (modal.nextBtn:GetWidth() or 0) + (modal.extraBtn:GetWidth() or 0) + 15
 		check(totalW == 332, "CollectAll UI: 4-button Collect spotlight row spans exact 332px without overflow (got " .. tostring(totalW) .. ")")
 
-		-- Populate matching Bank items -> Collect All becomes enabled; clicking starts batch and flips label to Stop
+		-- Populate matching Bank items -> Take 1x, All This Item, and bottom Collect All enable cleanly
 		setSlot(-1, 1, 78301, 2, false)
 		setSlot(-1, 2, 78302, 2, false)
 		of.OnBankShow()
 		modal.Render()
-		check(modal.markBtn:GetText() == "Collect All" and modal.markBtn:IsEnabled(),
-			"CollectAll UI: Collect All button enables when open Bank has matching items")
+		check(modal.buyBtn:IsEnabled()
+			and modal.markBtn:GetText() == "All This Item" and modal.markBtn:IsEnabled()
+			and (modal.collectAllBtn:GetText() or ""):find("Collect All from Bank", 1, true) ~= nil
+			and modal.collectAllBtn:IsEnabled(),
+			"CollectAll UI: Take 1x, All This Item, and bottom Collect All enable when Bank has matching items")
 
+		-- Bottom Collect All starts overview-wide batch ("all" mode) and flips to Stop Collect All
+		scheduledTimers = {}
+		modal.collectAllBtn:Click("LeftButton")
+		modal.Render()
+		check(of.IsCollectAllActive() == true and of.GetCollectAllMode() == "all"
+			and modal.collectAllBtn:GetText() == "Stop Collect All"
+			and modal.collectAllBtn:IsEnabled() and not modal.markBtn:IsEnabled(),
+			"CollectAll UI: Clicking bottom Collect All starts overview batch in 'all' mode and flips to Stop Collect All")
+
+		modal.collectAllBtn:Click("LeftButton")
+		modal.Render()
+		check(of.IsCollectAllActive() == false
+			and (modal.collectAllBtn:GetText() or ""):find("Collect All from Bank", 1, true) ~= nil,
+			"CollectAll UI: Clicking Stop Collect All cancels overview batch")
+
+		-- Reload fresh Bank items so Spotlight item batch can be tested cleanly
+		clearCont(0); clearCont(1); clearCont(-1)
+		of.ClearSavedState()
+		of.LoadFromShoppingRows({
+			{ name = "UI Bank Herb 1", itemID = 78301, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+			{ name = "UI Bank Herb 2", itemID = 78302, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+		}, {
+			title = "Collect All Item UI Test",
+			ownershipProvider = function(id)
+				if id == 78301 or id == 78302 then return { bags = 0, bank = 2, mail = 0, alts = {} } end
+				return { bags = 0, bank = 0, mail = 0, alts = {} }
+			end,
+		})
+		of.SetActiveStage("collect")
+		setSlot(-1, 1, 78301, 2, false)
+		setSlot(-1, 2, 78302, 2, false)
+		of.OnBankShow()
+		modal.Render()
+
+		-- Spotlight "All This Item" starts per-item batch ("item" mode) and disables bottom Collect All
 		scheduledTimers = {}
 		modal.markBtn:Click("LeftButton")
 		modal.Render()
-		check(of.IsCollectAllActive() == true and modal.markBtn:GetText() == "Stop" and modal.markBtn:IsEnabled(),
-			"CollectAll UI: Clicking Collect All starts batch and flips button text to Stop")
+		check(of.IsCollectAllActive() == true and of.GetCollectAllMode() == "item"
+			and modal.markBtn:GetText() == "Stop" and modal.markBtn:IsEnabled()
+			and not modal.collectAllBtn:IsEnabled(),
+			"CollectAll UI: Clicking All This Item starts per-item batch and flips to Stop")
 
 		modal.markBtn:Click("LeftButton")
 		modal.Render()
-		check(of.IsCollectAllActive() == false and modal.markBtn:GetText() == "Collect All",
-			"CollectAll UI: Clicking Stop cancels batch and restores Collect All label")
+		check(of.IsCollectAllActive() == false and modal.markBtn:GetText() == "All This Item",
+			"CollectAll UI: Clicking Stop cancels per-item batch and restores All This Item label")
+
+		-- Reload fresh Bank items and test Spotlight "Take 1x" (cbBuyBtn) takes only a single item stack
+		clearCont(0); clearCont(1); clearCont(-1)
+		of.ClearSavedState()
+		of.LoadFromShoppingRows({
+			{ name = "UI Bank Herb 1", itemID = 78301, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+			{ name = "UI Bank Herb 2", itemID = 78302, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+		}, {
+			title = "Take 1x UI Test",
+			ownershipProvider = function(id)
+				if id == 78301 or id == 78302 then return { bags = 0, bank = 2, mail = 0, alts = {} } end
+				return { bags = 0, bank = 0, mail = 0, alts = {} }
+			end,
+		})
+		of.SetActiveStage("collect")
+		setSlot(-1, 1, 78301, 2, false)
+		setSlot(-1, 2, 78302, 2, false)
+		of.OnBankShow()
+		modal.Render()
+
+		modal.buyBtn:Click("LeftButton")
+		of.OnBagUpdateDelayed()
+		modal.Render()
+		local stAfterSingle = of.GetState().stages.collect
+		local byID = {}
+		for _, it in ipairs(stAfterSingle.items or {}) do byID[it.itemID] = it end
+		check(byID[78301] and byID[78301].status == "done"
+			and byID[78302] and byID[78302].status ~= "done",
+			"CollectAll UI: Clicking Take 1x takes only the active item stack without touching other items")
 
 		-- Clicking Mark Done (cbNextBtn) calls MarkCollected; clicking Skip (cbExtraBtn) calls SkipCollectItem
-		local activeBeforeDone = of.GetState().stages.collect.items[of.GetState().stages.collect.activeIndex]
+		local curItem = of.GetState().stages.collect.items[of.GetState().stages.collect.activeIndex]
 		modal.nextBtn:Click("LeftButton")
-		check(activeBeforeDone.status == "done" and activeBeforeDone.remaining == 0,
+		check(curItem.status == "done" and curItem.remaining == 0,
 			"CollectAll UI: Clicking Mark Done (cbNextBtn) marks active collect item done")
 
+		of.ClearSavedState()
+		of.LoadFromShoppingRows({
+			{ name = "Skip Herb", itemID = 78309, qty = 0, ownedUsed = 1, ahUnitPrice = 100 },
+		}, {
+			ownershipProvider = function() return { bags = 0, bank = 1, mail = 0, alts = {} } end,
+		})
+		of.SetActiveStage("collect")
+		modal.Render()
 		local activeBeforeSkip = of.GetState().stages.collect.items[of.GetState().stages.collect.activeIndex]
 		modal.extraBtn:Click("LeftButton")
 		check(activeBeforeSkip.status == "skipped",
@@ -5708,5 +6121,258 @@ local function runCollectAllTests()
 	app.getBagCountByID = origGetBag
 end
 runCollectAllTests()
+
+-- 11. Free Dragging & Per-Window Position Persistence (order_flow, main, resetWindowPositions)
+;(function()
+	ns.Window.ClearSavedPosition(nil)
+	mainPanel.userMoved = false
+	if shopModal then shopModal._mmUserPositioned = false end
+
+	local origMailFrame = _G.MailFrame
+	local origBankFrame = _G.BankFrame
+	local origMerchantFrame = _G.MerchantFrame
+	local origTradeSkillFrame = _G.TradeSkillFrame
+	local mockMail = {
+		_shown = true,
+		IsShown = function(self) return self._shown end,
+		IsVisible = function(self) return self._shown end,
+		GetLeft = function() return 50 end,
+		GetRight = function() return 450 end,
+		GetTop = function() return 820 end,
+		GetScale = function() return 1 end,
+		GetEffectiveScale = function() return 1 end,
+	}
+	local mockBank = {
+		_shown = false,
+		IsShown = function(self) return self._shown end,
+		IsVisible = function(self) return self._shown end,
+		GetLeft = function() return 80 end,
+		GetRight = function() return 520 end,
+		GetEffectiveScale = function() return 1 end,
+	}
+	local mockMerchant = {
+		_shown = false,
+		IsShown = function(self) return self._shown end,
+		IsVisible = function(self) return self._shown end,
+		GetLeft = function() return 90 end,
+		GetRight = function() return 480 end,
+		GetEffectiveScale = function() return 1 end,
+	}
+	local mockTS = {
+		_shown = false,
+		IsShown = function(self) return self._shown end,
+		IsVisible = function(self) return self._shown end,
+		GetLeft = function() return 110 end,
+		GetRight = function() return 660 end,
+		GetEffectiveScale = function() return 1 end,
+	}
+	_G.MailFrame = mockMail
+	_G.BankFrame = mockBank
+	_G.MerchantFrame = mockMerchant
+	_G.TradeSkillFrame = mockTS
+
+	modal:Show()
+	app.dockCartBuyerModal()
+	local dp, drel, drp = modal:GetPoint(1)
+	check(dp == "TOPLEFT" and drel == mockMail and drp == "TOPRIGHT",
+		"Undragged AH Trade / Order Flow Strip smart-docks beside visible MailFrame")
+	check(modal.dockModeBtn ~= nil and modal.dockModeBtn:GetText() == "Snap",
+		"Order Flow dock toggle defaults to Snap mode")
+
+	local origModalLeft, origModalTop = modal.GetLeft, modal.GetTop
+
+	-- Click Snap -> Lock: blocks dragging and keeps panel attached to MailFrame
+	modal.dockModeBtn:Click("LeftButton")
+	check(ns.Window.GetMode("order_flow") == "lock" and modal.dockModeBtn:GetText() == "Lock",
+		"Clicking Snap switches order_flow to Lock mode")
+	modal.GetLeft = function() return 700 end
+	modal.GetTop = function() return 900 end
+	modal.header:GetScript("OnDragStart")(modal.header)
+	modal.header:GetScript("OnDragStop")(modal.header)
+	local lp, lrel, lrp = modal:GetPoint(1)
+	check(lp == "TOPLEFT" and lrel == mockMail and lrp == "TOPRIGHT"
+		and ns.Window.GetMode("order_flow") == "lock"
+		and not ns.Window.HasSavedPosition("order_flow"),
+		"Lock mode prevents dragging Order Flow Strip and keeps it attached to MailFrame")
+
+	-- Click Lock -> Free -> Snap re-docks immediately beside open MailFrame
+	modal.dockModeBtn:Click("LeftButton")
+	check(ns.Window.GetMode("order_flow") == "free" and modal.dockModeBtn:GetText() == "Free",
+		"Clicking Lock switches order_flow to Free mode")
+	modal.dockModeBtn:Click("LeftButton")
+	local reP, reRel, reRp = modal:GetPoint(1)
+	check(ns.Window.GetMode("order_flow") == "snap" and modal.dockModeBtn:GetText() == "Snap"
+		and reP == "TOPLEFT" and reRel == mockMail and reRp == "TOPRIGHT",
+		"Clicking Free switches back to Snap and immediately re-docks beside MailFrame")
+
+	-- Drag Order Flow Strip header in Snap mode -> switches to Free, saves order_flow position, resists NPC re-docking
+	modal.GetLeft = function() return 620 end
+	modal.GetTop = function() return 820 end
+	modal.header:GetScript("OnDragStart")(modal.header)
+	modal.header:GetScript("OnDragStop")(modal.header)
+	check(ns.Window.GetMode("order_flow") == "free"
+		and modal.dockModeBtn:GetText() == "Free"
+		and ns.Window.HasSavedPosition("order_flow")
+		and MerchantMasterDB.windowPositions.order_flow.x == 620
+		and MerchantMasterDB.windowPositions.order_flow.y == 820,
+		"Dragging Order Flow Strip in Snap switches to Free and saves order_flow position")
+
+	mockBank._shown = true
+	mockMerchant._shown = true
+	mockTS._shown = true
+	app.dockCartBuyerModal()
+	fireEvent("MAIL_SHOW")
+	fireEvent("BANKFRAME_OPENED")
+	fireEvent("MERCHANT_SHOW")
+	fireEvent("TRADE_SKILL_SHOW")
+	fireEvent("BAG_UPDATE_DELAYED")
+	local sp, srel, srp, sx, sy = modal:GetPoint(1)
+	check(sp == "TOPLEFT" and srel == UIParent and srp == "BOTTOMLEFT"
+		and math.abs((sx or 0) - 620) < 1 and math.abs((sy or 0) - 820) < 1,
+		"Dragged Order Flow Strip stays in place across dockCartBuyerModal and NPC events")
+
+	-- Drag Main MerchantMaster Window via toolbar -> saves 'main' shared across tabs
+	mainPanel:Show()
+	local origPanLeft, origPanTop = mainPanel.GetLeft, mainPanel.GetTop
+	mainPanel.GetLeft = function() return 40 end
+	mainPanel.GetTop = function() return 940 end
+	mainPanel:ClearAllPoints()
+	mainPanel:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", 40, 940)
+	app.ui.toolbar:GetScript("OnDragStart")(app.ui.toolbar)
+	app.ui.toolbar:GetScript("OnDragStop")(app.ui.toolbar)
+	check(ns.Window.HasSavedPosition("main") and mainPanel.userMoved == true
+		and MerchantMasterDB.windowPositions.main.x == 40
+		and MerchantMasterDB.windowPositions.main.y == 940,
+		"Dragging main toolbar saves per-window 'main' position")
+
+	app.setTab("sniper_de")
+	app.setTab("dashboard")
+	_G.AuctionHouseFrame:Show()
+	fireEvent("AUCTION_HOUSE_SHOW")
+	local countKeys = 0
+	for _ in pairs(MerchantMasterDB.windowPositions) do countKeys = countKeys + 1 end
+	check(countKeys == 2 and MerchantMasterDB.windowPositions.sniper_de == nil
+		and MerchantMasterDB.windowPositions.dashboard == nil,
+		"Switching tabs keeps single shared 'main' position without per-tab keys")
+	local mp, mrel, mrp, mx, my = mainPanel:GetPoint(1)
+	check(mp == "TOPLEFT" and mrel == UIParent and mrp == "BOTTOMLEFT"
+		and math.abs((mx or 0) - 40) < 1 and math.abs((my or 0) - 940) < 1,
+		"Dragged Main window stays in place across tab switches and AUCTION_HOUSE_SHOW")
+
+	-- Reload simulation: fresh userMoved=false + CENTER reset restores saved 'main' position
+	mainPanel.userMoved = false
+	mainPanel:ClearAllPoints()
+	mainPanel:SetPoint("CENTER")
+	mainPanel:Hide()
+	app.togglePanel()
+	local rpMain, rrMain, rrpMain, rxMain, ryMain = mainPanel:GetPoint(1)
+	check(rpMain == "TOPLEFT" and rrMain == UIParent and rrpMain == "BOTTOMLEFT"
+		and math.abs((rxMain or 0) - 40) < 1 and math.abs((ryMain or 0) - 940) < 1,
+		"Reopening Main window after reload restores saved 'main' position")
+
+	-- Reset Window Positions clears saved positions and returns windows to smart defaults
+	_G.AuctionHouseFrame:Hide()
+	mockBank._shown = false
+	mockMerchant._shown = false
+	mockTS._shown = false
+	app.resetWindowPositions()
+	check(not ns.Window.HasSavedPosition("order_flow")
+		and not ns.Window.HasSavedPosition("main")
+		and ns.Window.GetMode("order_flow") == "snap"
+		and modal.dockModeBtn:GetText() == "Snap"
+		and mainPanel.userMoved == false,
+		"app.resetWindowPositions clears saved positions, resets mode to snap, and resets userMoved")
+	local rp, rrel, rrp = modal:GetPoint(1)
+	check(rp == "TOPLEFT" and rrel == mockMail and rrp == "TOPRIGHT",
+		"app.resetWindowPositions immediately re-docks open Order Flow Strip to default anchor")
+
+	modal.GetLeft, modal.GetTop = origModalLeft, origModalTop
+	mainPanel.GetLeft, mainPanel.GetTop = origPanLeft, origPanTop
+	modal:Hide()
+	mainPanel:Hide()
+	_G.AuctionHouseFrame:Hide()
+	_G.MailFrame = origMailFrame
+	_G.BankFrame = origBankFrame
+	_G.MerchantFrame = origMerchantFrame
+	_G.TradeSkillFrame = origTradeSkillFrame
+	ns.Window.ClearSavedPosition(nil)
+end)()
+
+---------------------------------------------------------------------------------------------------
+-- 17. ProfessionsFrame Dock Clearance & MerchantMaster Top Side Tab
+---------------------------------------------------------------------------------------------------
+;(function()
+	local origProfFrame = _G.ProfessionsFrame
+	local origTabGlobal = _G.MerchantMasterProfTabBtn
+	local origUiTab = app.ui.profMMTab
+	local origOverviewGlobal = _G.ProfessionsOverviewTab
+
+	local mockPF = CreateFrame("Frame", "MockProfFrameDockTest", UIParent)
+	mockPF:SetSize(760, 580)
+	mockPF:ClearAllPoints()
+	mockPF:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", 40, 820)
+	mockPF.GetLeft = function() return 40 end
+	mockPF.GetRight = function() return 800 end
+	mockPF.GetTop = function() return 820 end
+	mockPF.GetBottom = function() return 240 end
+	mockPF.GetEffectiveScale = function() return 1 end
+	mockPF:Show()
+
+	local mockOverviewTab = CreateFrame("Button", "MockProfOverviewTab", mockPF)
+	mockOverviewTab:SetSize(42, 38)
+	mockOverviewTab:SetPoint("TOPLEFT", mockPF, "TOPRIGHT", 0, -28)
+	mockOverviewTab.GetLeft = function() return 800 end
+	mockOverviewTab.GetRight = function() return 842 end
+	mockOverviewTab.GetEffectiveScale = function() return 1 end
+	mockOverviewTab:Show()
+	mockPF.ProfessionsOverviewTab = mockOverviewTab
+	_G.ProfessionsOverviewTab = mockOverviewTab
+	_G.ProfessionsFrame = mockPF
+
+	-- Force fresh attachment on our test ProfessionsFrame
+	app.ui.profMMTab = nil
+	_G.MerchantMasterProfTabBtn = nil
+	local mmTab = app.ensureProfessionsMMTab()
+	check(mmTab ~= nil and mmTab == app.ui.profMMTab, "app.ensureProfessionsMMTab creates and attaches app.ui.profMMTab")
+	local tp, trel, trp = mmTab:GetPoint(1)
+	check(tp == "BOTTOMLEFT" and trel == mockOverviewTab and trp == "TOPLEFT",
+		"MerchantMaster Prof side tab anchors BOTTOMLEFT -> ProfessionsOverviewTab TOPLEFT")
+	local iconTexPath = mmTab.iconTex and mmTab.iconTex.GetTexture and mmTab.iconTex:GetTexture() or ""
+	check(tostring(iconTexPath):find("MerchantMasterLogo", 1, true) ~= nil,
+		"MerchantMaster Prof side tab displays MerchantMasterLogo, got: " .. tostring(iconTexPath))
+
+	-- Dock Crafting Task Strip in Snap mode -> must clear 42px tab protrusion by >= 52px
+	ns.Window.SetMode("order_flow", "snap")
+	ns.Window.ClearSavedPosition("order_flow")
+	app.enterOrderFlowMode("craft")
+	check(modal:IsShown(), "Order Flow opens in craft stage")
+	local dp, drel, drp, dx = modal:GetPoint(1)
+	check(dp == "TOPLEFT" and drel == mockPF and drp == "TOPRIGHT" and type(dx) == "number" and dx >= 52,
+		"dockCartBuyerModal clears 42px ProfessionsOverviewTab by >= 52px, got gap=" .. tostring(dx))
+
+	-- Left-click on MerchantMaster Prof side tab opens Crafting Task Strip ('craft' stage)
+	app.exitAHBuyingMode(false)
+	check(not modal:IsShown(), "Order Flow hidden before Left-click tab test")
+	mmTab:Click("LeftButton")
+	check(modal:IsShown() and of.GetActiveStage() == "craft",
+		"Left-click on MerchantMaster Prof side tab enters Crafting Task Strip ('craft' stage)")
+
+	-- Right-click opens MerchantMaster Recipes panel
+	mainPanel:Hide()
+	mmTab:Click("RightButton")
+	check(mainPanel:IsShown() and app.activeTab == "recipes",
+		"Right-click on MerchantMaster Prof side tab opens MerchantMaster Recipes")
+
+	-- Cleanup restored globals
+	if app.exitAHBuyingMode then app.exitAHBuyingMode(false) end
+	mainPanel:Hide()
+	mmTab:Hide()
+	mockPF:Hide()
+	_G.ProfessionsFrame = origProfFrame
+	_G.ProfessionsOverviewTab = origOverviewGlobal
+	_G.MerchantMasterProfTabBtn = origTabGlobal
+	app.ui.profMMTab = origUiTab
+	ns.Window.ClearSavedPosition(nil)
+end)()
 
 print("PASS: test_cart_buyer (" .. n .. " assertions)")

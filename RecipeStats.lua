@@ -118,7 +118,9 @@ local function getState(context)
     local disabled=store and store.db and store.db.stats and store.db.stats.disabled
     local saleDisabled=disabled and (disabled.MAIL==true or disabled.AH_SELL==true or disabled.VENDOR_SELL==true) or false
     local day=math.floor(now/86400)
-    local price=ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion() or ns.priceCacheEpoch
+    local price = (ns.GetPriceDataRevision and ns.GetPriceDataRevision())
+        or (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion())
+        or ns.priceCacheEpoch
     local version=effectiveLedgerVersion(store)
     local db=store and store.db
     local covered=coverage and coverage<=now-7*86400
@@ -632,7 +634,15 @@ local function acquisitionQuote(itemID, state)
         if vendor and observed then observedPrices[slot] = prices[slot] end
     end
     local ah = spanSeries(prices, slotCount, true)
-    local currentAH = ns.GetItemMarketPrice and number(ns.GetItemMarketPrice(itemID)) or market.values[slotCount]
+    local can = ns.GetCanonicalItemPrice and ns.GetCanonicalItemPrice(itemID) or nil
+    local currentAH
+    if can and can.isAbsent == true then
+        currentAH = nil
+    else
+        currentAH = (can and number(can.price))
+            or (ns.GetItemMarketPrice and number(ns.GetItemMarketPrice(itemID)))
+            or market.values[slotCount]
+    end
     local fixed = vendor ~= nil and (currentAH == nil or currentAH >= vendor)
     quote = { ah = ah, vendorSelected = vendorSelected, fixed = fixed, pureVendor = fixed and observedDays == 0,
         unitPrice = fixed and vendor or currentAH, scan = scan, firstQty = firstQty, sales = sales, listed = listed, liveQty = liveQty,
@@ -1248,10 +1258,20 @@ function Stats.BuildItemQuickLook(row, context, nowOverride)
     local output, localSales, scan, firstQty, _, listed, liveQty =
         itemSpan(itemID, state.economy, state.now, state.startSlot, slotCount, nil, true)
 
-    local liveAH = nonnegative(row.unitAH)
-        or (ns.GetItemMarketPrice and nonnegative(ns.GetItemMarketPrice(itemID)))
-        or output.last
-    local liveMarket = nonnegative(row.marketValue)
+    local can = ns.GetCanonicalItemPrice and ns.GetCanonicalItemPrice(itemID) or nil
+    local liveAH
+    if can and can.isAbsent == true then
+        liveAH = nil
+    else
+        liveAH = nonnegative(can and can.price)
+            or (ns.GetItemMarketPrice and nonnegative(ns.GetItemMarketPrice(itemID)))
+            or nonnegative(row.unitAH)
+            or output.last
+    end
+    local liveMarket = (ns.GetItemMarketValue7d and nonnegative(ns.GetItemMarketValue7d(itemID, state.economy))) or nil
+    if liveMarket == nil then
+        liveMarket = nonnegative(row.marketValue)
+    end
     if liveMarket == nil and ns.Pricing and ns.Pricing.GetItemSnapshotLatest then
         local snap = ns.Pricing.GetItemSnapshotLatest(itemID, state.economy)
         liveMarket = snap and (nonnegative(snap.marketValue) or nonnegative(snap.historical)) or nil

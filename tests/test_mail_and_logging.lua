@@ -99,7 +99,7 @@ local function makeFrame(frameType, name, parent)
                 GetUnboundedStringWidth = function(s) return #(s._text or "") * 6 end,
                 SetText = function(s, t) s._text = tostring(t or "") end,
                 GetText = function(s) return s._text end,
-                SetTextColor = function() end,
+                SetTextColor = function(s, r, g, b, a) s._color = { r, g, b, a } end,
                 SetFont = function() return true end,
                 Show = function(s) s._shown = true end,
                 Hide = function(s) s._shown = false end,
@@ -109,11 +109,14 @@ local function makeFrame(frameType, name, parent)
         end,
         CreateTexture = function(self)
             return {
+                _texture = nil,
+                _color = nil,
                 SetPoint = function() end,
                 SetSize = function() end,
                 SetHeight = function() end,
-                SetTexture = function() end,
-                SetColorTexture = function() end,
+                SetTexture = function(s, t) s._texture = t end,
+                GetTexture = function(s) return s._texture end,
+                SetColorTexture = function(s, r, g, b, a) s._color = { r, g, b, a } end,
                 SetVertexColor = function() end,
                 SetTexCoord = function() end,
                 SetAlpha = function() end,
@@ -138,6 +141,9 @@ host = {
     ItemIcon = function() return 134400 end,
     ITEM_IDS_BY_NAME = { ["Arcane Crystal"] = 12363, ["Black Lotus"] = 13468 },
     Theme = {
+        ASSETS = {
+            icon_gear = "Interface\\AddOns\\MerchantMaster\\Assets\\Apple\\icon_gear",
+        },
         GetActivePalette = function()
             return {
                 mode = "dark",
@@ -153,10 +159,18 @@ host = {
             return { SetFill = function() end, SetBorder = function() end, SetColors = function() end }
         end,
         ApplyFont = function() end,
-        CreatePlateButton = function(parent, text, w, h)
+        CreatePlateButton = function(parent, text, w, h, opts)
             local b = makeFrame("Button", nil, parent)
             b:SetSize(w, h)
             b:SetText(text)
+            b._opts = opts
+            b.fs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            b.fs:SetText(text or "")
+            if opts and opts.icon then
+                local ic = b:CreateTexture(nil, "ARTWORK")
+                ic:SetTexture(opts.icon)
+                b._mmIcon = ic
+            end
             b.SetActive = function(self, on) self._active = on and true or false end
             return b
         end,
@@ -548,11 +562,14 @@ freeBagSlots = 0
 _G.MailFrame = makeFrame("Frame", "MailFrame", nil)
 scanCalls = 0
 MH.OnEvent(nil, "MAIL_SHOW")
-check(MH.bar ~= nil and MH.bar:GetWidth() == 280 and MH.bar:GetHeight() == 124,
-    "MailHelper mounts 280x124 right-side Mail Helper panel onto MailFrame")
-check(MH.bar._points[1] and MH.bar._points[1][1] == "TOPLEFT" and MH.bar._points[1][2] == _G.MailFrame
-    and MH.bar._points[1][3] == "TOPRIGHT" and MH.bar._points[1][4] == 6 and MH.bar._points[1][5] == 0,
-    "MailHelper bar anchors to MailFrame TOPRIGHT (6, 0), never below MailFrame")
+eq(MH.bar, nil, "Legacy green Mail Helper bar is removed from MailFrame")
+check(MH.itemPickerPanel ~= nil and MH.itemPickerPanel:GetWidth() == 280,
+    "MailHelper mounts 280px Mail Items picker panel onto MailFrame")
+check(MH.itemPickerPanel._points[1] and MH.itemPickerPanel._points[1][1] == "TOPLEFT"
+    and MH.itemPickerPanel._points[1][2] == _G.MailFrame
+    and MH.itemPickerPanel._points[1][3] == "TOPRIGHT"
+    and MH.itemPickerPanel._points[1][4] == 6 and MH.itemPickerPanel._points[1][5] == 0,
+    "Mail Items picker anchors to MailFrame TOPRIGHT (6, 0), never below MailFrame")
 MH.Start("all")
 -- Step through inbox updates until batch completes
 local guard = 0
@@ -613,12 +630,12 @@ MH.Start("all")
 eq(stepped, 1, "First mail taken before action blocked")
 MH.OnEvent(nil, "ADDON_ACTION_BLOCKED", "MerchantMaster", "TakeInboxMoney")
 check(MH.GetState().clickStepper == true, "ADDON_ACTION_BLOCKED switches to clickStepper mode")
-eq(MH.bar.refreshBtn:GetText(), "Next", "Row 2 Refresh button relabels to Next in clickStepper mode")
+eq(MH.itemPickerPanel.refreshBtn:GetText(), "Next", "Mail Items Refresh button relabels to Next in clickStepper mode")
 -- MAIL_INBOX_UPDATE must NOT auto-advance in clickStepper mode
 MH.OnEvent(nil, "MAIL_INBOX_UPDATE")
 eq(stepped, 1, "MAIL_INBOX_UPDATE waits for manual click in clickStepper mode")
 -- Clicking Next advances manually
-MH.bar.refreshBtn:Click()
+MH.itemPickerPanel.refreshBtn:Click()
 eq(stepped, 2, "Clicking Next advances clickStepper manually")
 
 -- 4e. MAIL_CLOSED aborts active batch immediately
@@ -642,13 +659,18 @@ eq(checkInboxCalls, 2, "CheckInbox called second time after 60s")
 
 -- 4g. InCombatLockdown defers mounting until PLAYER_REGEN_ENABLED
 MH.bar = nil
+MH.itemPickerPanel = nil
+MH.presetsPanel = nil
 local inCombat = true
 _G.InCombatLockdown = function() return inCombat end
 MH.OnEvent(nil, "MAIL_SHOW")
-eq(MH.bar, nil, "MountOnMailFrame defers during InCombatLockdown")
+eq(MH.itemPickerPanel, nil, "MountOnMailFrame defers itemPickerPanel during InCombatLockdown")
+eq(MH.presetsPanel, nil, "MountOnMailFrame defers presetsPanel during InCombatLockdown")
 inCombat = false
 MH.OnEvent(nil, "PLAYER_REGEN_ENABLED")
-check(MH.bar ~= nil, "PLAYER_REGEN_ENABLED mounts deferred MailHelper bar")
+check(MH.itemPickerPanel ~= nil and MH.presetsPanel ~= nil,
+    "PLAYER_REGEN_ENABLED mounts deferred Mail Items and Mail Recipients panels")
+eq(MH.bar, nil, "PLAYER_REGEN_ENABLED does not mount removed MailHelper bar")
 
 -- 5. Analytics\UI.lua checks (seedTsmBtn legacy gate, TYPES dropdown, other preset, badge colors)
 _G.SlashCmdList = _G.SlashCmdList or {}
@@ -980,6 +1002,14 @@ do
     eq(MH.SetPresetCharacter("tailoring", "Hero Lightbringer-WildGrowth"), "Hero Lightbringer", "Stores current player as tailoring alt")
     eq(MH.SetPresetCharacter("engineering", "CrossAlt-OtherRealm"), "CrossAlt-OtherRealm", "Preserves foreign -OtherRealm suffix")
 
+    -- Investment Storage role preset works alongside Bank, Auction, Main Crafter
+    eq(MH.SetPresetCharacter("investmentStorage", "  VaultHold-WildGrowth  "), "VaultHold",
+        "Investment Storage normalizes character name and strips current realm")
+    local okInv, invRec = MH.IsSavedMailRecipient("vaulthold")
+    check(okInv == true and invRec and invRec.roleLabel == "Investment Storage" and invRec.icon == 133786,
+        "Investment Storage appears cleanly in quick-pick recipient entries")
+    MH.SetPresetCharacter("investmentStorage", "")
+
     -- Economy isolation
     MH.SetPresetCharacter("bank", "AllyBank", "PvP-Alliance")
     local hordeEntries = MH.BuildPresetRecipientEntries("Normal-Horde")
@@ -1057,6 +1087,17 @@ do
     local savedBar = MH.bar
     local savedPresetsPanel = MH.presetsPanel
     local savedInboxStrip = MH.inboxQuickStrip
+    local savedItemPicker = MH.itemPickerPanel
+    local savedOpenMailBtn = MH.openMailBtn
+    local savedGetInboxNum = _G.GetInboxNumItems
+    local savedGetInboxHeader = _G.GetInboxHeaderInfo
+    local savedGetInboxItem = _G.GetInboxItem
+    local savedGetInboxLink = _G.GetInboxItemLink
+    local savedTakeInboxItem = _G.TakeInboxItem
+    local savedGetInboxInvoice = _G.GetInboxInvoiceInfo
+    local savedCItem = _G.C_Item
+    local savedAttachMax = _G.ATTACHMENTS_MAX_RECEIVE
+    local savedOpenMailReplyBtn = _G.OpenMailReplyButton
 
     _G.GetRealmName = function() return "Forever" end
     host.GetPlayerFullName = function() return "Hero", "Hero" end
@@ -1064,6 +1105,8 @@ do
     MH.bar = nil
     MH.presetsPanel = nil
     MH.inboxQuickStrip = nil
+    MH.itemPickerPanel = nil
+    MH.openMailBtn = nil
 
     -- Build local Blizzard MailFrame mocks
     local mailFrame = makeFrame("Frame", "MailFrame", nil)
@@ -1135,6 +1178,10 @@ do
     _G.SendMailFrame = sendFrame
     _G.InboxFrame = inboxFrame
     _G.OpenMailFrame = openMailFrame
+    openMailFrame.GetLeft = function() return 0 end
+    local openMailReplyBtn = makeFrame("Button", "OpenMailReplyButton", openMailFrame)
+    openMailReplyBtn.GetLeft = function() return 84 end
+    _G.OpenMailReplyButton = openMailReplyBtn
     _G.SendMailNameEditBox = nameBox
     _G.SendMailSubjectEditBox = subjBox
     _G.SendMailMailButton = sendBtn
@@ -1166,19 +1213,13 @@ do
     -- Open Mailbox (Inbox visible, SendMail hidden)
     MH.OnEvent(nil, "MAIL_SHOW")
     eq(_G.SendMail, sendMailFn, "MailHelper NEVER wraps _G.SendMail (keeps Analytics Capture hook clean)")
-    check(MH.bar ~= nil and MH.bar._name == "MerchantMasterMailHelperBar",
-        "Mail Helper panel created with name MerchantMasterMailHelperBar")
-    eq(MH.bar:GetWidth(), 280, "Mail Helper panel width is 280px")
-    eq(MH.bar:GetHeight(), 124, "Mail Helper panel height is 124px")
-    eq(MH.bar.titleFs:GetText(), "Mail Helper", "Mail Helper header text is 'Mail Helper'")
-    eq(#MH.bar.modeBtns, 4, "Mail Helper 2x2 grid exposes 4 action buttons")
-    for idx, entry in ipairs(MH.bar.modeBtns) do
-        eq(entry.btn:GetWidth(), 128, "Mail Helper grid button " .. idx .. " width is 128px")
-        eq(entry.btn:GetHeight(), 24, "Mail Helper grid button " .. idx .. " height is 24px")
-    end
-    eq(MH.bar.refreshBtn:GetWidth(), 64, "Mail Helper Refresh button width is 64px")
-    eq(MH.bar.stopBtn:GetWidth(), 50, "Mail Helper Stop button width is 50px")
-    check(not hasBottomMailAnchor(MH.bar), "Mail Helper NEVER anchors below MailFrame (BOTTOMLEFT/BOTTOMRIGHT)")
+    eq(MH.bar, nil, "Legacy green Mail Helper panel is removed (Open All / AH Sales / Expired / Won not shown)")
+    check(MH.itemPickerPanel ~= nil and MH.itemPickerPanel._name == "MerchantMasterMailItemsPanel",
+        "Mail Items picker panel created with name MerchantMasterMailItemsPanel")
+    eq(MH.itemPickerPanel:GetWidth(), 280, "Mail Items picker width is 280px")
+    eq(MH.itemPickerPanel.refreshBtn:GetWidth(), 54, "Mail Items Refresh button width is 54px")
+    eq(MH.itemPickerPanel.stopBtn:GetWidth(), 44, "Mail Items Stop button width is 44px")
+    check(not hasBottomMailAnchor(MH.itemPickerPanel), "Mail Items picker NEVER anchors below MailFrame")
 
     check(MH.presetsPanel ~= nil and MH.presetsPanel._name == "MerchantMasterMailPresetsPanel",
         "Send Mail presets panel created with name MerchantMasterMailPresetsPanel")
@@ -1192,38 +1233,36 @@ do
     check(MH.inboxQuickStrip ~= nil, "Inbox quick-pick struct preserved if referenced")
     eq(MH.inboxQuickStrip:IsShown(), false, "Inbox quick strip stays hidden to avoid duplicate Inbox clutter")
 
-    -- InboxFrame stacking: MH.bar on top (MailFrame TOPRIGHT 6,0), MH.presetsPanel cleanly underneath (MH.bar BOTTOMLEFT 0,-6)
-    eq(MH.bar:IsShown(), true, "Mail Helper panel shown on InboxFrame")
-    eq(MH.presetsPanel:IsShown(), true, "Presets panel shown below Mail Helper on InboxFrame when presets exist")
-    check(hasPoint(MH.bar, "TOPLEFT", mailFrame, "TOPRIGHT", 6, 0),
-        "On InboxFrame, MH.bar anchors at TOPLEFT -> MailFrame TOPRIGHT (6, 0)")
-    check(hasPoint(MH.presetsPanel, "TOPLEFT", MH.bar, "BOTTOMLEFT", 0, -6),
-        "On InboxFrame, MH.presetsPanel stacks under MH.bar at TOPLEFT -> MH.bar BOTTOMLEFT (0, -6)")
+    -- InboxFrame stacking: MH.itemPickerPanel on top (MailFrame TOPRIGHT 6,0), MH.presetsPanel cleanly underneath
+    eq(MH.itemPickerPanel:IsShown(), true, "Mail Items picker shown on InboxFrame")
+    eq(MH.presetsPanel:IsShown(), true, "Mail Recipients shown below Mail Items on InboxFrame when presets exist")
+    check(hasPoint(MH.itemPickerPanel, "TOPLEFT", mailFrame, "TOPRIGHT", 6, 0),
+        "On InboxFrame, MH.itemPickerPanel anchors at TOPLEFT -> MailFrame TOPRIGHT (6, 0)")
+    check(hasPoint(MH.presetsPanel, "TOPLEFT", MH.itemPickerPanel, "BOTTOMLEFT", 0, -6),
+        "On InboxFrame, MH.presetsPanel stacks under MH.itemPickerPanel at BOTTOMLEFT (0, -6)")
 
-    -- Opening an inbox mail hides BOTH MH.bar and MH.presetsPanel
+    -- Opening an inbox mail hides BOTH MH.itemPickerPanel and MH.presetsPanel
     openMailFrame:Show()
     MH.RefreshPresetsUI()
-    eq(MH.bar:IsShown(), false, "OpenMailFrame shown hides MH.bar")
+    eq(MH.itemPickerPanel:IsShown(), false, "OpenMailFrame shown hides MH.itemPickerPanel")
     eq(MH.presetsPanel:IsShown(), false, "OpenMailFrame shown hides MH.presetsPanel")
     eq(MH.inboxQuickStrip:IsShown(), false, "OpenMailFrame shown keeps inboxQuickStrip hidden")
     openMailFrame:Hide()
     MH.RefreshPresetsUI()
-    eq(MH.bar:IsShown(), true, "Closing OpenMailFrame restores MH.bar on InboxFrame")
+    eq(MH.itemPickerPanel:IsShown(), true, "Closing OpenMailFrame restores MH.itemPickerPanel on InboxFrame")
     eq(MH.presetsPanel:IsShown(), true, "Closing OpenMailFrame restores MH.presetsPanel on InboxFrame")
 
-    -- Clicking preset row from Inbox switches to SendMail tab, fills recipient, calls CanSend, focuses subject, and flips stack!
+    -- Clicking preset row from Inbox switches to SendMail tab, hides itemPickerPanel, and anchors presetsPanel at top
     MH.presetsPanel.buttons[2]:Click()
     eq(tab2Clicks, 1, "Clicking recipient row from Inbox switches to Send Mail tab via MailFrameTab2:Click()")
     eq(nameBox:GetText(), "Elara Vance", "Clicking recipient row fills SendMailNameEditBox")
     check(canSendCalls >= 1, "Clicking recipient row triggers SendMailFrame_CanSend()")
     eq(subjFocusCount, 1, "Clicking recipient row from Inbox focuses SendMailSubjectEditBox")
     eq(MH.presetsPanel:IsShown(), true, "Presets panel shows when SendMailFrame is active")
-    eq(MH.bar:IsShown(), true, "Mail Helper panel shows below presets panel on SendMailFrame")
+    eq(MH.itemPickerPanel:IsShown(), false, "Mail Items picker hides when SendMailFrame is active")
     check(hasPoint(MH.presetsPanel, "TOPLEFT", mailFrame, "TOPRIGHT", 6, 0),
         "On SendMailFrame with presets, MH.presetsPanel anchors at TOPLEFT -> MailFrame TOPRIGHT (6, 0)")
-    check(hasPoint(MH.bar, "TOPLEFT", MH.presetsPanel, "BOTTOMLEFT", 0, -6),
-        "On SendMailFrame with presets, MH.bar stacks underneath at TOPLEFT -> MH.presetsPanel BOTTOMLEFT (0, -6)")
-    check(not hasBottomMailAnchor(MH.bar), "On SendMailFrame, MH.bar NEVER anchors below MailFrame")
+    check(not hasBottomMailAnchor(MH.presetsPanel), "On SendMailFrame, MH.presetsPanel NEVER anchors below MailFrame")
     check((MH.presetsPanel.statusFs:GetText() or ""):find("Saved: Auction", 1, true) ~= nil,
         "Status pill shows Saved: Auction for Elara Vance")
     check(MH.presetsPanel.statusPill.frame:GetWidth() <= 260,
@@ -1246,21 +1285,19 @@ do
     MH.SetPresetCharacter("engineering", "")
     nameBox:SetText("Elara Vance")
 
-    -- Verify SendMailFrame and InboxFrame stacking when 0 presets are saved (MH.bar anchors directly at MailFrame TOPRIGHT 6,0)
+    -- Verify SendMailFrame and InboxFrame visibility when 0 presets are saved
     local savedPresetsBackup = _G.MerchantMasterDB.mailPresets
     _G.MerchantMasterDB.mailPresets = nil
     MH.RefreshPresetsUI()
     eq(MH.presetsPanel:IsShown(), false, "On SendMailFrame with 0 presets, MH.presetsPanel hides")
-    eq(MH.bar:IsShown(), true, "On SendMailFrame with 0 presets, MH.bar stays visible")
-    check(hasPoint(MH.bar, "TOPLEFT", mailFrame, "TOPRIGHT", 6, 0),
-        "On SendMailFrame with 0 presets, MH.bar anchors directly at MailFrame TOPRIGHT (6, 0)")
+    eq(MH.itemPickerPanel:IsShown(), false, "On SendMailFrame with 0 presets, MH.itemPickerPanel stays hidden")
     sendFrame:Hide()
     inboxFrame:Show()
     MH.RefreshPresetsUI()
     eq(MH.presetsPanel:IsShown(), false, "On InboxFrame with 0 presets, MH.presetsPanel hides")
-    eq(MH.bar:IsShown(), true, "On InboxFrame with 0 presets, MH.bar stays visible")
-    check(hasPoint(MH.bar, "TOPLEFT", mailFrame, "TOPRIGHT", 6, 0),
-        "On InboxFrame with 0 presets, MH.bar anchors directly at MailFrame TOPRIGHT (6, 0)")
+    eq(MH.itemPickerPanel:IsShown(), true, "On InboxFrame with 0 presets, MH.itemPickerPanel stays visible")
+    check(hasPoint(MH.itemPickerPanel, "TOPLEFT", mailFrame, "TOPRIGHT", 6, 0),
+        "On InboxFrame with 0 presets, MH.itemPickerPanel anchors directly at MailFrame TOPRIGHT (6, 0)")
     _G.MerchantMasterDB.mailPresets = savedPresetsBackup
     inboxFrame:Hide()
     sendFrame:Show()
@@ -1383,11 +1420,184 @@ do
     eq(#shownPopups, 0, "warnUnsaved = false disables unsaved recipient popup")
     eq(#sendMailCalls, 1, "warnUnsaved = false sends item mail immediately")
 
+    -- Mail Items categorized scanner/fetcher + OpenMailFrame "Get all items" button tests
+    local mockInbox = {
+        [1] = {
+            sender = "The Endboss", subject = "Leather & Herbs", money = 0, cod = 0, hasItem = 2,
+            atts = {
+                [1] = { name = "Thick Leather", id = 4304, icon = 134254, count = 20, quality = 1, classID = 7 },
+                [2] = { name = "Wildvine", id = 8153, icon = 134187, count = 20, quality = 1, classID = 7 },
+            },
+        },
+        [2] = {
+            sender = "The Endboss", subject = "Lens + More Leather", money = 0, cod = 0, hasItem = 2,
+            atts = {
+                [1] = { name = "Green Lens", id = 10504, icon = 133022, count = 1, quality = 3, classID = 4 },
+                [2] = { name = "Thick Leather", id = 4304, icon = 134254, count = 10, quality = 1, classID = 7 },
+            },
+        },
+        [3] = {
+            sender = "Alchemist", subject = "Potions", money = 0, cod = 0, hasItem = 1,
+            atts = {
+                [1] = { name = "Major Healing Potion", id = 13446, icon = 134834, count = 5, quality = 1, classID = 0 },
+            },
+        },
+        [4] = {
+            sender = "Scammer", subject = "COD Trap", money = 0, cod = 50000, hasItem = 1,
+            atts = {
+                [1] = { name = "Thick Leather", id = 4304, icon = 134254, count = 5, quality = 1, classID = 7 },
+            },
+        },
+    }
+    local classByID = {
+        [4304] = 7, -- Trade Goods -> mats
+        [8153] = 7, -- Trade Goods -> mats
+        [10504] = 4, -- Armor -> gear
+        [13446] = 0, -- Consumable -> consumable
+    }
+    _G.C_Item = _G.C_Item or {}
+    _G.C_Item.GetItemInfoInstant = function(spec)
+        local id = tonumber(spec)
+        if not id and type(spec) == "string" then
+            id = tonumber(spec:match("item:(%d+)"))
+        end
+        if not id or not classByID[id] then return nil end
+        return id, "Item", "Sub", "", 134400, classByID[id], 0
+    end
+    _G.ATTACHMENTS_MAX_RECEIVE = 12
+    _G.GetInboxNumItems = function() return #mockInbox, #mockInbox end
+    _G.GetInboxHeaderInfo = function(i)
+        local m = mockInbox[i]
+        if not m then return end
+        local count = 0
+        for _ in pairs(m.atts or {}) do count = count + 1 end
+        return nil, nil, m.sender, m.subject, m.money or 0, m.cod or 0, 30, count, false, false
+    end
+    _G.GetInboxInvoiceInfo = function() return nil end
+    _G.GetInboxItem = function(i, att)
+        local m = mockInbox[i]
+        local a = m and m.atts and m.atts[att]
+        if not a then return end
+        return a.name, a.id, a.icon, a.count, a.quality or 1, true
+    end
+    _G.GetInboxItemLink = function(i, att)
+        local m = mockInbox[i]
+        local a = m and m.atts and m.atts[att]
+        if not a then return end
+        return "|Hitem:" .. tostring(a.id) .. "|h[" .. a.name .. "]|h"
+    end
+    local takenLog = {}
+    _G.TakeInboxItem = function(mailID, attIndex)
+        local m = mockInbox[mailID]
+        local a = m and m.atts and m.atts[attIndex]
+        if a then
+            takenLog[#takenLog + 1] = { mailID = mailID, attIndex = attIndex, itemID = a.id, count = a.count }
+            m.atts[attIndex] = nil
+            local left = false
+            for _ in pairs(m.atts) do left = true break end
+            if not left and (m.money or 0) == 0 then
+                table.remove(mockInbox, mailID)
+            end
+        end
+    end
+
+    -- ScanInboxItems categorizes Mats / Gear / Cons and ignores COD attachments
+    local groups, catCounts = MH.ScanInboxItems()
+    eq(#groups, 4, "ScanInboxItems finds 4 distinct non-COD items across inbox")
+    eq(catCounts.all, 4, "ScanInboxItems All count is 4")
+    eq(catCounts.mats, 2, "ScanInboxItems Mats count is 2 (Thick Leather + Wildvine)")
+    eq(catCounts.gear, 1, "ScanInboxItems Gear count is 1 (Green Lens)")
+    eq(catCounts.consumable, 1, "ScanInboxItems Cons count is 1 (Major Healing Potion)")
+    local leatherGrp
+    for _, g in ipairs(groups) do
+        if g.itemID == 4304 then leatherGrp = g break end
+    end
+    check(leatherGrp ~= nil and leatherGrp.totalQty == 30 and leatherGrp.stackCount == 2 and leatherGrp.mailCount == 2,
+        "ScanInboxItems aggregates Thick Leather totalQty=30 across 2 non-COD mails (ignoring COD mail)")
+
+    MH.SetItemCategory("mats")
+    eq(MH.GetState().itemCategory, "mats", "MH.SetItemCategory switches Mail Items category to mats")
+    MH.SetItemCategory("all")
+    MH.RefreshItemPickerUI()
+
+    -- Clicking Mail Items row collects ONLY 1 stack; clicking per-row "Get All" fetches all stacks
+    local leatherRow = nil
+    for _, r in ipairs((MH.itemPickerPanel and MH.itemPickerPanel.rows) or {}) do
+        if r._group and r._group.itemID == 4304 then leatherRow = r break end
+    end
+    check(leatherRow ~= nil and leatherRow.getAllBtn ~= nil and leatherRow.getAllBtn:GetText() == "Get All",
+        "Mail Items Thick Leather row mounts per-row 'Get All' button")
+    takenLog = {}
+    freeBagSlots = 10
+    leatherRow:Click()
+    MH.OnEvent(nil, "MAIL_INBOX_UPDATE")
+    eq(MH.IsActive(), false, "Clicking Mail Items row stops after taking 1 stack")
+    eq(#takenLog, 1, "Single row click took exactly 1 stack")
+    eq(MH.GetState().fetchedUnits, 10, "Single row click fetched only 10 units from 1 stack")
+    check(mockInbox[1].atts[1] ~= nil and mockInbox[1].atts[1].count == 20,
+        "Remaining Thick Leather stack (20x) on Mail 1 was left untouched after 1-stack click")
+
+    -- Restore Mail 2 Thick Leather stack and test clicking per-row "Get All" button
+    mockInbox[2].atts[2] = { name = "Thick Leather", id = 4304, icon = 134254, count = 10, quality = 1, classID = 7 }
+    MH.RefreshItemPickerUI()
+    leatherRow = nil
+    for _, r in ipairs((MH.itemPickerPanel and MH.itemPickerPanel.rows) or {}) do
+        if r._group and r._group.itemID == 4304 then leatherRow = r break end
+    end
+    takenLog = {}
+    leatherRow.getAllBtn:Click()
+    local fGuard = 0
+    while MH.IsActive() and fGuard < 20 do
+        fGuard = fGuard + 1
+        MH.OnEvent(nil, "MAIL_INBOX_UPDATE")
+    end
+    eq(MH.IsActive(), false, "Row Get All button fetch finishes cleanly")
+    eq(#takenLog, 2, "Row Get All looted both non-COD Thick Leather attachments")
+    eq(MH.GetState().fetchedUnits, 30, "Row Get All fetched all 30 units across stacks")
+    -- Mail 4 (COD) and non-matching items remained untouched
+    check(mockInbox[#mockInbox].sender == "Scammer", "COD mail remained untouched during item fetch")
+
+    -- OpenMailFrame compact square Baron crimson "Get All" button mounts left of OpenMailReplyButton
+    inboxFrame:Show()
+    sendFrame:Hide()
+    openMailFrame:Show()
+    inboxFrame.openMailID = 2
+    MH.MountOpenMailButton()
+    MH.UpdateOpenMailButton()
+    check(MH.openMailBtn ~= nil and MH.openMailBtn:GetText() == "Get All",
+        "OpenMailFrame mounts square crimson 'Get All' button")
+    eq(MH.openMailBtn:GetHeight(), 21, "OpenMail Get All button height is compact 21px")
+    check(MH.openMailBtn:GetWidth() <= 68, "OpenMail Get All button width fits compact <= 68px")
+    check(MH.openMailBtn._cushionTex ~= nil, "OpenMail Get All button carries Baron cushion texture layer")
+    check(hasPoint(MH.openMailBtn, "RIGHT", openMailReplyBtn, "LEFT", -4, 0),
+        "OpenMail Get All button anchors immediately left of OpenMailReplyButton")
+    eq(MH.openMailBtn:IsShown(), true, "Get All button shows when open mail has attachments")
+    local openSlots, openUnits = MH.CountOpenMailItems(2)
+    eq(openSlots, 1, "Mail 2 now has 1 remaining attachment slot (Green Lens)")
+    eq(openUnits, 1, "Mail 2 now has 1 remaining attachment unit")
+
+    takenLog = {}
+    MH.openMailBtn:Click()
+    local omGuard = 0
+    while MH.IsActive() and omGuard < 10 do
+        omGuard = omGuard + 1
+        MH.OnEvent(nil, "MAIL_INBOX_UPDATE")
+    end
+    eq(#takenLog, 1, "Clicking Get All looted the remaining attachment on open mail")
+    eq(takenLog[1].itemID, 10504, "Get All looted Green Lens from open mail")
+
+    openMailFrame:Hide()
+    inboxFrame.openMailID = nil
+
     -- MAIL_CLOSED clears confirmation and hides panels
     MH.OnEvent(nil, "MAIL_CLOSED")
-    eq(MH.bar:IsShown(), false, "MAIL_CLOSED hides Mail Helper bar")
+    eq(MH.bar, nil, "MAIL_CLOSED keeps removed Mail Helper bar nil")
+    eq(MH.itemPickerPanel:IsShown(), false, "MAIL_CLOSED hides Mail Items picker panel")
     eq(MH.presetsPanel:IsShown(), false, "MAIL_CLOSED hides presets panel")
     eq(MH.inboxQuickStrip:IsShown(), false, "MAIL_CLOSED hides inbox quick strip")
+    if MH.openMailBtn then
+        eq(MH.openMailBtn:IsShown(), false, "MAIL_CLOSED hides OpenMail Get all items button")
+    end
 
     -- Restore all mocked globals cleanly
     _G.MailFrame = savedMailFrame
@@ -1409,9 +1619,559 @@ do
     _G.GetRealmName = savedGetRealm
     host.GetPlayerFullName = savedGetPlayer
     _G.MerchantMasterDB.mailPresets = savedMailPresets
+    _G.GetInboxNumItems = savedGetInboxNum
+    _G.GetInboxHeaderInfo = savedGetInboxHeader
+    _G.GetInboxItem = savedGetInboxItem
+    _G.GetInboxItemLink = savedGetInboxLink
+    _G.TakeInboxItem = savedTakeInboxItem
+    _G.GetInboxInvoiceInfo = savedGetInboxInvoice
+    _G.C_Item = savedCItem
+    _G.ATTACHMENTS_MAX_RECEIVE = savedAttachMax
+    _G.OpenMailReplyButton = savedOpenMailReplyBtn
     MH.bar = savedBar
     MH.presetsPanel = savedPresetsPanel
     MH.inboxQuickStrip = savedInboxStrip
+    MH.itemPickerPanel = savedItemPicker
+    MH.openMailBtn = savedOpenMailBtn
+end
+
+-- =========================================================================
+-- 10. Mailbox Fixes: Settings Gear Icon, Refresh Timeout/Reset & Gold Row
+-- =========================================================================
+do
+    local savedMailFrame = _G.MailFrame
+    local savedSendMailFrame = _G.SendMailFrame
+    local savedInboxFrame = _G.InboxFrame
+    local savedOpenMailFrame = _G.OpenMailFrame
+    local savedGetInboxNum = _G.GetInboxNumItems
+    local savedGetInboxHeader = _G.GetInboxHeaderInfo
+    local savedGetInboxItem = _G.GetInboxItem
+    local savedGetInboxLink = _G.GetInboxItemLink
+    local savedGetInboxInvoice = _G.GetInboxInvoiceInfo
+    local savedTakeInboxMoney = _G.TakeInboxMoney
+    local savedTakeInboxItem = _G.TakeInboxItem
+    local savedCheckInbox = _G.CheckInbox
+    local savedCItem = _G.C_Item
+    local savedAttachMax = _G.ATTACHMENTS_MAX_RECEIVE
+    local savedContainer = _G.C_Container
+    local savedNumBagSlots = _G.NUM_BAG_SLOTS
+    local savedBar = MH.bar
+    local savedPresetsPanel = MH.presetsPanel
+    local savedInboxStrip = MH.inboxQuickStrip
+    local savedItemPicker = MH.itemPickerPanel
+    local savedOpenMailBtn = MH.openMailBtn
+
+    clearTimers()
+    advanceTimers(120) -- ensure RequestRefresh 60s cooldown is clear
+
+    local mailFrame = makeFrame("Frame", "MailFrame", nil)
+    local inboxFrame = makeFrame("Frame", "InboxFrame", mailFrame)
+    local sendFrame = makeFrame("Frame", "SendMailFrame", mailFrame)
+    local openMailFrame = makeFrame("Frame", "OpenMailFrame", mailFrame)
+    inboxFrame:Show()
+    sendFrame:Hide()
+    openMailFrame:Hide()
+    _G.MailFrame = mailFrame
+    _G.InboxFrame = inboxFrame
+    _G.SendMailFrame = sendFrame
+    _G.OpenMailFrame = openMailFrame
+
+    MH.bar = nil
+    MH.presetsPanel = nil
+    MH.inboxQuickStrip = nil
+    MH.itemPickerPanel = nil
+    MH.openMailBtn = nil
+
+    local bagFree = 10
+    _G.NUM_BAG_SLOTS = 4
+    _G.C_Container = {
+        GetContainerNumFreeSlots = function(bag)
+            if bag == 0 then return bagFree, 0 end
+            return 0, 0
+        end,
+    }
+    _G.ATTACHMENTS_MAX_RECEIVE = 12
+    _G.C_Item = {
+        GetItemInfoInstant = function(spec)
+            local id = tonumber(spec) or (type(spec) == "string" and tonumber(spec:match("item:(%d+)")))
+            if id == 4304 or id == 8153 then return id, "Item", "Sub", "", 134400, 7, 0 end
+            if id == 10504 then return id, "Item", "Sub", "", 134400, 4, 0 end
+            if id == 13446 then return id, "Item", "Sub", "", 134400, 0, 0 end
+            return nil
+        end,
+    }
+
+    -- Item-only inbox still produces #groups == 4 unchanged
+    local box = {
+        [1] = {
+            sender = "The Endboss", subject = "Mats", money = 0, cod = 0,
+            atts = {
+                [1] = { name = "Thick Leather", id = 4304, icon = 134254, count = 20, quality = 1 },
+                [2] = { name = "Wildvine", id = 8153, icon = 134187, count = 10, quality = 1 },
+            },
+        },
+        [2] = {
+            sender = "Armorer", subject = "Gear", money = 0, cod = 0,
+            atts = {
+                [1] = { name = "Green Lens", id = 10504, icon = 133022, count = 1, quality = 3 },
+            },
+        },
+        [3] = {
+            sender = "Alchemist", subject = "Pots", money = 0, cod = 0,
+            atts = {
+                [1] = { name = "Major Healing Potion", id = 13446, icon = 134834, count = 5, quality = 1 },
+            },
+        },
+    }
+    _G.GetInboxNumItems = function() return #box, #box end
+    _G.GetInboxHeaderInfo = function(i)
+        local m = box[i]
+        if not m then return end
+        local cnt = 0
+        for _ in pairs(m.atts or {}) do cnt = cnt + 1 end
+        return nil, nil, m.sender, m.subject, m.money or 0, m.cod or 0, 30, cnt, false, false
+    end
+    _G.GetInboxInvoiceInfo = function() return nil end
+    _G.GetInboxItem = function(i, att)
+        local m = box[i]
+        local a = m and m.atts and m.atts[att]
+        if not a then return end
+        return a.name, a.id, a.icon, a.count, a.quality or 1, true
+    end
+    _G.GetInboxItemLink = function(i, att)
+        local m = box[i]
+        local a = m and m.atts and m.atts[att]
+        if not a then return end
+        return "|Hitem:" .. tostring(a.id) .. "|h[" .. a.name .. "]|h"
+    end
+
+    local checkCalls = 0
+    _G.CheckInbox = function() checkCalls = checkCalls + 1 end
+
+    MH.OnEvent(nil, "MAIL_SHOW")
+
+    -- 10.1. MH.presetsPanel.settingsBtn uses icon_gear (not "*" fallback)
+    local gearBtn = MH.presetsPanel and MH.presetsPanel.settingsBtn
+    check(gearBtn ~= nil, "presetsPanel.settingsBtn exists")
+    eq(gearBtn._opts and gearBtn._opts.icon, host.Theme.ASSETS.icon_gear,
+        "presetsPanel.settingsBtn icon option equals ns.Theme.ASSETS.icon_gear")
+    check(gearBtn._mmIcon ~= nil and gearBtn._mmIcon:GetTexture() == host.Theme.ASSETS.icon_gear,
+        "presetsPanel.settingsBtn._mmIcon texture equals ns.Theme.ASSETS.icon_gear")
+    check((gearBtn.fs and gearBtn.fs:GetText() or "") ~= "*",
+        "presetsPanel.settingsBtn does NOT fall back to '*' text")
+
+    -- 10.2. RequestRefresh() clears "Refreshing inbox..." on MAIL_INBOX_UPDATE AND on 2.1s timer fallback
+    local itemOnlyGroups = MH.ScanInboxItems()
+    eq(#itemOnlyGroups, 4, "Item-only inbox keeps ScanInboxItems returning #groups == 4 unchanged")
+
+    local r1 = MH.RequestRefresh()
+    eq(r1, true, "RequestRefresh succeeds")
+    eq(MH.GetState().refreshPending, true, "RequestRefresh arms state.refreshPending")
+    eq(MH.GetState().statusText, "Refreshing inbox...", "RequestRefresh sets 'Refreshing inbox...' status")
+    MH.OnEvent(nil, "MAIL_INBOX_UPDATE")
+    eq(MH.GetState().refreshPending, false, "MAIL_INBOX_UPDATE clears state.refreshPending")
+    check(MH.GetState().statusText ~= "Refreshing inbox...",
+        "MAIL_INBOX_UPDATE clears 'Refreshing inbox...' status")
+    check((MH.GetState().statusText or ""):find("4 items ready", 1, true) ~= nil,
+        "MAIL_INBOX_UPDATE restores ready item summary")
+
+    advanceTimers(65)
+    local r2 = MH.RequestRefresh()
+    eq(r2, true, "Second RequestRefresh after 60s succeeds")
+    eq(MH.GetState().refreshPending, true, "Second RequestRefresh arms state.refreshPending")
+    eq(MH.GetState().statusText, "Refreshing inbox...", "Second RequestRefresh shows 'Refreshing inbox...'")
+    -- Blizzard never fires MAIL_INBOX_UPDATE -> 2.1s watchdog clears it cleanly!
+    advanceTimers(2.1)
+    eq(MH.GetState().refreshPending, false, "2.1s fallback timer clears state.refreshPending when MAIL_INBOX_UPDATE never fires")
+    check(MH.GetState().statusText ~= "Refreshing inbox...",
+        "2.1s fallback timer clears 'Refreshing inbox...' (never stuck)")
+    check((MH.GetState().statusText or ""):find("4 items ready", 1, true) ~= nil,
+        "2.1s fallback timer restores ready summary")
+
+    -- Empty inbox timeout also clears "Refreshing inbox..." to "Inbox up to date"
+    local savedBoxBackup = box
+    box = {}
+    advanceTimers(65)
+    MH.RequestRefresh()
+    eq(MH.GetState().statusText, "Refreshing inbox...", "Empty inbox RequestRefresh starts with 'Refreshing inbox...'")
+    advanceTimers(2.1)
+    eq(MH.GetState().refreshPending, false, "Empty inbox 2.1s timer clears refreshPending")
+    eq(MH.GetState().statusText, "Inbox up to date", "Empty inbox 2.1s timer sets 'Inbox up to date'")
+    eq(MH.itemPickerPanel.emptyFs:GetText(), "No items or gold in inbox",
+        "Empty inbox label reads 'No items or gold in inbox'")
+    box = savedBoxBackup
+
+    -- MAIL_CLOSED clears refreshPending
+    advanceTimers(65)
+    MH.RequestRefresh()
+    eq(MH.GetState().refreshPending, true, "refreshPending armed before MAIL_CLOSED")
+    MH.OnEvent(nil, "MAIL_CLOSED")
+    eq(MH.GetState().refreshPending, false, "MAIL_CLOSED clears state.refreshPending")
+
+    -- 10.3. ScanInboxItems detects non-COD gold-only + hybrid mail, ignores COD gold, prepends Gold row
+    box = {
+        [1] = {
+            sender = "Buyer", subject = "Gold Only", money = 123400, cod = 0, -- 12g 34s
+            atts = {},
+        },
+        [2] = {
+            sender = "Alt", subject = "Hybrid Mail", money = 50000, cod = 0, -- 5g 00s + Thick Leather
+            atts = {
+                [1] = { name = "Thick Leather", id = 4304, icon = 134254, count = 20, quality = 1 },
+            },
+        },
+        [3] = {
+            sender = "Scammer", subject = "COD Trap", money = 999900, cod = 50000,
+            atts = {
+                [1] = { name = "Wildvine", id = 8153, icon = 134187, count = 5, quality = 1 },
+            },
+        },
+    }
+
+    MH.OnEvent(nil, "MAIL_SHOW")
+    MH.SetItemCategory("all")
+    local mixedGroups, mixedCounts, mixedMeta = MH.ScanInboxItems()
+    eq(#mixedGroups, 2, "Mixed inbox produces 2 groups (Gold + Thick Leather, ignoring COD mail)")
+    eq(mixedGroups[1].isGold, true, "ScanInboxItems prepends Gold row at index 1 under All")
+    eq(mixedGroups[1].name, "Gold", "Gold group name is 'Gold'")
+    eq(mixedGroups[1].category, "other", "Gold group category is 'other'")
+    eq(mixedGroups[1].totalCopper, 173400, "Gold group sums non-COD gold-only + hybrid mail (173400c, ignoring COD)")
+    eq(mixedGroups[1].mailCount, 2, "Gold group mailCount is 2 (gold-only + hybrid)")
+    eq(mixedCounts.all, 2, "catCounts.all includes Gold + Thick Leather")
+    eq(mixedCounts.other, 1, "catCounts.other includes Gold")
+    eq(mixedCounts.mats, 1, "catCounts.mats includes Thick Leather")
+    eq(mixedMeta.totalGoldCopper, 173400, "meta.totalGoldCopper is 173400")
+    eq(mixedMeta.codSkipped, 1, "meta.codSkipped counts 1 COD mail")
+
+    -- Verify Gold row UI styling + mixed Ready status summary
+    MH.RefreshItemPickerUI()
+    local goldRow = MH.itemPickerPanel.rows[1]
+    check(goldRow ~= nil and goldRow._group and goldRow._group.isGold, "Row 1 in picker is Gold row")
+    eq(goldRow.iconTex:GetTexture(), 133784, "Gold row icon texture is 133784")
+    eq(goldRow.nameFs:GetText(), "Gold", "Gold row name text is 'Gold'")
+    check(goldRow.nameFs._color and goldRow.nameFs._color[1] == 1.0 and goldRow.nameFs._color[2] == 0.82,
+        "Gold row name colored gold")
+    eq(goldRow.qtyFs:GetText(), "17g 34s (2m)", "Gold row qtyFs formats copper + mail count '(2m)'")
+    check(goldRow.qtyFs._color and goldRow.qtyFs._color[1] == 1.0 and goldRow.qtyFs._color[2] == 0.82,
+        "Gold row qtyFs colored gold")
+    check((MH.GetState().statusText or ""):find("1 item + 17g 34s ready", 1, true) ~= nil,
+        "Ready status shows mixed '1 item + 17g 34s ready'")
+
+    -- Gold appears under Other category filter too
+    MH.SetItemCategory("other")
+    local otherRow = MH.itemPickerPanel.rows[1]
+    check(otherRow ~= nil and otherRow._group and otherRow._group.isGold,
+        "Gold row appears at index 1 under 'Other' category")
+    eq(MH.itemPickerPanel.rows[2]:IsShown(), false, "Only Gold row shown under 'Other' category")
+    MH.SetItemCategory("all")
+
+    -- 10.4. Clicking Gold row calls TakeInboxMoney ONCE & leaves attached items untouched;
+    --       Clicking Gold Get All collects all non-COD gold even when freeBagSlots = 0, leaving items & COD untouched
+    local moneyTakeLog, itemTakeLog = {}, {}
+    _G.TakeInboxMoney = function(mailID)
+        local m = box[mailID]
+        moneyTakeLog[#moneyTakeLog + 1] = { mailID = mailID, money = m and m.money or 0 }
+        if m then
+            m.money = 0
+            local hasAtt = false
+            for _ in pairs(m.atts or {}) do hasAtt = true break end
+            if not hasAtt then
+                table.remove(box, mailID)
+            end
+        end
+    end
+    _G.TakeInboxItem = function(mailID, attIndex)
+        itemTakeLog[#itemTakeLog + 1] = { mailID = mailID, attIndex = attIndex }
+    end
+
+    bagFree = 0
+    goldRow = MH.itemPickerPanel.rows[1]
+    check(goldRow._group and goldRow._group.isGold, "Gold row armed for single-click test")
+    goldRow:Click()
+    eq(#moneyTakeLog, 1, "Clicking Gold row calls TakeInboxMoney ONCE before MAIL_INBOX_UPDATE")
+    eq(#itemTakeLog, 0, "Clicking Gold row NEVER calls TakeInboxItem")
+    MH.OnEvent(nil, "MAIL_INBOX_UPDATE")
+    eq(MH.IsActive(), false, "Clicking Gold row stops after taking gold from 1 mail")
+    eq(#moneyTakeLog, 1, "Clicking Gold row took gold from only 1 mail")
+    eq(#itemTakeLog, 0, "Clicking Gold row left all item attachments untouched")
+
+    -- Remaining non-COD mail still has its 50,000c (or 123,400c depending on reverse order) + items intact;
+    -- test Gold-only ready status and Gold Get All with 2 remaining non-COD gold mails & freeBagSlots = 0!
+    box = {
+        [1] = {
+            sender = "Buyer1", subject = "Gold 1", money = 25000, cod = 0, atts = {},
+        },
+        [2] = {
+            sender = "Alt", subject = "Hybrid Mail", money = 50000, cod = 0,
+            atts = {
+                [1] = { name = "Thick Leather", id = 4304, icon = 134254, count = 20, quality = 1 },
+            },
+        },
+        [3] = {
+            sender = "Scammer", subject = "COD Trap", money = 999900, cod = 50000,
+            atts = {
+                [1] = { name = "Wildvine", id = 8153, icon = 134187, count = 5, quality = 1 },
+            },
+        },
+    }
+    MH.OnEvent(nil, "MAIL_SHOW")
+    MH.RefreshItemPickerUI()
+
+    moneyTakeLog, itemTakeLog = {}, {}
+    bagFree = 0
+    goldRow = MH.itemPickerPanel.rows[1]
+    goldRow.getAllBtn:Click()
+    local gGuard = 0
+    while MH.IsActive() and gGuard < 20 do
+        gGuard = gGuard + 1
+        MH.OnEvent(nil, "MAIL_INBOX_UPDATE")
+    end
+    eq(MH.IsActive(), false, "Gold Get All finishes cleanly with freeBagSlots = 0")
+    eq(#moneyTakeLog, 2, "Gold Get All collected gold from both non-COD mails (gold-only + hybrid) with freeBagSlots = 0")
+    eq(#itemTakeLog, 0, "Gold Get All NEVER called TakeInboxItem")
+    eq(MH.GetState().lootedCopper, 75000, "Gold Get All looted exact 75,000c (2g 50s + 5g)")
+    -- Both Thick Leather on hybrid mail and COD trap mail remain completely untouched!
+    eq(#box, 2, "Gold-only mail removed; hybrid mail and COD mail remain in inbox")
+    check(box[1].sender == "Alt" and box[1].money == 0 and box[1].atts[1].count == 20,
+        "Hybrid mail had its gold collected and its 20x Thick Leather left untouched")
+    check(box[2].sender == "Scammer" and box[2].money == 999900 and box[2].cod == 50000,
+        "COD mail gold and items left completely untouched")
+
+    -- Gold-only ready status check (when inbox has only non-COD gold, no items)
+    box = {
+        [1] = { sender = "Buyer1", subject = "Gold A", money = 30000, cod = 0, atts = {} },
+        [2] = { sender = "Buyer2", subject = "Gold B", money = 20000, cod = 0, atts = {} },
+    }
+    MH.OnEvent(nil, "MAIL_SHOW")
+    MH.RefreshItemPickerUI()
+    eq(MH.GetState().statusText, "5g 00s in 2 mails ready",
+        "Gold-only inbox shows '5g 00s in 2 mails ready'")
+
+    -- Clicking Gold Get All a second time while already active stops via MH.Stop("user_stop")
+    goldRow = MH.itemPickerPanel.rows[1]
+    goldRow.getAllBtn:Click()
+    eq(MH.IsActive(), true, "Gold Get All starts active fetch")
+    eq(goldRow.getAllBtn:GetText(), "Stop", "Active Gold Get All button relabels to Stop")
+    goldRow.getAllBtn:Click()
+    eq(MH.IsActive(), false, "Clicking Gold Stop button cancels active gold_only fetch")
+
+    MH.OnEvent(nil, "MAIL_CLOSED")
+
+    _G.MailFrame = savedMailFrame
+    _G.SendMailFrame = savedSendMailFrame
+    _G.InboxFrame = savedInboxFrame
+    _G.OpenMailFrame = savedOpenMailFrame
+    _G.GetInboxNumItems = savedGetInboxNum
+    _G.GetInboxHeaderInfo = savedGetInboxHeader
+    _G.GetInboxItem = savedGetInboxItem
+    _G.GetInboxItemLink = savedGetInboxLink
+    _G.GetInboxInvoiceInfo = savedGetInboxInvoice
+    _G.TakeInboxMoney = savedTakeInboxMoney
+    _G.TakeInboxItem = savedTakeInboxItem
+    _G.CheckInbox = savedCheckInbox
+    _G.C_Item = savedCItem
+    _G.ATTACHMENTS_MAX_RECEIVE = savedAttachMax
+    _G.C_Container = savedContainer
+    _G.NUM_BAG_SLOTS = savedNumBagSlots
+    MH.bar = savedBar
+    MH.presetsPanel = savedPresetsPanel
+    MH.inboxQuickStrip = savedInboxStrip
+    MH.itemPickerPanel = savedItemPicker
+    MH.openMailBtn = savedOpenMailBtn
+end
+
+-- Section 11: Mail GetAll per-line efficiency & zero-slow-start regression tests
+do
+    local savedMailFrame = _G.MailFrame
+    local savedInboxFrame = _G.InboxFrame
+    local savedSendFrame = _G.SendMailFrame
+    local savedOpenFrame = _G.OpenMailFrame
+    local savedGetNum = _G.GetInboxNumItems
+    local savedGetHdr = _G.GetInboxHeaderInfo
+    local savedGetInv = _G.GetInboxInvoiceInfo
+    local savedGetItem = _G.GetInboxItem
+    local savedGetLink = _G.GetInboxItemLink
+    local savedGetText = _G.GetInboxText
+    local savedTakeItem = _G.TakeInboxItem
+    local savedTakeMoney = _G.TakeInboxMoney
+    local savedCont = _G.C_Container
+    local savedCItem = _G.C_Item
+    local savedAttachMax = _G.ATTACHMENTS_MAX_RECEIVE
+    local savedPickerFn = MH.RefreshItemPickerUI
+    local savedPresetsFn = MH.RefreshPresetsUI
+
+    local function runGetAllPerfCase(buildInbox, mode)
+        local inbox = buildInbox()
+        local counters = { hdr = 0, inv = 0, item = 0, link = 0, text = 0, picker = 0, presets = 0, looted = 0 }
+        MH.RefreshItemPickerUI = function(...)
+            counters.picker = counters.picker + 1
+            return savedPickerFn(...)
+        end
+        MH.RefreshPresetsUI = function(...)
+            counters.presets = counters.presets + 1
+            return savedPresetsFn(...)
+        end
+        _G.MailFrame = { IsShown = function() return true end }
+        _G.InboxFrame = { IsShown = function() return true end }
+        _G.SendMailFrame = { IsShown = function() return false end }
+        _G.OpenMailFrame = { IsShown = function() return false end }
+        _G.ATTACHMENTS_MAX_RECEIVE = 12
+        _G.C_Item = {
+            GetItemInfoInstant = function(x)
+                local id = (type(x) == "number" and x) or (type(x) == "string" and tonumber(x:match("item:(%d+)"))) or 13463
+                return id, "Trade Goods", "Herb", "", 134400, 7, 9
+            end,
+        }
+        _G.C_Container = { GetContainerNumFreeSlots = function() return 24, 0 end }
+        _G.GetInboxNumItems = function() return #inbox, #inbox end
+        _G.GetInboxHeaderInfo = function(i)
+            counters.hdr = counters.hdr + 1
+            local m = inbox[i]
+            if not m then return end
+            local c = 0
+            for _ in pairs(m.atts or {}) do c = c + 1 end
+            return nil, nil, m.sender, m.subject, m.money or 0, m.cod or 0, 29, c, false, false
+        end
+        _G.GetInboxInvoiceInfo = function(i)
+            counters.inv = counters.inv + 1
+            local m = inbox[i]
+            return m and m.invoiceType or nil
+        end
+        _G.GetInboxItem = function(i, s)
+            counters.item = counters.item + 1
+            local m = inbox[i]
+            local a = m and m.atts and m.atts[s]
+            if not a then return end
+            return a.name, a.itemID, 134400, a.count, 1, true
+        end
+        _G.GetInboxItemLink = function(i, s)
+            counters.link = counters.link + 1
+            local m = inbox[i]
+            local a = m and m.atts and m.atts[s]
+            if not a then return end
+            return "|cffffffff|Hitem:" .. tostring(a.itemID) .. "::::::::60:::::|h[" .. a.name .. "]|h|r"
+        end
+        _G.GetInboxText = function()
+            counters.text = counters.text + 1
+            return "Body text"
+        end
+        _G.TakeInboxItem = function(mailIdx, attIdx)
+            local m = inbox[mailIdx]
+            if m and m.atts and m.atts[attIdx] then
+                counters.looted = counters.looted + 1
+                m.atts[attIdx] = nil
+                local hasLeft = false
+                for _ in pairs(m.atts) do hasLeft = true break end
+                if not hasLeft and (m.money or 0) <= 0 then table.remove(inbox, mailIdx) end
+            end
+        end
+        _G.TakeInboxMoney = function(mailIdx)
+            local m = inbox[mailIdx]
+            if m and (m.money or 0) > 0 then
+                counters.looted = counters.looted + 1
+                m.money = 0
+                local hasLeft = false
+                for _ in pairs(m.atts) do hasLeft = true break end
+                if not hasLeft then table.remove(inbox, mailIdx) end
+            end
+        end
+
+        clearTimers()
+        MH.OnEvent(nil, "MAIL_SHOW")
+        for k in pairs(counters) do counters[k] = 0 end
+        if mode == "gold" then
+            MH.StartGoldFetch()
+        else
+            MH.StartItemFetch(13463, "Dreamfoil", { totalUnits = 400 })
+        end
+        local guard = 0
+        while MH.IsActive() and guard < 120 do
+            guard = guard + 1
+            MH.OnEvent(nil, "BAG_UPDATE_DELAYED")
+            MH.OnEvent(nil, "MAIL_INBOX_UPDATE")
+        end
+        counters.rem = #inbox
+        clearTimers()
+        MH.OnEvent(nil, "MAIL_CLOSED")
+        MH.RefreshItemPickerUI = savedPickerFn
+        MH.RefreshPresetsUI = savedPresetsFn
+        return counters
+    end
+
+    local c1 = runGetAllPerfCase(function()
+        local t = {}
+        for i = 1, 50 do
+            t[i] = {
+                sender = "Auction House",
+                subject = "Auction expired: Dreamfoil (20)",
+                money = 0, cod = 0,
+                atts = { [1] = { name = "Dreamfoil", itemID = 13463, count = 20 } },
+            }
+        end
+        return t
+    end, "item")
+    eq(c1.looted, 50, "GetAll perf 50_expired_Dreamfoil looted all 50")
+    eq(c1.text, 0, "GetAll perf 50_expired_Dreamfoil makes 0 GetInboxText calls")
+    check(c1.picker <= 2, "GetAll perf 50_expired_Dreamfoil refreshes picker <= 2 times, got " .. tostring(c1.picker))
+    check(c1.presets <= 1, "GetAll perf 50_expired_Dreamfoil refreshes presets <= 1 time during batch, got " .. tostring(c1.presets))
+
+    local c2 = runGetAllPerfCase(function()
+        local t = {}
+        for i = 1, 20 do
+            t[i] = {
+                sender = "Auction House",
+                subject = "Auction expired: Dreamfoil (20)",
+                money = 0, cod = 0,
+                atts = { [1] = { name = "Dreamfoil", itemID = 13463, count = 20 } },
+            }
+        end
+        for i = 21, 50 do
+            t[i] = {
+                sender = "Auction House",
+                subject = "Auction successful: Copper Bar (20)",
+                invoiceType = "seller", money = 4750, cod = 0, atts = {},
+            }
+        end
+        return t
+    end, "item")
+    eq(c2.looted, 20, "GetAll perf 20_Dreamfoil_behind_30_other looted all 20 Dreamfoil")
+    eq(c2.rem, 30, "GetAll perf 20_Dreamfoil_behind_30_other left 30 other mails untouched")
+    eq(c2.text, 0, "GetAll perf 20_Dreamfoil_behind_30_other makes 0 GetInboxText calls")
+    check(c2.hdr < 200, "GetAll perf 20_Dreamfoil_behind_30_other scanCursor keeps headers < 200, got " .. tostring(c2.hdr))
+    check(c2.item <= 260, "GetAll perf 20_Dreamfoil_behind_30_other scanCursor keeps item reads <= 260, got " .. tostring(c2.item))
+    check(c2.picker <= 2, "GetAll perf 20_Dreamfoil_behind_30_other refreshes picker <= 2 times, got " .. tostring(c2.picker))
+
+    local c3 = runGetAllPerfCase(function()
+        local t = {}
+        for i = 1, 50 do
+            t[i] = {
+                sender = "Auction House",
+                subject = "Auction successful: Copper Bar (20)",
+                invoiceType = "seller", money = 4750, cod = 0, atts = {},
+            }
+        end
+        return t
+    end, "gold")
+    eq(c3.looted, 50, "GetAll perf 50_gold_only_mails looted all 50 gold mails")
+    eq(c3.item, 0, "GetAll perf 50_gold_only_mails makes 0 GetInboxItem calls")
+    eq(c3.text, 0, "GetAll perf 50_gold_only_mails makes 0 GetInboxText calls")
+    check(c3.picker <= 2, "GetAll perf 50_gold_only_mails refreshes picker <= 2 times, got " .. tostring(c3.picker))
+
+    _G.MailFrame = savedMailFrame
+    _G.InboxFrame = savedInboxFrame
+    _G.SendMailFrame = savedSendFrame
+    _G.OpenMailFrame = savedOpenFrame
+    _G.GetInboxNumItems = savedGetNum
+    _G.GetInboxHeaderInfo = savedGetHdr
+    _G.GetInboxInvoiceInfo = savedGetInv
+    _G.GetInboxItem = savedGetItem
+    _G.GetInboxItemLink = savedGetLink
+    _G.GetInboxText = savedGetText
+    _G.TakeInboxItem = savedTakeItem
+    _G.TakeInboxMoney = savedTakeMoney
+    _G.C_Container = savedCont
+    _G.C_Item = savedCItem
+    _G.ATTACHMENTS_MAX_RECEIVE = savedAttachMax
 end
 
 print(string.format("PASS test_mail_and_logging (%d assertions)", assertions))

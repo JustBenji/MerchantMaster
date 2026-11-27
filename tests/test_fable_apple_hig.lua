@@ -492,8 +492,8 @@ do
 	end
 
 	-- 17 nav items including Watchlist in OVERVIEW, All Items, Vendor Crafter & Disenchantment Crafter in MARKET, Forged Delivery in TURN-INS, Snipers in SNIPER, and Console in SYSTEM.
-	check(type(ui.navOrder) == "table" and #ui.navOrder == 17,
-		"Sidebar exposes 17 nav items, got " .. tostring(ui.navOrder and #ui.navOrder))
+	check(type(ui.navOrder) == "table" and #ui.navOrder == 18,
+		"Sidebar exposes 18 nav items, got " .. tostring(ui.navOrder and #ui.navOrder))
 	check(ui.navBtns.auction_house == nil, "Standalone Auction House nav button has been removed")
 	local wlBtn = ui.navBtns.watchlist
 	check(wlBtn and wlBtn.key == "watchlist" and wlBtn.targetTab == "watchlist"
@@ -530,10 +530,15 @@ do
 		"All Items sits immediately after All Recipes and before Vendor Crafter & Disenchantment Crafter inside MARKET")
 	check(positions.forged and positions.crates < positions.writs and positions.writs < positions.forged
 		and positions.forged < positions.reputation, "Forged Delivery sits between Writs and Standing in TURN-INS")
-	check(positions.auction_house == nil and positions.sniper_gap and positions.sniper_vendor
+	check(positions.auction_house == nil and positions.sniper_gap and positions.sniper_vendor and positions.sniper_de
 		and positions.sniper_gap < positions.sniper_vendor
-		and positions.sniper_vendor < positions.console,
-		"Gap Sniper precedes Vendor Sniper in SNIPER, followed by Console in SYSTEM")
+		and positions.sniper_vendor < positions.sniper_de
+		and positions.sniper_de < positions.console,
+		"Gap Sniper, Vendor Sniper, and Disenchant Sniper sit in order inside SNIPER, followed by Console in SYSTEM")
+	local deSniperBtn = ui.navBtns.sniper_de
+	check(deSniperBtn and deSniperBtn.key == "sniper_de" and deSniperBtn.targetTab == "sniper_de"
+		and deSniperBtn.labelFs:GetText() == "Disenchant Sniper",
+		"Disenchant Sniper has a sidebar button routed to the sniper_de tab")
 
 	-- The host fixture records anchors without solving the sidebar's stretched height.
 	local sidebarHeight = ui.sidebar:GetHeight()
@@ -546,7 +551,7 @@ do
 	local navBottomY = lastNav._points[1][5] - lastNav:GetHeight()
 	local walletTopY = -(sidebarHeight - 12 - ui.walletCard:GetHeight())
 	check(app.panel:GetHeight() == 730 and navBottomY > walletTopY,
-		string.format("The 17th nav item clears the wallet card at 730px min height (navBottomY=%s > walletTopY=%s)",
+		string.format("The 18th nav item clears the wallet card at 730px min height (navBottomY=%s > walletTopY=%s)",
 			tostring(navBottomY), tostring(walletTopY)))
 
 	local priorTab, priorSavedTab = app.activeTab, MerchantMasterDB.activeTab
@@ -1314,7 +1319,7 @@ end
 -- 3I. Global CreateTexture subLevel Invariant (Zero values outside [-8, 7] across all routes)
 ---------------------------------------------------------------------------------------------------
 do
-	for _, tab in ipairs({ "dashboard", "spread", "outliers", "superlist", "vendor_crafter", "disenchant_crafter", "waylaid", "writs", "forged", "reputation", "leveling", "analytics", "console_overview", "console_database", "console_perf", "console_setup", "console_settings", "console_ui", "console_data", "calc", "bags", "dashboard" }) do
+	for _, tab in ipairs({ "dashboard", "spread", "outliers", "superlist", "vendor_crafter", "disenchant_crafter", "waylaid", "writs", "forged", "reputation", "leveling", "analytics", "console_overview", "console_database", "console_perf", "console_setup2", "console_settings", "console_ui", "console_data", "calc", "bags", "dashboard" }) do
 		app.setTab(tab)
 	end
 	Theme.SetMode("light")

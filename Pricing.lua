@@ -77,6 +77,12 @@ ns.PRICE_SOURCES = {
 	{ key = "tsm",         label = "TSM (Light)",    short = "TSM" },
 }
 
+ns.BACKGROUND_PRICE_MODES = {
+	{ key = "local", label = "Local Snapshot" },
+	{ key = "tsm",   label = "TSM Light" },
+	{ key = "none",  label = "None (Manual AH)" },
+}
+
 local LEGACY_PRICE_SOURCES = {
 	tsm_min = true,
 	tsm_market = true,
@@ -88,9 +94,64 @@ function ns.GetDB()
 	return _G.MerchantMasterDB
 end
 
+function ns.IsLocalSnapshotSuppressed()
+	local db = ns.GetDB()
+	return (type(db) == "table" and (db.backgroundPriceMode == "tsm" or db.backgroundPriceMode == "none")) and true or false
+end
+
 function ns.IsTSMOptInEnabled()
 	local db = ns.GetDB()
-	return (type(db) == "table" and (db.useTSMPrices == true or db.priceSource == "tsm")) and true or false
+	if type(db) ~= "table" then return false end
+	if db.backgroundPriceMode == "tsm" then return true end
+	if db.backgroundPriceMode == "local" or db.backgroundPriceMode == "none" then return false end
+	return (db.useTSMPrices == true or db.priceSource == "tsm") and true or false
+end
+
+function ns.GetBackgroundPriceMode()
+	local db = ns.GetDB()
+	if type(db) == "table" then
+		local m = db.backgroundPriceMode
+		if m == "local" or m == "tsm" or m == "none" then
+			return m
+		end
+		if db.useTSMPrices == true or db.priceSource == "tsm" then
+			return "tsm"
+		end
+	end
+	if type(ns.HasRawSnapshots) == "function" and ns.HasRawSnapshots() then
+		return "local"
+	end
+	return "none"
+end
+
+function ns.SetBackgroundPriceMode(mode)
+	if mode ~= "local" and mode ~= "tsm" and mode ~= "none" then
+		return false
+	end
+	local db = ns.GetDB()
+	if type(db) ~= "table" then
+		_G.MerchantMasterDB = {}
+		db = _G.MerchantMasterDB
+	end
+	db.backgroundPriceMode = mode
+	db.useTSMPrices = (mode == "tsm")
+	if mode == "tsm" then
+		if db.priceSource == nil or db.priceSource == "snapshot" or db.priceSource == "tsm" then
+			db.priceSource = "auto"
+		end
+	elseif mode == "local" then
+		if db.priceSource == "tsm" then
+			db.priceSource = "auto"
+		end
+	elseif mode == "none" then
+		if db.priceSource == "tsm" or db.priceSource == "snapshot" then
+			db.priceSource = "auto"
+		end
+	end
+	if type(ns.InvalidatePriceCache) == "function" then
+		ns.InvalidatePriceCache()
+	end
+	return true
 end
 
 function ns.IsTSMAddonLoaded()
@@ -109,16 +170,17 @@ function ns.IsTSMAvailable()
 	if not ns.IsTSMOptInEnabled() then return false end
 	local api = rawget(_G, "TSM_API")
 	local avail = type(api) == "table" and type(api.GetCustomPriceValue) == "function"
-	if avail and not ns._tsmLastSeenAt then
+	if avail and not ns._tsmSessionLoadedAt then
 		local now = (type(time) == "function" and time()) or 0
 		if type(now) == "number" and now > 0 then
-			ns._tsmLastSeenAt = math.floor(now)
+			ns._tsmSessionLoadedAt = math.floor(now)
+			ns._tsmLastSeenAt = ns._tsmLastSeenAt or ns._tsmSessionLoadedAt
 		end
 	end
 	return avail
 end
 
-function ns.GetTSMLastUpdateTime()
+function ns.GetTSMRealUpdateTime()
 	if not ns.IsTSMAvailable() then return nil end
 	local now = (type(time) == "function" and time()) or 0
 	local api = rawget(_G, "TSM_API")
@@ -136,7 +198,17 @@ function ns.GetTSMLastUpdateTime()
 			end
 		end
 	end
-	local fallback = ns._tsmLastSeenAt
+	return nil
+end
+
+function ns.GetTSMLastUpdateTime()
+	if not ns.IsTSMAvailable() then return nil end
+	local realTs = ns.GetTSMRealUpdateTime()
+	if realTs then
+		return realTs
+	end
+	local now = (type(time) == "function" and time()) or 0
+	local fallback = ns._tsmLastSeenAt or ns._tsmSessionLoadedAt
 	if type(fallback) == "number" and fallback == fallback and fallback > 0 and fallback < math.huge then
 		fallback = math.floor(fallback)
 		if now <= 0 or fallback <= now then
@@ -144,7 +216,8 @@ function ns.GetTSMLastUpdateTime()
 		end
 	end
 	if type(now) == "number" and now > 0 then
-		ns._tsmLastSeenAt = math.floor(now)
+		ns._tsmSessionLoadedAt = math.floor(now)
+		ns._tsmLastSeenAt = ns._tsmSessionLoadedAt
 		return ns._tsmLastSeenAt
 	end
 	return nil
@@ -180,9 +253,11 @@ end
 ns.Pricing.GetEffectivePriceSource = ns.GetEffectivePriceSource
 
 function ns.GetAvailablePriceSources()
-	local includeSnap = (ns.HasSnapshots and ns.HasSnapshots())
+	local includeSnap = (not ns.IsLocalSnapshotSuppressed()) and (
+		(ns.HasSnapshots and ns.HasSnapshots())
 		or (ns.HasSnapshotExtension and ns.HasSnapshotExtension())
 		or (ns.app and ns.app.snapshotExtension ~= nil)
+	)
 	local includeTSM = ns.IsTSMOptInEnabled()
 	if includeSnap and includeTSM then
 		return ns.PRICE_SOURCES
@@ -207,11 +282,40 @@ end
 local requestedItemIDs = {}
 ns.pendingItemLoads = {}
 ns.priceCacheEpoch = 1
+ns.priceItemRevision = ns.priceItemRevision or 1
 ns._evalCache = nil
 local evalDepth = 0
 local crateTooltipMemo = {}
 local tooltipCraftMemo = {}
 local cachedBarteringRank = nil
+local priceChangeListeners = {}
+local firingPriceListeners = false
+local pendingSnapshotNotify = false
+
+function ns.RegisterPriceChangeListener(fn)
+	if type(fn) ~= "function" then return false end
+	for i = 1, #priceChangeListeners do
+		if priceChangeListeners[i] == fn then return false end
+	end
+	priceChangeListeners[#priceChangeListeners + 1] = fn
+	return true
+end
+
+local function notifyPriceChange(reason, itemIDs)
+	if firingPriceListeners then return end
+	firingPriceListeners = true
+	for i = 1, #priceChangeListeners do
+		local fn = priceChangeListeners[i]
+		if type(fn) == "function" then
+			pcall(fn, reason, itemIDs)
+		end
+	end
+	firingPriceListeners = false
+end
+
+function ns.GetPriceDataRevision()
+	return (ns.priceCacheEpoch or 1) * 1000000 + (ns.priceItemRevision or 1)
+end
 
 ns.CRATE_BY_ID = ns.CRATE_BY_ID or {}
 if ns.CRATES then
@@ -257,18 +361,30 @@ function ns.InvalidateVendorDiscountCache()
 	cachedBarteringRank = nil
 end
 
-function ns.InvalidatePriceCache()
+function ns.InvalidatePriceCache(opts)
 	ns.priceCacheEpoch = (ns.priceCacheEpoch or 1) + 1
+	ns.priceItemRevision = (ns.priceItemRevision or 1) + 1
 	ns._evalCache = nil
+	if type(ns._clearTSMBundleCache) == "function" then
+		ns._clearTSMBundleCache()
+	end
 	if ns.IsTSMAvailable() then
-		local now = (type(time) == "function" and time()) or 0
-		ns._tsmLastSeenAt = (type(now) == "number" and now > 0) and math.floor(now) or nil
+		if not ns._tsmSessionLoadedAt then
+			local now = (type(time) == "function" and time()) or 0
+			ns._tsmSessionLoadedAt = (type(now) == "number" and now > 0) and math.floor(now) or nil
+		end
+		ns._tsmLastSeenAt = ns._tsmLastSeenAt or ns._tsmSessionLoadedAt
 	else
+		ns._tsmSessionLoadedAt = nil
 		ns._tsmLastSeenAt = nil
 	end
 	ns.InvalidateCrateTooltipCache()
 	ns.InvalidateTooltipEconCache()
 	if ns.MP and ns.MP.InvalidateSolveCache then ns.MP.InvalidateSolveCache() end
+	local suppressNotify = type(opts) == "table" and opts.suppressNotify == true
+	if not suppressNotify then
+		notifyPriceChange((type(opts) == "table" and opts.reason) or "all", nil)
+	end
 end
 
 -- Surgical invalidation when sub-craft routing or live recipe reagents change:
@@ -303,6 +419,7 @@ function ns.InvalidateItemPrices(itemIDs)
 		end
 	end
 	if not next(ids) then return false end
+	ns.priceItemRevision = (ns.priceItemRevision or 1) + 1
 	local ec = ns._evalCache
 	local uiBank = ns.app and ns.app.uiPriceBank
 	for id in pairs(ids) do
@@ -327,6 +444,7 @@ function ns.InvalidateItemPrices(itemIDs)
 	ns.InvalidateCrateTooltipCache()
 	ns.InvalidateTooltipEconCache()
 	if ns.MP and ns.MP.InvalidateSolveCache then ns.MP.InvalidateSolveCache() end
+	notifyPriceChange("items", ids)
 	return true
 end
 
@@ -374,12 +492,16 @@ function ns.BeginEval(bank)
 	evalDepth = evalDepth + 1
 	if evalDepth == 1 or not ns._evalCache or ns._evalCache.epoch ~= ns.priceCacheEpoch then
 		if bank then
+			if not bank.canonicalPrice then bank.canonicalPrice = {} end
+			if not bank.canonicalByEcon then bank.canonicalByEcon = {} end
 			if not bank.conservativeAnchor then bank.conservativeAnchor = {} end
 			if not bank.realmDailySold then bank.realmDailySold = {} end
 			if not bank.maxStack then bank.maxStack = {} end
 		end
 		ns._evalCache = {
 			epoch = ns.priceCacheEpoch,
+			canonicalPrice = (bank and bank.canonicalPrice) or {},
+			canonicalByEcon = (bank and bank.canonicalByEcon) or {},
 			mktPrice = (bank and bank.mktPrice) or {},
 			reagentCost = (bank and bank.reagentCost) or {},
 			numListed = (bank and bank.numListed) or {},
@@ -825,7 +947,7 @@ local function findSnapshotRaw(econKey)
 	return nil, nil
 end
 
-function ns.HasSnapshots(econOverride)
+function ns.HasRawSnapshots(econOverride)
 	if next(ns.snapshotRaw) == nil then
 		ns.EnsureSnapshotsLoaded()
 	end
@@ -863,7 +985,13 @@ function ns.HasSnapshots(econOverride)
 	end
 	return false
 end
+
+function ns.HasSnapshots(econOverride)
+	if ns.IsLocalSnapshotSuppressed() then return false end
+	return ns.HasRawSnapshots(econOverride)
+end
 ns.Pricing.HasSnapshots = ns.HasSnapshots
+ns.Pricing.HasRawSnapshots = ns.HasRawSnapshots
 
 function ns.Pricing.GetSnapshotStatus(econOverride)
 	if ns.HasSnapshots(econOverride) then
@@ -1000,8 +1128,20 @@ function ns.IngestSnapshotData(tag, econKey, rawData, apiVersion)
 	end
 	if (tag == "META" or hadParsed or hadHeatmap or hadBucketCache or ns._evalCache ~= nil or lastSnapshotIngestEpoch ~= ns.priceCacheEpoch)
 		and ns.InvalidatePriceCache then
-		ns.InvalidatePriceCache()
+		ns.InvalidatePriceCache({ suppressNotify = true, reason = "snapshot" })
 		lastSnapshotIngestEpoch = ns.priceCacheEpoch
+	end
+	if not pendingSnapshotNotify then
+		pendingSnapshotNotify = true
+		if C_Timer and C_Timer.After then
+			C_Timer.After(0, function()
+				pendingSnapshotNotify = false
+				notifyPriceChange("snapshot", nil)
+			end)
+		else
+			pendingSnapshotNotify = false
+			notifyPriceChange("snapshot", nil)
+		end
 	end
 end
 
@@ -1173,6 +1313,7 @@ local function getParsedSnapshotLatest(econKey)
 end
 
 function ns.QueryLocalSnapshot(itemID, econOverride, field)
+	if ns.IsLocalSnapshotSuppressed() then return nil, nil end
 	if not readable(itemID) then return nil, nil end
 	local id = tonumber(itemID)
 	if not id or id <= 0 then return nil, nil end
@@ -1232,6 +1373,7 @@ local function parseEconomyHouseInfo(econKey)
 end
 
 function ns.Pricing.GetAllAuctionHousesForItem(itemID, homeEconOverride)
+	if ns.IsLocalSnapshotSuppressed() then return nil end
 	if not readable(itemID) then return nil end
 	local id = tonumber(itemID)
 	if not id or id <= 0 then return nil end
@@ -1241,6 +1383,7 @@ function ns.Pricing.GetAllAuctionHousesForItem(itemID, homeEconOverride)
 	local homeLower = homeEcon and homeEcon:lower() or nil
 	local rows = {}
 	local homeMin = nil
+	local homeRow = nil
 
 	for ek, raw in pairs(ns.snapshotRaw) do
 		if type(ek) == "string" and ek ~= "" and type(raw) == "table"
@@ -1272,6 +1415,32 @@ function ns.Pricing.GetAllAuctionHousesForItem(itemID, homeEconOverride)
 				updatedAt = updatedAt,
 				diffPct = nil,
 			}
+			if isHome then
+				homeRow = rows[#rows]
+			end
+		end
+	end
+
+	local canHome = ns.GetCanonicalItemPrice and ns.GetCanonicalItemPrice(id, homeEcon) or nil
+	if canHome and homeRow then
+		if canHome.isAbsent then
+			homeRow.listed = false
+			homeRow.minBuyout = nil
+			homeRow.qty = 0
+			if canHome.timestamp and canHome.timestamp > 0 then
+				homeRow.updatedAt = canHome.timestamp
+			end
+			homeMin = nil
+		elseif canHome.price and canHome.price > 0 then
+			homeRow.listed = true
+			homeRow.minBuyout = canHome.price
+			if canHome.listed ~= nil then
+				homeRow.qty = canHome.listed
+			end
+			if canHome.timestamp and canHome.timestamp > 0 then
+				homeRow.updatedAt = canHome.timestamp
+			end
+			homeMin = canHome.price
 		end
 	end
 
@@ -1315,6 +1484,7 @@ end
 ns.GetAllAuctionHousesForItem = ns.Pricing.GetAllAuctionHousesForItem
 
 local function getSnapshotMetaRaw(econOverride)
+	if ns.IsLocalSnapshotSuppressed() then return nil end
 	local econKey = resolveSnapshotEconomyKey(econOverride)
 	if not econKey then return nil end
 	local raw = findSnapshotRaw(econKey)
@@ -1329,6 +1499,7 @@ function ns.Pricing.GetSnapshotSystemMeta()
 end
 
 function ns.Pricing.GetSnapshotMeta(econOverride)
+	if ns.IsLocalSnapshotSuppressed() then return nil end
 	local m = getSnapshotMetaRaw(econOverride)
 	if not m then return nil end
 	return {
@@ -1344,6 +1515,7 @@ function ns.Pricing.GetSnapshotMeta(econOverride)
 end
 
 function ns.Pricing.IsSnapshotFresh(econOverride, maxAgeSec)
+	if ns.IsLocalSnapshotSuppressed() then return false, nil, nil end
 	local econKey = resolveSnapshotEconomyKey(econOverride)
 	if not econKey then return false, nil, nil end
 	local meta = getSnapshotMetaRaw(econKey)
@@ -1382,6 +1554,7 @@ local function ensureDepthIndex(raw)
 end
 
 function ns.Pricing.GetItemSnapshotDepth(itemID, econOverride)
+	if ns.IsLocalSnapshotSuppressed() then return nil end
 	if not readable(itemID) then return nil end
 	local id = tonumber(itemID)
 	if not id or id <= 0 then return nil end
@@ -1476,6 +1649,7 @@ local function ensureVelocityParsed(raw)
 end
 
 local function getItemSnapshotVelocityRaw(itemID, econOverride)
+	if ns.IsLocalSnapshotSuppressed() then return nil end
 	if not readable(itemID) then return nil end
 	local id = tonumber(itemID)
 	if not id or id <= 0 then return nil end
@@ -1488,6 +1662,7 @@ local function getItemSnapshotVelocityRaw(itemID, econOverride)
 end
 
 function ns.Pricing.GetItemSnapshotVelocity(itemID, econOverride)
+	if ns.IsLocalSnapshotSuppressed() then return nil end
 	local rec = getItemSnapshotVelocityRaw(itemID, econOverride)
 	if not rec then return nil end
 	return {
@@ -1576,6 +1751,7 @@ local function collectLiveScanOverlay(itemID, econKey, minTs)
 end
 
 function ns.Pricing.GetItemHeatStrip24h(itemID, econOverride)
+	if ns.IsLocalSnapshotSuppressed() then return nil end
 	local id
 	if type(itemID) == "number" then
 		if not readable(itemID) or itemID <= 0 then return nil end
@@ -1947,6 +2123,7 @@ local function finalizeHeatmapGrid(cells, meta, id, resolvedKey, liveUpdatedAt)
 end
 
 function ns.Pricing.GetItemHeatmap(itemID, econOverride)
+	if ns.IsLocalSnapshotSuppressed() then return nil end
 	if not readable(itemID) then return nil end
 	local id = tonumber(itemID)
 	if not id or id <= 0 then return nil end
@@ -2230,6 +2407,11 @@ end
 
 local tsmBundleCache = { epoch = 0, items = {} }
 
+function ns._clearTSMBundleCache()
+	tsmBundleCache.epoch = 0
+	tsmBundleCache.items = {}
+end
+
 function ns.QueryTSMMarketBundle(itemID)
 	if not ns.IsTSMOptInEnabled() then return nil end
 	local id = tonumber(itemID)
@@ -2274,10 +2456,6 @@ function ns.QueryTSMMarketBundle(itemID)
 		numAuctions = numAuctions,
 		regionSoldPerDay = regionSoldPerDay,
 	}
-	local now = (type(time) == "function" and time()) or 0
-	if type(now) == "number" and now > 0 then
-		ns._tsmLastSeenAt = math.floor(now)
-	end
 	tsmBundleCache.items[id] = bundle
 	return bundle
 end
@@ -2294,90 +2472,361 @@ function ns.QueryTSMPrice(itemID)
 	return nil, nil, nil
 end
 
-local function resolveMarketFallbackChain(itemID, econ, liveVal, liveRec, snapVal, snapRec)
-	local econKey = econ and econ.effectiveKey
-	if snapVal == nil and snapRec == nil and econKey then
-		snapVal, snapRec = ns.QueryLocalSnapshot(itemID, econKey)
+local function resolveEconomyForPricing(econOverride)
+	if not econOverride or econOverride == "" or econOverride == "auto" then
+		return ns.CurrentEconomyInfo()
 	end
-	local liveAt, liveIsRecent, snapAt = extractTimestamps(liveRec, snapRec)
-	if snapVal and (not liveVal or snapAt > liveAt) then
-		return snapVal, "Snapshot", snapRec and snapRec.qty
-	end
-	if liveVal and liveIsRecent then
-		return liveVal, "Live AH", liveRec and liveRec.qty
-	end
-	if econ and econ.isActive and ns.IsTSMAvailable() then
-		local tsmVal, tsmSrc, tsmQty = ns.QueryTSMPrice(itemID)
-		if tsmVal then
-			return tsmVal, tsmSrc, tsmQty
+	local activeEcon = ns.DetectActiveEconomy()
+	local targetKey = tostring(econOverride)
+	local found = ns.ECONOMY_BY_KEY and ns.ECONOMY_BY_KEY[targetKey]
+	if not found and type(ns.ECONOMIES) == "table" then
+		local lower = targetKey:lower()
+		for i = 1, #ns.ECONOMIES do
+			local e = ns.ECONOMIES[i]
+			if e and e.key and e.key:lower() == lower then
+				found = e
+				targetKey = e.key
+				break
+			end
 		end
 	end
-	if liveVal then
-		return liveVal, (liveIsRecent and "Live AH" or "Saved AH Scan"), liveRec and liveRec.qty
-	end
-	return nil, nil, nil
+	local isActive = (type(activeEcon) == "string" and activeEcon ~= "" and targetKey:lower() == activeEcon:lower()) or false
+	return {
+		selectedKey = targetKey,
+		effectiveKey = targetKey,
+		isActive = isActive,
+		label = (found and found.label) or targetKey,
+	}
 end
 
--- Returns unitPrice (copper or nil), sourceLabel, stockCount (or nil)
-local function computeItemMarketPrice(itemID)
-	local mode = ns.GetEffectivePriceSource()
-	local econ = ns.CurrentEconomyInfo()
+local EMPTY_CANONICAL = {}
 
-	-- 1. Cross-economy mode (e.g. viewing Normal-Alliance or PvP-Horde while logged onto Normal-Horde)
-	-- Cross-economy NEVER returns TSM prices because TSM only knows the active realm/faction.
+local function extractSnapListed(snapRec)
+	if not snapRec or (snapRec.qty == nil and snapRec.numAuctions == nil) then return nil end
+	if snapRec.qty and snapRec.qty > 0 then
+		return snapRec.qty
+	elseif snapRec.numAuctions and snapRec.numAuctions > 0 then
+		return snapRec.numAuctions
+	elseif snapRec.qty ~= nil then
+		return snapRec.qty
+	end
+	return nil
+end
+
+local function computeCanonicalItemPrice(itemID, econ)
+	local mode = ns.GetEffectivePriceSource()
+	if not econ or not econ.effectiveKey then
+		return EMPTY_CANONICAL
+	end
+
 	if not econ.isActive then
 		if mode == "tsm" then
-			return nil, nil, nil
+			return EMPTY_CANONICAL
 		end
 		local liveVal, liveRec = ns.QueryLiveAH(itemID, econ.effectiveKey)
 		if mode == "live_ah" then
-			return liveVal, liveVal and ("Live AH (" .. econ.label .. ")") or (liveRec and liveRec.absent and "Not listed (Live AH)" or nil), liveRec and liveRec.qty
+			local liveAt, liveIsRecent = extractTimestamps(liveRec, nil)
+			local isAbsent = (liveRec and liveRec.absent == true) or false
+			local src = liveVal and ((liveIsRecent and "Live AH (" or "Saved AH (") .. econ.label .. ")")
+				or (isAbsent and ("Not listed (" .. econ.label .. ")") or nil)
+			return {
+				price = liveVal,
+				source = src,
+				listed = isAbsent and 0 or (liveRec and liveRec.qty),
+				timestamp = liveAt,
+				kind = liveVal and "live" or (isAbsent and "absent" or nil),
+				isAbsent = isAbsent,
+			}
 		elseif mode == "snapshot" then
 			local sv, srec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
-			return sv, sv and ("Snapshot (" .. econ.label .. ")") or nil, srec and srec.qty
+			local snapAt = (srec and type(srec.updatedAt) == "number" and srec.updatedAt > 0) and srec.updatedAt or 0
+			local listed = extractSnapListed(srec)
+			return {
+				price = sv,
+				source = sv and ("Snapshot (" .. econ.label .. ")") or nil,
+				listed = listed,
+				timestamp = snapAt,
+				kind = sv and "snap" or nil,
+				isAbsent = false,
+			}
 		end
 		local snapVal, snapRec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
 		local liveAt, liveIsRecent, snapAt = extractTimestamps(liveRec, snapRec)
 		local snapLabel = "Snapshot (" .. econ.label .. ")"
-		local liveLabel = "Live AH (" .. econ.label .. ")"
-		local savedLabel = "Saved AH (" .. econ.label .. ")"
+		local liveLabel = liveIsRecent and ("Live AH (" .. econ.label .. ")") or ("Saved AH (" .. econ.label .. ")")
 		if liveIsRecent and liveRec and liveRec.absent then
 			if snapVal and snapAt > liveAt then
-				return snapVal, snapLabel, snapRec and snapRec.qty
+				return {
+					price = snapVal,
+					source = snapLabel,
+					listed = extractSnapListed(snapRec),
+					timestamp = snapAt,
+					kind = "snap",
+					isAbsent = false,
+				}
 			end
-			return nil, "Not listed (" .. econ.label .. ")", 0
+			return {
+				price = nil,
+				source = "Not listed (" .. econ.label .. ")",
+				listed = 0,
+				timestamp = liveAt,
+				kind = "absent",
+				isAbsent = true,
+			}
 		end
 		if snapVal and (not liveVal or snapAt > liveAt) then
-			return snapVal, snapLabel, snapRec and snapRec.qty
+			return {
+				price = snapVal,
+				source = snapLabel,
+				listed = extractSnapListed(snapRec),
+				timestamp = snapAt,
+				kind = "snap",
+				isAbsent = false,
+			}
 		end
 		if liveVal then
-			return liveVal, (liveIsRecent and liveLabel or savedLabel), liveRec and liveRec.qty
+			return {
+				price = liveVal,
+				source = liveLabel,
+				listed = liveRec and liveRec.qty,
+				timestamp = liveAt,
+				kind = "live",
+				isAbsent = false,
+			}
 		end
-		return nil, nil, nil
+		return EMPTY_CANONICAL
 	end
 
-	-- 2. Active character economy
+	-- Active character economy
 	if mode == "tsm" then
-		return ns.QueryTSMPrice(itemID)
+		local tsmVal, tsmSrc, tsmQty = ns.QueryTSMPrice(itemID)
+		local tsmAt = tsmVal and (ns.GetTSMRealUpdateTime() or ns._tsmLastSeenAt or 0) or 0
+		return {
+			price = tsmVal,
+			source = tsmSrc,
+			listed = tsmQty,
+			timestamp = tsmAt,
+			kind = tsmVal and "tsm" or nil,
+			isAbsent = false,
+		}
 	elseif mode == "snapshot" then
 		local sv, srec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
-		return sv, sv and "Snapshot" or nil, srec and srec.qty
+		local snapAt = (srec and type(srec.updatedAt) == "number" and srec.updatedAt > 0) and srec.updatedAt or 0
+		return {
+			price = sv,
+			source = sv and "Snapshot" or nil,
+			listed = extractSnapListed(srec),
+			timestamp = snapAt,
+			kind = sv and "snap" or nil,
+			isAbsent = false,
+		}
 	elseif mode == "live_ah" then
 		local v, rec = ns.QueryLiveAH(itemID, econ.effectiveKey)
-		return v, v and "Live AH" or (rec and rec.absent and "Not listed (Live AH)" or nil), rec and rec.qty
+		local liveAt, liveIsRecent = extractTimestamps(rec, nil)
+		local isAbsent = (rec and rec.absent == true) or false
+		local src = v and (liveIsRecent and "Live AH" or "Saved AH Scan") or (isAbsent and "Not listed (Live AH)" or nil)
+		return {
+			price = v,
+			source = src,
+			listed = isAbsent and 0 or (rec and rec.qty),
+			timestamp = liveAt,
+			kind = v and "live" or (isAbsent and "absent" or nil),
+			isAbsent = isAbsent,
+		}
 	end
 
-	-- Auto (Best): Most recent wins between Manual Live AH, Blizzard Local Snapshot, and opt-in TSM Light Mode
+	-- Auto (Best): strictly newest wins between Manual Live AH, Local Snapshot, and opt-in TSM Light
 	local liveVal, liveRec = ns.QueryLiveAH(itemID, econ.effectiveKey)
 	local snapVal, snapRec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
 	local liveAt, liveIsRecent, snapAt = extractTimestamps(liveRec, snapRec)
-	if liveIsRecent and liveRec and liveRec.absent then
-		if snapVal and snapAt > liveAt then
-			return snapVal, "Snapshot", snapRec and snapRec.qty
-		end
-		return nil, "Not listed (Live AH)", 0
+	local tsmVal, tsmSrc, tsmQty, tsmRealAt = nil, nil, nil, nil
+	if ns.IsTSMAvailable() then
+		tsmRealAt = ns.GetTSMRealUpdateTime()
+		tsmVal, tsmSrc, tsmQty = ns.QueryTSMPrice(itemID)
 	end
-	return resolveMarketFallbackChain(itemID, econ, liveVal, liveRec, snapVal, snapRec)
+
+	if liveIsRecent and liveRec and liveRec.absent then
+		local snapWins = snapVal and snapAt > liveAt
+		local tsmWins = tsmVal and tsmRealAt and tsmRealAt > liveAt and (not snapWins or tsmRealAt > snapAt)
+		if tsmWins then
+			return {
+				price = tsmVal,
+				source = tsmSrc,
+				listed = tsmQty,
+				timestamp = tsmRealAt,
+				kind = "tsm",
+				isAbsent = false,
+			}
+		end
+		if snapWins then
+			return {
+				price = snapVal,
+				source = "Snapshot",
+				listed = extractSnapListed(snapRec),
+				timestamp = snapAt,
+				kind = "snap",
+				isAbsent = false,
+			}
+		end
+		return {
+			price = nil,
+			source = "Not listed (Live AH)",
+			listed = 0,
+			timestamp = liveAt,
+			kind = "absent",
+			isAbsent = true,
+		}
+	end
+
+	local best = nil
+	if liveVal then
+		best = {
+			price = liveVal,
+			source = liveIsRecent and "Live AH" or "Saved AH Scan",
+			listed = liveRec and liveRec.qty,
+			timestamp = liveAt,
+			kind = "live",
+			isAbsent = false,
+		}
+	end
+	if snapVal and (not best or snapAt > best.timestamp) then
+		best = {
+			price = snapVal,
+			source = "Snapshot",
+			listed = extractSnapListed(snapRec),
+			timestamp = snapAt,
+			kind = "snap",
+			isAbsent = false,
+		}
+	end
+	if tsmVal then
+		local tsmWins = false
+		local tsmTs = tsmRealAt or ns._tsmLastSeenAt or 0
+		if not best then
+			tsmWins = true
+		elseif tsmRealAt then
+			tsmWins = (tsmRealAt > best.timestamp)
+		elseif best.kind == "live" then
+			tsmWins = (not liveIsRecent) and (tsmTs > best.timestamp)
+		elseif best.kind == "snap" then
+			tsmWins = (best.timestamp == 0)
+		end
+		if tsmWins then
+			best = {
+				price = tsmVal,
+				source = tsmSrc,
+				listed = tsmQty,
+				timestamp = tsmTs,
+				kind = "tsm",
+				isAbsent = false,
+			}
+		end
+	end
+	return best or EMPTY_CANONICAL
+end
+
+function ns.GetCanonicalItemPrice(itemID, econOverride)
+	if not itemID or itemID <= 0 then return nil end
+	local ec = ns._evalCache
+	if not econOverride then
+		if ec and ec.canonicalPrice then
+			local hit = ec.canonicalPrice[itemID]
+			if hit ~= nil then return hit end
+		end
+		local res = computeCanonicalItemPrice(itemID, ns.CurrentEconomyInfo())
+		if ec and ec.canonicalPrice then
+			ec.canonicalPrice[itemID] = res
+		end
+		return res
+	end
+	local econ = resolveEconomyForPricing(econOverride)
+	local ek = econ.effectiveKey
+	if ec and ec.canonicalByEcon and ek then
+		local byItem = ec.canonicalByEcon[ek]
+		if byItem and byItem[itemID] ~= nil then
+			return byItem[itemID]
+		end
+	end
+	local res = computeCanonicalItemPrice(itemID, econ)
+	if ec and ek then
+		ec.canonicalByEcon = ec.canonicalByEcon or {}
+		ec.canonicalByEcon[ek] = ec.canonicalByEcon[ek] or {}
+		ec.canonicalByEcon[ek][itemID] = res
+	end
+	return res
+end
+
+function ns.GetItemMarketValue7d(itemID, econOverride)
+	if not itemID or itemID <= 0 then return nil, nil end
+	local econ = resolveEconomyForPricing(econOverride)
+	if not econ or not econ.effectiveKey then return nil, nil end
+	local _, snapRec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
+	if snapRec then
+		if snapRec.marketValue and snapRec.marketValue > 0 then
+			return snapRec.marketValue, econ.isActive and "7d Market Value" or ("7d Market (" .. econ.label .. ")")
+		end
+		if snapRec.historical and snapRec.historical > 0 then
+			return snapRec.historical, econ.isActive and "Historical Value" or ("Historical (" .. econ.label .. ")")
+		end
+	end
+	if econ.isActive and ns.IsTSMAvailable() then
+		local bundle = ns.QueryTSMMarketBundle(itemID)
+		if bundle then
+			if bundle.marketValue and bundle.marketValue > 0 then
+				return bundle.marketValue, "TSM Market"
+			end
+			if bundle.historical and bundle.historical > 0 then
+				return bundle.historical, "TSM Historical"
+			end
+		end
+	end
+	return nil, nil
+end
+
+function ns.GetCanonicalPriceFreshness(econOverride)
+	local econ = resolveEconomyForPricing(econOverride)
+	local econKey = econ and econ.effectiveKey
+	local db = ns.GetDB()
+	local liveAt = 0
+	local pool = db and db.ahPrices and econKey and db.ahPrices[econKey]
+	if type(pool) == "table" and type(pool._scannedAt) == "number" and pool._scannedAt > 0 then
+		liveAt = math.floor(pool._scannedAt)
+	end
+	local bgMode = ns.GetBackgroundPriceMode and ns.GetBackgroundPriceMode() or "local"
+	local snapAt = 0
+	if bgMode == "local" and ns.Pricing and ns.Pricing.GetSnapshotMeta then
+		local meta = ns.Pricing.GetSnapshotMeta(econKey)
+		if meta and type(meta.updatedAt) == "number" and meta.updatedAt > 0 then
+			snapAt = math.floor(meta.updatedAt)
+		end
+	end
+	local tsmAt = 0
+	if econ and econ.isActive and ns.IsTSMAvailable() then
+		tsmAt = ns.GetTSMRealUpdateTime() or ns._tsmLastSeenAt or 0
+	end
+	local mode = ns.GetEffectivePriceSource()
+	local newestAt, newestSource = 0, nil
+	if mode == "live_ah" then
+		newestAt, newestSource = liveAt, (liveAt > 0 and "Live AH" or nil)
+	elseif mode == "snapshot" then
+		newestAt, newestSource = snapAt, (snapAt > 0 and "Snapshot" or nil)
+	elseif mode == "tsm" then
+		newestAt, newestSource = tsmAt, (tsmAt > 0 and "TSM (Light)" or nil)
+	else
+		if liveAt > 0 then newestAt, newestSource = liveAt, "Live AH" end
+		if snapAt > newestAt then newestAt, newestSource = snapAt, "Snapshot" end
+		if tsmAt > newestAt then newestAt, newestSource = tsmAt, "TSM (Light)" end
+	end
+	return {
+		economy = econKey,
+		mode = mode,
+		bgMode = bgMode,
+		liveAt = liveAt,
+		snapAt = snapAt,
+		tsmAt = tsmAt,
+		newestAt = newestAt,
+		newestSource = newestSource,
+	}
 end
 
 function ns.GetItemMarketPrice(itemID)
@@ -2391,7 +2840,10 @@ function ns.GetItemMarketPrice(itemID)
 				hit[3] ~= false and hit[3] or nil
 		end
 	end
-	local p, src, stk = computeItemMarketPrice(itemID)
+	local can = ns.GetCanonicalItemPrice(itemID)
+	local p = can and can.price or nil
+	local src = can and can.source or nil
+	local stk = can and can.listed or nil
 	if ec then
 		ec.mktPrice[itemID] = { p ~= nil and p or false, src ~= nil and src or false, stk ~= nil and stk or false }
 	end
@@ -2401,33 +2853,39 @@ end
 -- Fallback price lookup skipping fresh Live AH 'absent' short-circuit (for leveling solver stability)
 function ns.GetFallbackMarketPrice(itemID)
 	if not itemID or itemID <= 0 then return nil, nil end
+	local can = ns.GetCanonicalItemPrice(itemID)
+	if can and can.price and can.price > 0 then
+		return can.price, can.source
+	end
+	local mode = ns.GetEffectivePriceSource()
 	local econ = ns.CurrentEconomyInfo()
-	if not econ.isActive then
-		local liveVal, liveRec = ns.QueryLiveAH(itemID, econ.effectiveKey)
-		local snapVal, snapRec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
-		local liveAt, liveIsRecent, snapAt = extractTimestamps(liveRec, snapRec)
-		local snapLabel = "Snapshot (" .. econ.label .. ")"
-		local liveLabel = "Live AH (" .. econ.label .. ")"
-		local savedLabel = "Saved AH (" .. econ.label .. ")"
-		if snapVal and (not liveVal or snapAt > liveAt) then
-			return snapVal, snapLabel
-		end
-		if liveVal then
-			return liveVal, (liveIsRecent and liveLabel or savedLabel)
-		end
+	local liveVal, liveRec = ns.QueryLiveAH(itemID, econ.effectiveKey)
+	if mode == "tsm" or mode == "snapshot" then
+		return nil, nil
+	end
+	if mode == "live_ah" then
 		if liveRec and type(liveRec.lastPrice) == "number" and liveRec.lastPrice > 0 then
 			return math.floor(liveRec.lastPrice + 0.5), "Last Seen AH"
 		end
 		return nil, nil
 	end
-	local liveVal, liveRec = ns.QueryLiveAH(itemID, econ.effectiveKey)
 	local snapVal, snapRec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
-	if ns.GetEffectivePriceSource() == "tsm" then
-		local tsmVal, tsmSrc = ns.QueryTSMPrice(itemID)
-		if tsmVal then return tsmVal, tsmSrc end
+	local tsmVal, tsmSrc, _, tsmRealAt = nil, nil, nil, nil
+	if econ and econ.isActive and ns.IsTSMAvailable() then
+		tsmRealAt = ns.GetTSMRealUpdateTime()
+		tsmVal, tsmSrc = ns.QueryTSMPrice(itemID)
 	end
-	local p, src = resolveMarketFallbackChain(itemID, econ, liveVal, liveRec, snapVal, snapRec)
-	if p then return p, src end
+	local snapAt = (snapRec and type(snapRec.updatedAt) == "number" and snapRec.updatedAt > 0) and snapRec.updatedAt or 0
+	if tsmVal and (not snapVal or (tsmRealAt and tsmRealAt > snapAt) or snapAt == 0) then
+		return tsmVal, tsmSrc
+	end
+	if snapVal then
+		return snapVal, econ.isActive and "Snapshot" or ("Snapshot (" .. econ.label .. ")")
+	end
+	if liveVal then
+		local _, liveIsRecent = extractTimestamps(liveRec, nil)
+		return liveVal, econ.isActive and (liveIsRecent and "Live AH" or "Saved AH Scan") or ("Saved AH (" .. econ.label .. ")")
+	end
 	if liveRec and type(liveRec.lastPrice) == "number" and liveRec.lastPrice > 0 then
 		return math.floor(liveRec.lastPrice + 0.5), "Last Seen AH"
 	end
@@ -2435,49 +2893,63 @@ function ns.GetFallbackMarketPrice(itemID)
 end
 
 local function computeLastKnownAHPrice(itemID)
-	local db = ns.GetDB()
+	local mode = ns.GetEffectivePriceSource()
 	local econ = ns.CurrentEconomyInfo()
+	if not econ or not econ.effectiveKey then return nil, nil end
 
-	local liveVal, liveLbl, liveAt = nil, nil, 0
-	if db and db.ahPrices and econ and econ.effectiveKey then
-		local pool = db.ahPrices[econ.effectiveKey]
-		local rec = type(pool) == "table" and pool[itemID] or db.ahPrices[itemID]
-		if type(rec) == "table" then
-			liveAt = (type(rec.at) == "number" and rec.at > 0) and rec.at or 0
-			if type(rec.price) == "number" and rec.price > 0 then
-				liveVal = math.floor(rec.price + 0.5)
-				liveLbl = "Live AH Scan"
-			elseif type(rec.lastPrice) == "number" and rec.lastPrice > 0 then
-				liveVal = math.floor(rec.lastPrice + 0.5)
-				liveLbl = "Last Seen AH"
+	local bestP, bestSrc, bestAt = nil, nil, -1
+	local function consider(p, src, ts)
+		if p and p > 0 then
+			local cmpAt = ts or 0
+			if bestP == nil or cmpAt > bestAt then
+				bestP, bestSrc, bestAt = math.floor(p + 0.5), src, cmpAt
 			end
 		end
 	end
 
-	local snapVal, snapLbl, snapAt = nil, nil, 0
-	if econ and econ.effectiveKey then
+	if mode == "auto" or mode == "live_ah" then
+		local db = ns.GetDB()
+		local pool = db and db.ahPrices and db.ahPrices[econ.effectiveKey]
+		local rec = type(pool) == "table" and pool[itemID] or db and db.ahPrices and db.ahPrices[itemID]
+		if type(rec) == "table" then
+			if not rec.absent and type(rec.price) == "number" and rec.price > 0 then
+				consider(rec.price, econ.isActive and "Live AH Scan" or ("Live AH (" .. econ.label .. ")"), (type(rec.at) == "number" and rec.at > 0) and rec.at or 0)
+			elseif type(rec.lastPrice) == "number" and rec.lastPrice > 0 then
+				local scanAt = (type(rec.at) == "number" and rec.at > 0) and rec.at or 0
+				local lastAt = (type(rec.lastAt) == "number" and rec.lastAt > 0) and rec.lastAt or 0
+				consider(rec.lastPrice, "Last Seen AH", math.max(lastAt, scanAt))
+			end
+		end
+	end
+
+	if mode == "auto" or mode == "snapshot" then
 		local sv, srec = ns.QueryLocalSnapshot(itemID, econ.effectiveKey)
 		if not sv and srec and srec.historical and srec.historical > 0 then
 			sv = srec.historical
 		end
 		if sv and sv > 0 then
-			snapVal = math.floor(sv + 0.5)
-			snapLbl = econ.isActive and "Snapshot" or ("Snapshot (" .. econ.label .. ")")
-			snapAt = (srec and type(srec.updatedAt) == "number" and srec.updatedAt > 0) and srec.updatedAt or 0
+			local snapAt = (srec and type(srec.updatedAt) == "number" and srec.updatedAt > 0) and srec.updatedAt or 0
+			consider(sv, econ.isActive and "Snapshot" or ("Snapshot (" .. econ.label .. ")"), snapAt)
 		end
 	end
 
-	if liveVal and snapVal then
-		if snapAt > liveAt then
-			return snapVal, snapLbl
+	if (mode == "auto" or mode == "tsm") and econ.isActive and ns.IsTSMAvailable() then
+		local tsmRealAt = ns.GetTSMRealUpdateTime()
+		local tv, tsrc = ns.QueryTSMPrice(itemID)
+		if not tv then
+			local bundle = ns.QueryTSMMarketBundle(itemID)
+			if bundle and bundle.historical and bundle.historical > 0 then
+				tv, tsrc = bundle.historical, "TSM Historical"
+			end
 		end
-		return liveVal, liveLbl
-	elseif liveVal then
-		return liveVal, liveLbl
-	elseif snapVal then
-		return snapVal, snapLbl
+		if tv and tv > 0 then
+			if mode == "tsm" or bestP == nil or (tsmRealAt and tsmRealAt > bestAt) then
+				consider(tv, tsrc, tsmRealAt or 0)
+			end
+		end
 	end
-	return nil, nil
+
+	return bestP, bestSrc
 end
 
 function ns.GetLastKnownAHPrice(itemID)
@@ -2867,18 +3339,6 @@ function ns.GetReagentUnitCost(itemID)
 	return uCost, uSrc, isVend
 end
 
-local function extractSnapListed(snapRec)
-	if not snapRec or (snapRec.qty == nil and snapRec.numAuctions == nil) then return nil end
-	if snapRec.qty and snapRec.qty > 0 then
-		return snapRec.qty
-	elseif snapRec.numAuctions and snapRec.numAuctions > 0 then
-		return snapRec.numAuctions
-	elseif snapRec.qty ~= nil then
-		return snapRec.qty
-	end
-	return nil
-end
-
 -- Number of listings / units on the Auction House (most recent wins between Live AH and Local Snapshot)
 local function computeNumListed(itemID)
 	local econ = ns.CurrentEconomyInfo()
@@ -2916,7 +3376,15 @@ function ns.GetNumListed(itemID)
 			return hit ~= false and hit or nil
 		end
 	end
-	local val = computeNumListed(itemID)
+	local can = ns.GetCanonicalItemPrice and ns.GetCanonicalItemPrice(itemID)
+	local val
+	if can and can.listed ~= nil then
+		val = can.listed
+	elseif can and can.price ~= nil then
+		val = can.listed
+	else
+		val = computeNumListed(itemID)
+	end
 	if ec then
 		ec.numListed[itemID] = (val ~= nil) and val or false
 	end
@@ -3028,7 +3496,7 @@ end
 
 local multiDemandCache = {epoch=-1, byEcon={}}
 
-local itemEvalFields = {"mktPrice", "reagentCost", "lastKnownAH", "vendorSell",
+local itemEvalFields = {"canonicalPrice", "mktPrice", "reagentCost", "lastKnownAH", "vendorSell",
 	"numListed", "dailySold", "itemNames", "itemIcons",
 	"conservativeAnchor", "realmDailySold", "maxStack"}
 
@@ -3037,6 +3505,11 @@ function ns.InvalidateEvalItem(bank, itemID)
 		for _, field in ipairs(itemEvalFields) do
 			local cache = bank[field]
 			if cache then cache[itemID] = nil end
+		end
+		if type(bank.canonicalByEcon) == "table" then
+			for _, byItem in pairs(bank.canonicalByEcon) do
+				if type(byItem) == "table" then byItem[itemID] = nil end
+			end
 		end
 	end
 	for _, items in pairs(multiDemandCache.byEcon) do items[itemID] = nil end

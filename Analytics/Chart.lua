@@ -322,8 +322,12 @@ local function sample(points)
     return out
 end
 
-local function applyPlotBg(plotBg, pal)
+local function applyPlotBg(plotBg, pal, studioAccent)
     if not plotBg then return end
+    if studioAccent and pal and pal.mode ~= "light" then
+        plotBg:SetColorTexture(0.008, 0.012, 0.020, 0.84)
+        return
+    end
     local alt = pal and pal.cardAltBg
     if type(alt) == "table" and alt[1] ~= nil then
         if pal.mode == "light" then
@@ -338,17 +342,20 @@ local function applyPlotBg(plotBg, pal)
     end
 end
 
-local function applySurface(chart, pal, strokeKey)
+local function applySurface(chart, pal, strokeKey, studioAccent)
     local h = H()
     local theme = h and h.Theme
     if not chart._surfaceInit then
         chart._surfaceInit = true
         chart._strokeKey = strokeKey or false
+        if studioAccent ~= nil then chart._studioAccent = studioAccent end
         if theme and theme.NineApple then
             chart.card = theme.NineApple(chart, "glass_r10", "cardBg", chart._strokeKey, { noSpecular = true })
         elseif theme and theme.Card then
             chart.card = theme.Card(chart, chart, 10, false, pal.cardBg)
         end
+    elseif studioAccent ~= nil then
+        chart._studioAccent = studioAccent
     end
     if chart.card then
         if chart.card.UpdateTheme then
@@ -359,6 +366,69 @@ local function applySurface(chart, pal, strokeKey)
         end
         if not chart._strokeKey and chart.card.border and chart.card.border.SetShown then
             chart.card.border:SetShown(false)
+        end
+    end
+    local ak = chart._studioAccent
+    if ak and chart.CreateTexture then
+        if not chart._studioBg then
+            local bg = chart:CreateTexture(nil, "BACKGROUND", nil, 2)
+            bg:SetPoint("TOPLEFT", 1, -1)
+            bg:SetPoint("BOTTOMRIGHT", -1, 1)
+            bg:Hide()
+            chart._studioBg = bg
+        end
+        if not chart._studioEdges then
+            local edges = {}
+            for _, side in ipairs({ "top", "bottom", "left", "right" }) do
+                local e = chart:CreateTexture(nil, "BORDER", nil, 2)
+                if side == "top" then
+                    e:SetPoint("TOPLEFT", 0, 0); e:SetPoint("TOPRIGHT", 0, 0); e:SetHeight(1)
+                elseif side == "bottom" then
+                    e:SetPoint("BOTTOMLEFT", 0, 0); e:SetPoint("BOTTOMRIGHT", 0, 0); e:SetHeight(1)
+                elseif side == "left" then
+                    e:SetPoint("TOPLEFT", 0, 0); e:SetPoint("BOTTOMLEFT", 0, 0); e:SetWidth(1)
+                else
+                    e:SetPoint("TOPRIGHT", 0, 0); e:SetPoint("BOTTOMRIGHT", 0, 0); e:SetWidth(1)
+                end
+                e:Hide()
+                edges[#edges + 1] = e
+            end
+            chart._studioEdges = edges
+        end
+        if not chart._studioTopEdge then
+            local topE = chart:CreateTexture(nil, "BORDER", nil, 3)
+            topE:SetPoint("TOPLEFT", 1, -1)
+            topE:SetPoint("TOPRIGHT", -1, -1)
+            topE:SetHeight(2)
+            topE:Hide()
+            chart._studioTopEdge = topE
+        end
+        local isLight = pal and (pal.mode == "light")
+        local isGold = (ak == "gold" or ak == "amber")
+        if not isLight then
+            local custom = theme and theme.IsCustomSkin and theme.IsCustomSkin()
+            chart._studioBg:SetColorTexture(0.010, 0.015, 0.024, custom and 0.84 or 0.64)
+            chart._studioBg:Show()
+            local edgeThick = isGold and 1 or 2
+            local ec = isGold and { 0.95, 0.72, 0.22, 0.56 } or { 0.20, 0.74, 0.98, custom and 0.78 or 0.58 }
+            for idx, e in ipairs(chart._studioEdges) do
+                if idx <= 2 then
+                    e:SetHeight(edgeThick)
+                else
+                    e:SetWidth(edgeThick)
+                end
+                e:SetColorTexture(ec[1], ec[2], ec[3], ec[4])
+                e:Show()
+            end
+            local tc = isGold and { 0.98, 0.76, 0.24, 0.94 } or { 0.30, 0.80, 1.00, 0.95 }
+            chart._studioTopEdge:SetColorTexture(tc[1], tc[2], tc[3], tc[4])
+            chart._studioTopEdge:Show()
+        else
+            chart._studioBg:Hide()
+            for _, e in ipairs(chart._studioEdges) do e:Hide() end
+            local tc = isGold and { 0.82, 0.46, 0.06, 0.76 } or { 0.06, 0.48, 0.88, 0.76 }
+            chart._studioTopEdge:SetColorTexture(tc[1], tc[2], tc[3], tc[4])
+            chart._studioTopEdge:Show()
         end
     end
 end
@@ -402,8 +472,9 @@ local function base(parent, width, height, opts)
     local chart = CreateFrame("Frame", nil, parent)
     chart:SetSize(width, height)
     chart._compactOpt = (opts.compact == true)
+    chart._studioAccent = opts.studioAccent
     chart._defaultEmptyText = opts.emptyText or "No data for selected period"
-    applySurface(chart, pal, opts.borderKey)
+    applySurface(chart, pal, opts.borderKey, opts.studioAccent)
 
     local isCompact = chart._compactOpt or ((tonumber(height) or 195) <= 165)
     local hdrH = isCompact and 34 or 48
@@ -435,7 +506,7 @@ local function base(parent, width, height, opts)
     -- TSM-style deep recessed plot canvas so anti-aliased curves & gridlines pop cleanly
     chart._plotBg = chart.plot:CreateTexture(nil, "BACKGROUND", nil, -2)
     chart._plotBg:SetAllPoints(chart.plot)
-    applyPlotBg(chart._plotBg, pal)
+    applyPlotBg(chart._plotBg, pal, chart._studioAccent)
 
     chart.yLabels, chart.xLabels, chart._grids = {}, {}, {}
     for i = 1, 3 do
@@ -593,7 +664,7 @@ local function base(parent, width, height, opts)
             self.baseline:SetColorTexture(p.separator[1], p.separator[2], p.separator[3], math.min(0.65, (p.separator[4] or 0.4) * 0.90))
         end
         if self._plotBg then
-            applyPlotBg(self._plotBg, p)
+            applyPlotBg(self._plotBg, p, self._studioAccent)
         end
         if self._selectionBox then
             self._selectionBox:SetColorTexture(p.accentBlue[1], p.accentBlue[2], p.accentBlue[3], 0.18)
@@ -880,9 +951,14 @@ function Chart.CreateLineChart(parent, width, height, opts)
     end
 
     local function resolveSeriesColor(series, sIdx, pal)
+        local h = H()
+        local theme = h and h.Theme
+        local studioBlue = (chart._studioAccent and pal and pal.mode ~= "light" and theme and theme.IsCustomSkin and theme.IsCustomSkin())
+            and { 0.20, 0.74, 0.98, 1.00 }
+            or pal.accentBlue
         if series.colorKey then
             local keyMap = {
-                blue = pal.accentBlue,
+                blue = studioBlue,
                 green = pal.accentGreen,
                 orange = pal.accentOrange,
                 purple = pal.accentPurple,
@@ -891,7 +967,7 @@ function Chart.CreateLineChart(parent, width, height, opts)
             if keyMap[series.colorKey] then return keyMap[series.colorKey] end
         end
         if series.color then return series.color end
-        local cycle = { pal.accentBlue, pal.accentGreen, pal.accentOrange, pal.accentPurple }
+        local cycle = { studioBlue, pal.accentGreen, pal.accentOrange, pal.accentPurple }
         return cycle[((sIdx - 1) % #cycle) + 1]
     end
 
@@ -1649,7 +1725,8 @@ function Chart.CreateHeatmapTimingDrawer(parent, width, height, opts)
     local pal = fullPalette()
     local drawer = CreateFrame("Frame", nil, parent)
     drawer:SetSize(initW, initH)
-    applySurface(drawer, pal)
+    drawer._studioAccent = opts.studioAccent or "gold"
+    applySurface(drawer, pal, opts.borderKey or "border", drawer._studioAccent)
 
     drawer._compact = compact
     drawer._showCurve = showCurve
@@ -2907,7 +2984,7 @@ function Chart.CreateHeatmapTimingDrawer(parent, width, height, opts)
 
     function drawer:ApplyTheme()
         local p = fullPalette()
-        applySurface(self, p)
+        applySurface(self, p, self._strokeKey or "border", self._studioAccent or "gold")
         if self.fallbackChart and self.fallbackChart.ApplyTheme then
             self.fallbackChart:ApplyTheme()
         end

@@ -1774,6 +1774,799 @@ local countFirst = #SE.ScanSnapshotForGapDeals("Forever-EU", { minProfitCopper =
 local countSecond = #SE.ScanSnapshotForGapDeals("Forever-EU", { minProfitCopper = 10000 })
 check(countFirst == countSecond, "Repeated ScanSnapshotForGapDeals produces identical count (zero duplicates)")
 
+-------------------------------------------------------------------------------
+-- 10. Disenchant Sniper (Browse Ingestion, Snapshot Scan, AS +20%, Live Check & Buy)
+-------------------------------------------------------------------------------
+do
+	SE.ClearDEDeals()
+	local origGetDEBreakdown = ns.GetItemDEBreakdown
+	local origDENonDE = ns.DE_NON_DISENCHANTABLE
+	local mockDEBreakdowns = {
+		[57001] = {
+			quality = 2, ilvl = 58, className = "Armor",
+			netCopper = 35000, asNetCopper = 42000, grossCopper = 36842, asGrossCopper = 44211,
+			minNetCopper = 18000, maxNetCopper = 52000, primarySummary = "75% Illusion Dust",
+			outcomes = { { matID = 16204, name = "Illusion Dust", matRate = 0.75, amountOfMats = 1.1, evNetRounded = 26250 } },
+		},
+		[57002] = {
+			quality = 3, ilvl = 55, className = "Weapon",
+			netCopper = 22000, asNetCopper = 26400, grossCopper = 23158, asGrossCopper = 27789,
+			minNetCopper = 20000, maxNetCopper = 24000, primarySummary = "100% Large Brilliant Shard",
+			outcomes = { { matID = 14344, name = "Large Brilliant Shard", matRate = 1.0, amountOfMats = 1.0, evNetRounded = 22000 } },
+		},
+		["|cff0070dd|Hitem:57002::::::99:0:60|h[Scaled Rare Axe]|h|r"] = {
+			quality = 3, ilvl = 62, className = "Weapon",
+			netCopper = 48000, asNetCopper = 57600, grossCopper = 50526, asGrossCopper = 60632,
+			minNetCopper = 45000, maxNetCopper = 50000, primarySummary = "99% Large Brilliant Shard",
+			outcomes = { { matID = 14344, name = "Large Brilliant Shard", matRate = 0.99, amountOfMats = 0.99, evNetRounded = 47520 } },
+		},
+	}
+	ns.DE_NON_DISENCHANTABLE = { [57009] = true }
+	ns.GetItemDEBreakdown = function(itemID, itemLink, applyAHCut)
+		if hideItemInfo[itemID] then return nil, "uncached" end
+		local bd = (itemLink and mockDEBreakdowns[itemLink]) or mockDEBreakdowns[itemID]
+		if bd then return bd, nil end
+		return nil, "ineligible"
+	end
+
+	mockItemInfo[57001] = { "Emerald Vanguard Pauldrons", "|cff1eff00|Hitem:57001|h[Emerald Vanguard Pauldrons]|h|r", 2, 8000, 1 }
+	mockItemInfo[57002] = { "Runed Rare Cleaver", "|cff0070dd|Hitem:57002|h[Runed Rare Cleaver]|h|r", 3, 9000, 1 }
+	mockItemInfo[57003] = { "Uncached Green Bracers", "|cff1eff00|Hitem:57003|h[Uncached Green Bracers]|h|r", 2, 4000, 1 }
+	mockDEBreakdowns[57003] = {
+		quality = 2, ilvl = 48, className = "Armor",
+		netCopper = 15000, asNetCopper = 18000, grossCopper = 15789,
+		primarySummary = "75% Dream Dust",
+		outcomes = {},
+	}
+	mockItemInstant[57001] = { "INVTYPE_SHOULDER", 4 }
+	mockItemInstant[57002] = { "INVTYPE_WEAPON", 2 }
+	mockItemInstant[57003] = { "INVTYPE_WRIST", 4 }
+
+	-- 10a. Browse batch ingestion populates profitable gear while skipping commodities, non-gear, and blacklisted wands
+	SE.SetOption("deMinProfitCopper", 1000)
+	SE.SetOption("deUseArcaneSalvager", false)
+	hideItemInfo[57003] = true
+	local _, deFlagged = SE.IngestBrowseBatch({
+		{ itemID = 57001, minPrice = 15000, totalQuantity = 1, quality = 2, isCommodity = false, itemLink = mockItemInfo[57001][2] },
+		{ itemID = 57002, minPrice = 24000, totalQuantity = 1, quality = 3, isCommodity = false, itemLink = mockItemInfo[57002][2] }, -- unprofitable without AS (22k < 24k)
+		{ itemID = 57003, minPrice = 6000,  totalQuantity = 1, quality = 2, isCommodity = false }, -- uncached initially
+		{ itemID = 57009, minPrice = 500,   totalQuantity = 1, quality = 2, isCommodity = false }, -- blacklisted
+		{ itemID = 2447,  minPrice = 1,     totalQuantity = 20, quality = 1, isCommodity = true }, -- commodity skipped
+	}, "Forever-EU")
+	SE.OnBrowseScanComplete("Forever-EU", false)
+	check(deFlagged == 1 and SE.deDealsByKey["de:57001"] ~= nil
+		and SE.deDealsByKey["de:57001"].profitPerUnit == 20000
+		and SE.deDealsByKey["de:57002"] == nil
+		and SE.deDealsByKey["de:57009"] == nil,
+		"DE Sniper IngestBrowseBatch flags profitable gear (35k DE - 15k AH = 20k) and filters unprofitable/blacklisted/commodities")
+	check(SE.unresolvedDE[57003] ~= nil, "DE Sniper queues uncached gear into SE.unresolvedDE")
+
+	-- 10b. GET_ITEM_INFO_RECEIVED resolves uncached DE item automatically
+	hideItemInfo[57003] = nil
+	SE.OnEvent("GET_ITEM_INFO_RECEIVED", 57003, true)
+	check(SE.deDealsByKey["de:57003"] ~= nil and SE.deDealsByKey["de:57003"].profitPerUnit == 9000
+		and SE.unresolvedDE[57003] == nil,
+		"DE Sniper resolves uncached gear on GET_ITEM_INFO_RECEIVED")
+
+	-- 10c. Toggle AS +20% and RefreshDEDealsFromCache promotes 57002 (26.4k AS DE - 24k AH = +2.4k) and updates 57001
+	SE.SetOption("deUseArcaneSalvager", true)
+	SE.RefreshDEDealsFromCache("Forever-EU")
+	check(SE.deDealsByKey["de:57001"].deValue == 42000 and SE.deDealsByKey["de:57001"].profitPerUnit == 27000
+		and SE.deDealsByKey["de:57002"] ~= nil and SE.deDealsByKey["de:57002"].profitPerUnit == 2400,
+		"AS +20% RefreshDEDealsFromCache recalculates existing deals and promotes marginal gear")
+	SE.SetOption("deUseArcaneSalvager", false)
+	SE.RefreshDEDealsFromCache("Forever-EU")
+	check(SE.deDealsByKey["de:57001"].deValue == 35000 and SE.deDealsByKey["de:57002"] == nil,
+		"Turning AS +20% off updates existing DE values back to baseline net and prunes unprofitable AS-only rows")
+
+	-- 10d. Live Check + scaled itemLink ilvl + PlaceBid buyout completion
+	local deDeal = {
+		idKey = "de:57002",
+		mode = "de",
+		kind = "item",
+		itemID = 57002,
+		ahPrice = 24000,
+		deNet = 22000,
+		deAsNet = 26400,
+		deValue = 22000,
+		status = "unverified",
+	}
+	mockItemSearchResults[57002] = {
+		{ auctionID = 9101, buyoutAmount = 10000, quantity = 1, containsOwnerItem = true, itemLink = "|cff0070dd|Hitem:57002::::::99:0:60|h[Scaled Rare Axe]|h|r" },
+		{ auctionID = 9102, buyoutAmount = 30000, quantity = 1, containsOwnerItem = false, itemLink = "|cff0070dd|Hitem:57002::::::99:0:60|h[Scaled Rare Axe]|h|r" },
+	}
+	SE.atAH = true
+	check(SE.HandleDEAction(deDeal) == true and deDeal.status == "checking",
+		"StartDECheck initiates live AH check on DE deal")
+	SE.OnEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 57002 })
+	check(deDeal.status == "ready_to_buy" and deDeal.auctionID == 9102
+		and deDeal.deValue == 48000 and deDeal.profitPerUnit == 18000,
+		"applyDEItemRows skips owner listing, evaluates scaled itemLink DE value (48k vs 30k = +18k), and marks ready_to_buy")
+	ahCalls = {}
+	check(SE.HandleDEAction(deDeal) == true and ahCalls[1] and ahCalls[1].fn == "PlaceBid"
+		and ahCalls[1].auctionID == 9102 and ahCalls[1].amount == 30000,
+		"ExecuteDEBuy submits synchronous PlaceBid on verified DE listing")
+	SE.OnEvent("AUCTION_HOUSE_PURCHASE_COMPLETED", 9102)
+	check(deDeal.status == "bought", "AUCTION_HOUSE_PURCHASE_COMPLETED sets DE deal status to bought")
+
+	-- 10e. Snapshot scan & DismissDeal & ClearDEDeals & ResetSessionStats
+	snapshotRawItems[57001] = { minBuyout = 12000, marketValue = 18000, qty = 2 }
+	SE.ScanSnapshotForDEDeals("Forever-EU", { deMinProfitCopper = 1000 })
+	check(SE.deDealsByKey["de:57001"] ~= nil and SE.deDealsByKey["de:57001"].source == "Snapshot"
+		and SE.deDealsByKey["de:57001"].profitPerUnit == 23000,
+		"ScanSnapshotForDEDeals evaluates snapshot buyouts against expected DE value")
+	check(SE.DismissDeal(SE.deDealsByKey["de:57001"]) == true and SE.deDealsByKey["de:57001"] == nil,
+		"DismissDeal removes DE deal")
+	SE.ClearDEDeals()
+	check(#SE.GetDEDeals() == 0, "ClearDEDeals empties all DE deals")
+	SE.ResetSessionStats()
+	check(SE.GetSessionStats().deDealsFound == 0, "ResetSessionStats clears deDealsFound counter")
+
+	-- 10f. Disenchant Sniper Buy Moat (Snapshot Depth / ahLots / multi-listing Live Check queue)
+	local origSnapDepth = ns.Pricing.GetItemSnapshotDepth
+	local origSnapMeta = ns.Pricing.GetSnapshotMeta
+	local origAhLots = MerchantMasterDB.ahLots
+	ns.Pricing.GetItemSnapshotDepth = function(itemID)
+		if itemID == 57001 then
+			return {
+				{ price = 15000, qty = 2 },
+				{ price = 25000, qty = 2 },
+				{ price = 40000, qty = 5 }, -- above 35000 DE net -> wall
+			}
+		end
+		return nil
+	end
+	ns.Pricing.GetSnapshotMeta = function() return { updatedAt = 1000 } end
+	snapshotRawItems[57001] = { minBuyout = 15000, marketValue = 25000, qty = 9 }
+	SE.ClearDEDeals()
+	SE.ScanSnapshotForDEDeals("Forever-EU", { deMinProfitCopper = 1000 })
+	local moatDeal = SE.deDealsByKey["de:57001"]
+	check(moatDeal ~= nil and moatDeal.depthVerified == true
+		and moatDeal.profitableQty == 4 and moatDeal.listedQty == 9
+		and moatDeal.totalCost == 80000 and moatDeal.totalRevenue == 140000
+		and moatDeal.totalProfit == 60000 and moatDeal.wallPrice == 40000,
+		"Snapshot Depth computes exact DE Buy Moat (4/9 qty, 80k cost, 140k rev, 60k profit, 40k wall)")
+
+	-- Fresh ahLots overrides older Snapshot Depth when AS +20% enables higher tier (40k < 42k AS DE)
+	MerchantMasterDB.ahLots = {
+		["Forever-EU"] = {
+			[57001] = {
+				at = 2000,
+				lots = {
+					{ price = 15000, qty = 1 },
+					{ price = 38000, qty = 3 },
+					{ price = 50000, qty = 2 },
+				},
+			},
+		},
+	}
+	SE.SetOption("deUseArcaneSalvager", true)
+	SE.RefreshDEDealsFromCache("Forever-EU")
+	moatDeal = SE.deDealsByKey["de:57001"]
+	check(moatDeal.profitableQty == 4 and moatDeal.listedQty == 9
+		and moatDeal.totalCost == 129000 and moatDeal.totalRevenue == 168000
+		and moatDeal.totalProfit == 39000 and moatDeal.wallPrice == 50000,
+		"Newer ahLots + AS +20% recalculates DE Buy Moat dynamically in RefreshDEDealsFromCache")
+	MerchantMasterDB.ahLots = origAhLots
+	ns.Pricing.GetItemSnapshotDepth = origSnapDepth
+	ns.Pricing.GetSnapshotMeta = origSnapMeta
+	SE.SetOption("deUseArcaneSalvager", false)
+
+	-- Live Check populates sequential multi-listing buyQueue & pops one per PlaceBid completion
+	mockItemSearchResults[57001] = {
+		{ auctionID = 9201, buyoutAmount = 15000, quantity = 1, containsOwnerItem = false, itemLink = mockItemInfo[57001][2] },
+		{ auctionID = 9202, buyoutAmount = 25000, quantity = 1, containsOwnerItem = false, itemLink = mockItemInfo[57001][2] },
+		{ auctionID = 9203, buyoutAmount = 40000, quantity = 1, containsOwnerItem = false, itemLink = mockItemInfo[57001][2] }, -- wall
+	}
+	check(SE.HandleDEAction(moatDeal) == true and moatDeal.status == "checking",
+		"Live Check initiates on multi-listing DE moat deal")
+	SE.OnEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 57001 })
+	check(moatDeal.status == "ready_to_buy" and type(moatDeal.buyQueue) == "table" and #moatDeal.buyQueue == 2
+		and moatDeal.profitableQty == 2 and moatDeal.listedQty == 3
+		and moatDeal.totalCost == 40000 and moatDeal.totalRevenue == 70000 and moatDeal.totalProfit == 30000,
+		"applyDEItemRows builds sorted multi-listing buyQueue (2 profitable / 3 listed, 30k total profit)")
+	ahCalls = {}
+	check(SE.HandleDEAction(moatDeal) == true and ahCalls[1].auctionID == 9201 and ahCalls[1].amount == 15000,
+		"First ExecuteDEBuy bids on cheapest listing in buyQueue (9201)")
+	SE.OnEvent("AUCTION_HOUSE_PURCHASE_COMPLETED", 9201)
+	check(moatDeal.status == "ready_to_buy" and #moatDeal.buyQueue == 1
+		and moatDeal.auctionID == 9202 and moatDeal.profitableQty == 1 and moatDeal.totalProfit == 10000,
+		"Completing first DE queue buy advances to second profitable listing cleanly")
+	ahCalls = {}
+	check(SE.HandleDEAction(moatDeal) == true and ahCalls[1].auctionID == 9202 and ahCalls[1].amount == 25000,
+		"Second ExecuteDEBuy bids on next listing in buyQueue (9202)")
+	SE.OnEvent("AUCTION_HOUSE_PURCHASE_COMPLETED", 9202)
+	check(moatDeal.status == "bought" and #moatDeal.buyQueue == 0,
+		"Completing final DE queue listing transitions deal status to bought")
+	mockItemSearchResults[57001] = nil
+	SE.ClearDEDeals()
+
+	snapshotRawItems[57001] = nil
+	mockItemSearchResults[57002] = nil
+	ns.GetItemDEBreakdown = origGetDEBreakdown
+	ns.DE_NON_DISENCHANTABLE = origDENonDE
+end
+
+-------------------------------------------------------------------------------
+-- 11. DE 2-Stage Pre-Filter, Coverage Telemetry & StartDEEquipmentBrowseScan
+-------------------------------------------------------------------------------
+do
+	local origGetDEBreakdown = ns.GetItemDEBreakdown
+	local origDefaultDEBreakdown = ns._defaultGetItemDEBreakdown
+	local origIsDE = ns.IsItemDisenchantable
+	local origFastEV = ns.GetFastDEExpectedValue
+	local origHasObs = ns.HasDEObservations
+	local origEquipPacked = ns.DE_EQUIP_PACKED
+	local origSnapDepth = ns.Pricing.GetItemSnapshotDepth
+	local origMarketScan = ns.MarketScan
+
+	local breakdownCalls = {}
+	local depthCalls = {}
+	local hintSeen = {}
+
+	mockItemInstant[58001] = { "INVTYPE_CHEST", 4 }
+	mockItemInstant[58002] = { "INVTYPE_WEAPON", 2 }
+	mockItemInstant[58003] = { "INVTYPE_HAND", 4 }
+	mockItemInstant[58004] = { "INVTYPE_FEET", 4 }
+	mockItemInstant[58005] = { "INVTYPE_WRIST", 4 }
+	mockItemInstant[58006] = { "INVTYPE_LEGS", 4 }
+	mockItemInfo[58001] = { "Cheap DE Chest", "|cff1eff00|Hitem:58001|h[Cheap DE Chest]|h|r", 2, 5000, 1 }
+	mockItemInfo[58002] = { "Overpriced DE Blade", "|cff0070dd|Hitem:58002|h[Overpriced DE Blade]|h|r", 3, 9000, 1 }
+	mockItemInfo[58003] = { "Observed DE Gloves", "|cff1eff00|Hitem:58003|h[Observed DE Gloves]|h|r", 2, 4000, 1 }
+	mockItemInfo[58004] = { "Uncached Stage1 Boots", "|cff1eff00|Hitem:58004|h[Uncached Stage1 Boots]|h|r", 2, 3000, 1 }
+	mockItemInfo[58005] = { "Packed High-Price Bracers", "|cffa335ee|Hitem:58005|h[Packed High-Price Bracers]|h|r", 4, 25000, 1 }
+	mockItemInfo[58006] = { "Hint High-Price Greaves", "|cffa335ee|Hitem:58006|h[Hint High-Price Greaves]|h|r", 4, 25000, 1 }
+
+	local stage1Meta = {
+		[58001] = { classID = 4, className = "Armor", quality = 2, ilvl = 52 },
+		[58002] = { classID = 2, className = "Weapon", quality = 3, ilvl = 55 },
+		[58003] = { classID = 4, className = "Armor", quality = 2, ilvl = 44 },
+		[58004] = { classID = 4, className = "Armor", quality = 2, ilvl = 48 },
+		[58005] = { classID = 4, className = "Armor", quality = 4, ilvl = 65 },
+		[58006] = { classID = 4, className = "Armor", quality = 4, ilvl = 66 },
+	}
+	ns.DE_EQUIP_PACKED = { [58005] = 12345 }
+
+	ns.IsItemDisenchantable = function(itemID, itemLink, hintMeta)
+		if hintMeta then
+			hintSeen[itemID] = { quality = hintMeta.quality, ilvl = hintMeta.ilvl }
+		end
+		if hideItemInfo[itemID] and not (ns.DE_EQUIP_PACKED and ns.DE_EQUIP_PACKED[itemID])
+			and not (hintMeta and hintMeta.quality and hintMeta.ilvl and hintMeta.ilvl > 0) then
+			return nil, "uncached", nil
+		end
+		local m = stage1Meta[itemID]
+		if not m then return false, "ineligible", nil end
+		return true, nil, m
+	end
+	ns.HasDEObservations = function(itemID)
+		return itemID == 58003
+	end
+	ns.GetFastDEExpectedValue = function(classID, quality, ilvl, useAS, applyCut)
+		if ilvl == 52 then return 30000, false end      -- 58001: profitable vs 10k
+		if ilvl == 55 then return 20000, true end       -- 58002: unprofitable vs 50k, estimated!
+		if ilvl == 44 then return 5000, false end       -- 58003: would look unprofitable, but hasObs=true forces Stage 2!
+		if ilvl == 48 then return 25000, true end       -- 58004: profitable once resolved, estimated!
+		if ilvl == 65 then return 7000000, false end    -- 58005: >500g packed bypass, profitable vs 600g!
+		if ilvl == 66 then return 7000000, false end    -- 58006: >500g hintMeta bypass, profitable vs 600g!
+		return nil, false
+	end
+	local defaultBreakdownFn = function(itemID, itemLink, applyAHCut, hintMeta)
+		breakdownCalls[itemID] = (breakdownCalls[itemID] or 0) + 1
+		if hideItemInfo[itemID] and not (ns.DE_EQUIP_PACKED and ns.DE_EQUIP_PACKED[itemID])
+			and not (hintMeta and hintMeta.quality and hintMeta.ilvl and hintMeta.ilvl > 0) then
+			return nil, "uncached"
+		end
+		if itemID == 58001 then
+			return { quality = 2, ilvl = 52, className = "Armor", netCopper = 30000, asNetCopper = 36000, primarySummary = "75% Dream Dust", isEstimated = false, outcomes = {} }, nil
+		elseif itemID == 58002 then
+			return { quality = 3, ilvl = 55, className = "Weapon", netCopper = 20000, asNetCopper = 24000, primarySummary = "100% Large Brilliant Shard", isEstimated = true, estimateReason = "clamped_ilvl", outcomes = {} }, nil
+		elseif itemID == 58003 then
+			return { quality = 2, ilvl = 44, className = "Armor", netCopper = 28000, asNetCopper = 33600, primarySummary = "80% Vision Dust", isEstimated = false, outcomes = {} }, nil
+		elseif itemID == 58004 then
+			return { quality = 2, ilvl = 48, className = "Armor", netCopper = 25000, asNetCopper = 30000, primarySummary = "75% Dream Dust", isEstimated = true, estimateReason = "fallback_bracket", outcomes = {} }, nil
+		elseif itemID == 58005 then
+			return { quality = 4, ilvl = 65, className = "Armor", netCopper = 7000000, asNetCopper = 8400000, primarySummary = "100% Nexus Crystal", isEstimated = false, outcomes = {} }, nil
+		elseif itemID == 58006 then
+			return { quality = 4, ilvl = 66, className = "Armor", netCopper = 7000000, asNetCopper = 8400000, primarySummary = "100% Nexus Crystal", isEstimated = false, outcomes = {} }, nil
+		end
+		return nil, "ineligible"
+	end
+	ns._defaultGetItemDEBreakdown = defaultBreakdownFn
+	ns.GetItemDEBreakdown = defaultBreakdownFn
+	ns.Pricing.GetItemSnapshotDepth = function(itemID)
+		depthCalls[itemID] = (depthCalls[itemID] or 0) + 1
+		return nil
+	end
+
+	-- 11a. Stage 1 skips GetItemDEBreakdown & Buy Moat on unprofitable 58002; runs Stage 2 on profitable 58001, observed 58003,
+	--      packed >500g 58005, and hintMeta >500g 58006; queues uncached 58004 and tracks deScanStats accurately.
+	SE.ClearDEDeals()
+	SE.SetOption("deMinProfitCopper", 1000)
+	SE.SetOption("deUseArcaneSalvager", false)
+	hideItemInfo[58004] = true
+	hideItemInfo[58005] = true
+	hideItemInfo[58006] = true
+	SE.IngestBrowseBatch({
+		{ itemID = 58001, minPrice = 10000,   totalQuantity = 1, quality = 2, isCommodity = false, itemKey = { itemID = 58001, itemLevel = 52, itemSuffix = 0, battlePetSpeciesID = 0 } },
+		{ itemID = 58002, minPrice = 50000,   totalQuantity = 1, quality = 3, isCommodity = false, itemKey = { itemID = 58002, itemLevel = 55, itemSuffix = 0, battlePetSpeciesID = 0 } },
+		{ itemID = 58003, minPrice = 12000,   totalQuantity = 1, quality = 2, isCommodity = false, itemKey = { itemID = 58003, itemLevel = 44, itemSuffix = 0, battlePetSpeciesID = 0 } },
+		{ itemID = 58004, minPrice = 8000,    totalQuantity = 1, quality = 2, isCommodity = false },
+		{ itemID = 58005, minPrice = 6000000, totalQuantity = 1, quality = 4, isCommodity = false }, -- >500g uncached, kept via DE_EQUIP_PACKED
+		{ itemID = 58006, minPrice = 6000000, totalQuantity = 1, quality = 4, isCommodity = false, itemKey = { itemID = 58006, itemLevel = 66, itemSuffix = 0, battlePetSpeciesID = 0 } }, -- >500g uncached, kept via hintMeta
+	}, "Forever-EU")
+	SE.OnBrowseScanComplete("Forever-EU", false)
+
+	check((breakdownCalls[58002] or 0) == 0 and (depthCalls[58002] or 0) == 0,
+		"Stage 1 fast EV pre-filter skipped GetItemDEBreakdown and Buy Moat on unprofitable 58002")
+	check((breakdownCalls[58001] or 0) == 1 and (breakdownCalls[58003] or 0) == 1,
+		"Stage 2 ran GetItemDEBreakdown on profitable 58001 and observed 58003")
+	check((breakdownCalls[58005] or 0) == 1 and (breakdownCalls[58006] or 0) == 1,
+		"MAX_DE_LOAD_PRICE bypassed cleanly for DE_EQUIP_PACKED (58005) and full hintMeta (58006)")
+	check(hintSeen[58001] and hintSeen[58001].quality == 2 and hintSeen[58001].ilvl == 52,
+		"hintMeta populated from browse row quality and itemKey.itemLevel")
+	local st1 = SE.GetDEScanStats()
+	check(st1.totalSeen == 6 and st1.equipScanned == 5 and st1.estimated == 1
+		and st1.uncachedPending == 1 and st1.profitable == 4,
+		"SE.deScanStats accurately counted totalSeen=6, equipScanned=5, estimated=1, uncachedPending=1, profitable=4 (got "
+			.. tostring(st1.totalSeen) .. "/" .. tostring(st1.equipScanned) .. "/" .. tostring(st1.estimated)
+			.. "/" .. tostring(st1.uncachedPending) .. "/" .. tostring(st1.profitable) .. ")")
+
+	-- 11b. Resolving uncached 58004 increments equipScanned & estimated once, clears uncachedPending, stamps deal.isEstimated
+	hideItemInfo[58004] = nil
+	SE.OnEvent("GET_ITEM_INFO_RECEIVED", 58004, true)
+	local resolvedDeal = SE.deDealsByKey["de:58004"]
+	check(resolvedDeal ~= nil and resolvedDeal.isEstimated == true and resolvedDeal.estimateReason == "fallback_bracket",
+		"Resolved DE deal stamped isEstimated=true and estimateReason='fallback_bracket'")
+	local st2 = SE.GetDEScanStats()
+	check(st2.equipScanned == 6 and st2.estimated == 2 and st2.uncachedPending == 0 and st2.profitable == 5,
+		"GET_ITEM_INFO_RECEIVED updated deScanStats to equipScanned=6, estimated=2, uncachedPending=0, profitable=5")
+
+	-- 11c. Monkey-patched ns.GetItemDEBreakdown bypasses Stage 1 fast pre-filter seamlessly
+	local mockOverrideCalls = 0
+	ns.GetItemDEBreakdown = function(itemID)
+		mockOverrideCalls = mockOverrideCalls + 1
+		if itemID == 58002 then
+			return { quality = 3, ilvl = 55, className = "Weapon", netCopper = 90000, asNetCopper = 108000, primarySummary = "Mocked Shard", outcomes = {} }, nil
+		end
+		return nil, "ineligible"
+	end
+	SE.ClearDEDeals()
+	SE.IngestBrowseBatch({
+		{ itemID = 58002, minPrice = 50000, totalQuantity = 1, quality = 3, isCommodity = false },
+	}, "Forever-EU")
+	SE.OnBrowseScanComplete("Forever-EU", false)
+	check(mockOverrideCalls == 1 and SE.deDealsByKey["de:58002"] ~= nil and SE.deDealsByKey["de:58002"].profitPerUnit == 40000,
+		"Monkey-patched ns.GetItemDEBreakdown bypassed Stage 1 and evaluated deal identically")
+	ns.GetItemDEBreakdown = defaultBreakdownFn
+
+	-- 11d. SE.StartDEEquipmentBrowseScan guards ah_closed & cart_buyer_busy, prefers StartEquipmentBrowseScan, falls back to EnsureBrowseRunning
+	local equipCalls = 0
+	local fallbackCalls = 0
+	local lastDEStatus = nil
+	SE.SetListener(function(ev, payload)
+		if ev == "de_status" then lastDEStatus = payload end
+	end)
+	ns.MarketScan = {
+		StartEquipmentBrowseScan = function()
+			equipCalls = equipCalls + 1
+			return true
+		end,
+		EnsureBrowseRunning = function()
+			fallbackCalls = fallbackCalls + 1
+			return true
+		end,
+	}
+
+	SE.atAH = false
+	local okClosed, errClosed = SE.StartDEEquipmentBrowseScan()
+	check(okClosed == false and errClosed == "ah_closed" and equipCalls == 0,
+		"StartDEEquipmentBrowseScan guards ah_closed when AH is closed")
+
+	SE.atAH = true
+	mockCartBuyerActive = true
+	local okBusy, errBusy = SE.StartDEEquipmentBrowseScan()
+	check(okBusy == false and errBusy == "cart_buyer_busy" and equipCalls == 0,
+		"StartDEEquipmentBrowseScan guards cart_buyer_busy when Cart Buyer is active")
+	mockCartBuyerActive = false
+
+	-- Seed a stale DE deal to verify clearStaleDEDeals + stats reset
+	SE.deDeals[1] = { idKey = "de:999991", itemID = 999991, profitPerUnit = 5000, totalProfit = 5000 }
+	SE.deDealsByKey["de:999991"] = SE.deDeals[1]
+	local okEquip, modeEquip = SE.StartDEEquipmentBrowseScan()
+	check(okEquip == true and modeEquip == "equipment_browse" and equipCalls == 1 and fallbackCalls == 0,
+		"StartDEEquipmentBrowseScan preferred ns.MarketScan.StartEquipmentBrowseScan()")
+	check(SE.deDealsByKey["de:999991"] == nil, "StartDEEquipmentBrowseScan cleared stale DE deals")
+	local stEquip = SE.GetDEScanStats()
+	check(stEquip.source == "Equipment Browse" and stEquip.totalSeen == 0 and stEquip.equipScanned == 0
+		and stEquip.profitable == 0 and stEquip.uncachedPending == 0 and stEquip.lastAt ~= nil,
+		"StartDEEquipmentBrowseScan reset SE.deScanStats with source='Equipment Browse'")
+	check(type(lastDEStatus) == "table" and lastDEStatus.message == "Scanning all AH equipment for disenchant deals...",
+		"StartDEEquipmentBrowseScan emitted de_status notification")
+
+	-- Fallback to EnsureBrowseRunning when StartEquipmentBrowseScan is absent
+	ns.MarketScan.StartEquipmentBrowseScan = nil
+	local okFallback, modeFallback = SE.StartDEEquipmentBrowseScan()
+	check(okFallback == true and modeFallback == "full_browse" and fallbackCalls == 1,
+		"StartDEEquipmentBrowseScan fell back to ns.MarketScan.EnsureBrowseRunning() cleanly")
+
+	-- 11e. applyDEItemRows forwards rowHint (ilvl + quality) from info.itemKey/info.quality (with deal fallback)
+	ns.MarketScan = nil
+	local capturedRowHints = {}
+	ns.GetItemDEBreakdown = function(itemID, itemLink, applyAHCut, hintMeta)
+		capturedRowHints[#capturedRowHints + 1] = {
+			itemID = itemID,
+			ilvl = hintMeta and hintMeta.ilvl or nil,
+			quality = hintMeta and hintMeta.quality or nil,
+		}
+		return {
+			quality = (hintMeta and hintMeta.quality) or 3,
+			ilvl = (hintMeta and hintMeta.ilvl) or 55,
+			className = "Weapon",
+			netCopper = 45000,
+			asNetCopper = 54000,
+			primarySummary = "100% Large Brilliant Shard",
+			outcomes = {},
+		}, nil
+	end
+	local hintCheckDeal = {
+		idKey = "de:58002:55:0:0",
+		mode = "de",
+		kind = "item",
+		itemID = 58002,
+		itemKey = { itemID = 58002, itemLevel = 55, itemSuffix = 0, battlePetSpeciesID = 0 },
+		quality = 3,
+		ahPrice = 20000,
+		deNet = 45000,
+		deAsNet = 54000,
+		deValue = 45000,
+		status = "unverified",
+	}
+	mockItemSearchResults[58002] = {
+		{
+			auctionID = 9301,
+			buyoutAmount = 20000,
+			quantity = 1,
+			containsOwnerItem = false,
+			quality = 4,
+			itemKey = { itemID = 58002, itemLevel = 62, itemSuffix = 0, battlePetSpeciesID = 0 },
+			itemLink = "|cffa335ee|Hitem:58002::::::99:0:62|h[Scaled Epic Blade]|h|r",
+		},
+		{
+			auctionID = 9302,
+			buyoutAmount = 22000,
+			quantity = 1,
+			containsOwnerItem = false,
+			itemLink = "|cff0070dd|Hitem:58002|h[Base Rare Blade]|h|r",
+		},
+	}
+	SE.atAH = true
+	check(SE.HandleDEAction(hintCheckDeal) == true and hintCheckDeal.status == "checking",
+		"StartDECheck initiated for scaled rowHint forwarding regression test")
+	SE.OnEvent("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 58002, itemLevel = 55, itemSuffix = 0, battlePetSpeciesID = 0 })
+	check(#capturedRowHints == 2
+		and capturedRowHints[1].ilvl == 62 and capturedRowHints[1].quality == 4
+		and capturedRowHints[2].ilvl == 55 and capturedRowHints[2].quality == 3,
+		"applyDEItemRows forwarded rowHint.ilvl & rowHint.quality from info.itemKey/info.quality and fell back to deal.itemKey/deal.quality")
+	mockItemSearchResults[58002] = nil
+
+	-- 11f. hydrateSnapshotItems honors ns.IsLocalSnapshotSuppressed() even when ns.snapshotParsed is already hydrated
+	local origSuppressed = ns.IsLocalSnapshotSuppressed
+	SE.ClearVendorDeals()
+	SE.ClearDEDeals()
+	SE.PruneBrowseCache("Forever-EU")
+	snapshotRawItems[58001] = { minBuyout = 10000, marketValue = 25000, qty = 2 }
+	ns.IsLocalSnapshotSuppressed = function() return true end
+	local supShortlist = SE.BuildGapShortlist({ econ = "Forever-EU", minDailySales = 1, minProfitCopper = 100 })
+	local supVendor = SE.ScanSnapshotForVendorDeals("Forever-EU", { minProfitCopper = 100 })
+	local supDE = SE.ScanSnapshotForDEDeals("Forever-EU", { deMinProfitCopper = 100 })
+	check(#supShortlist == 0 and #supVendor == 0 and #supDE == 0,
+		"hydrateSnapshotItems returns nil when ns.IsLocalSnapshotSuppressed() is true (0 snapshot deals leaked)")
+	snapshotRawItems[58001] = nil
+	ns.IsLocalSnapshotSuppressed = origSuppressed
+
+	SE.SetListener(nil)
+	SE.ClearDEDeals()
+	hideItemInfo[58004] = nil
+	hideItemInfo[58005] = nil
+	hideItemInfo[58006] = nil
+	ns.GetItemDEBreakdown = origGetDEBreakdown
+	ns._defaultGetItemDEBreakdown = origDefaultDEBreakdown
+	ns.IsItemDisenchantable = origIsDE
+	ns.GetFastDEExpectedValue = origFastEV
+	ns.HasDEObservations = origHasObs
+	ns.DE_EQUIP_PACKED = origEquipPacked
+	ns.Pricing.GetItemSnapshotDepth = origSnapDepth
+	ns.MarketScan = origMarketScan
+end
+
+-------------------------------------------------------------------------------
+-- 12. Disenchant Sniper 5% AH Cut Toggle (`deApplyAHCut`) & UI_Sniper Verification
+-------------------------------------------------------------------------------
+do
+	local origGetDEBD = ns.GetItemDEBreakdown
+	local origDefaultDEBD = ns._defaultGetItemDEBreakdown
+	local origIsDE = ns.IsItemDisenchantable
+	local origFastEV = ns.GetFastDEExpectedValue
+	local origHasObs = ns.HasDEObservations
+	local origCreateFrame = _G.CreateFrame
+	local origGameTooltip = _G.GameTooltip
+	local origUIParent = _G.UIParent
+	local origAHF = _G.AuctionHouseFrame
+	local origUISniper = ns.UISniper
+	local origSniperProvider = ns.sniperProvider
+
+	-- 12a. Engine default & exact formula: profitPerUnit == floor(deGross * 0.95 + 0.5) - ahPrice (ON) vs deGross - ahPrice (OFF)
+	SE.ClearDEDeals()
+	SE.PruneBrowseCache("Forever-EU")
+	SE.SetOption("deMinProfitCopper", 100)
+	SE.SetOption("deUseArcaneSalvager", false)
+	SE.SetOption("deQualityFilter", "all")
+
+	check(SE.GetSettings().deApplyAHCut == true, "deApplyAHCut must default to true (ON)")
+
+	mockItemInfo[59001] = { "AH Cut Blade", "|cff1eff00|Hitem:59001|h[AH Cut Blade]|h|r", 2, 1000, 1 }
+	mockItemInfo[59002] = { "Marginal DE Helm", "|cff1eff00|Hitem:59002|h[Marginal DE Helm]|h|r", 2, 1000, 1 }
+	mockItemInstant[59001] = { "INVTYPE_WEAPON", 2 }
+	mockItemInstant[59002] = { "INVTYPE_HEAD", 4 }
+
+	ns._defaultGetItemDEBreakdown = nil
+	ns.IsItemDisenchantable = nil
+	ns.GetFastDEExpectedValue = nil
+	ns.HasDEObservations = nil
+	ns.GetItemDEBreakdown = function(itemID)
+		if itemID == 59001 or itemID == 59002 then
+			return {
+				quality = 2,
+				ilvl = 40,
+				className = (itemID == 59001) and "Weapon" or "Armor",
+				grossCopper = 10000,
+				asGrossCopper = 12000,
+				netCopper = 9500,
+				asNetCopper = 11400,
+				minNetCopper = 9500,
+				maxNetCopper = 9500,
+				primarySummary = "100% Vision Dust",
+				outcomes = {
+					{ matID = 11137, name = "Vision Dust", matRate = 1.0, amountOfMats = 1.0, evGross = 10000, evNet = 9500, evNetRounded = 9500, evAsNetRounded = 11400, evAsGrossRounded = 12000 },
+				},
+			}, nil
+		end
+		return nil, "ineligible"
+	end
+
+	-- 59001: ahPrice=8000, deGross=10000 -> ON profit = 9500-8000 = 1500 (NOT 1900!); OFF profit = 10000-8000 = 2000
+	-- 59002: ahPrice=9700, deGross=10000 -> suppressed when ON (9500 <= 9700), promoted when OFF (10000-9700 = 300 >= 100)
+	SE.IngestBrowseBatch({
+		{ itemID = 59001, minPrice = 8000, totalQuantity = 2, quality = 2, isCommodity = false,
+			itemLink = "|cff1eff00|Hitem:59001|h[AH Cut Blade]|h|r" },
+		{ itemID = 59002, minPrice = 9700, totalQuantity = 1, quality = 2, isCommodity = false,
+			itemLink = "|cff1eff00|Hitem:59002|h[Marginal DE Helm]|h|r" },
+	}, "Forever-EU")
+	SE.OnBrowseScanComplete("Forever-EU", false)
+
+	local d1 = SE.deDealsByKey["de:59001"]
+	check(d1 ~= nil, "59001 profitable with 5% AH cut ON")
+	check(SE.deDealsByKey["de:59002"] == nil, "Marginal 59002 (ah=9700, net=9500, gross=10000) suppressed while deApplyAHCut=true")
+	check(d1.ahPrice == 8000 and d1.deDisplayValue == 10000 and d1.deGross == 10000
+		and d1.profitPerUnit == math.floor(10000 * 0.95 + 0.5) - 8000 and d1.profitPerUnit == 1500,
+		"With deApplyAHCut=true: ahPrice=8000, deDisplayValue=10000, profitPerUnit=1500 (5% cut on DE mat value, not profit)")
+
+	-- Toggle OFF -> 59001 keeps ahPrice=8000 & deDisplayValue=10000, profit becomes 2000; marginal 59002 appears!
+	SE.SetOption("deApplyAHCut", false)
+	SE.RefreshDEDealsFromCache("Forever-EU")
+	d1 = SE.deDealsByKey["de:59001"]
+	local d2 = SE.deDealsByKey["de:59002"]
+	check(d1 ~= nil and d1.ahPrice == 8000 and d1.deDisplayValue == 10000
+		and d1.profitPerUnit == 10000 - 8000 and d1.profitPerUnit == 2000,
+		"With deApplyAHCut=false: ahPrice & DE Value stay identical (8000 / 10000), profitPerUnit becomes 2000")
+	check(d2 ~= nil and d2.ahPrice == 9700 and d2.deDisplayValue == 10000 and d2.profitPerUnit == 300,
+		"Turning deApplyAHCut OFF promotes marginal 59002 from browseCache (profitPerUnit=300)")
+
+	-- With AS +20% ON: deDisplayValue=12000 (deAsGross) in both states, profit = floor(12000*0.95+0.5)-8000 = 3400 (ON) vs 4000 (OFF)
+	SE.SetOption("deUseArcaneSalvager", true)
+	SE.RefreshDEDealsFromCache("Forever-EU")
+	d1 = SE.deDealsByKey["de:59001"]
+	check(d1.deDisplayValue == 12000 and d1.profitPerUnit == 4000,
+		"AS +20% with deApplyAHCut=false uses deAsGross=12000 and profit=4000")
+	SE.SetOption("deApplyAHCut", true)
+	SE.RefreshDEDealsFromCache("Forever-EU")
+	d1 = SE.deDealsByKey["de:59001"]
+	check(d1.deDisplayValue == 12000 and d1.profitPerUnit == math.floor(12000 * 0.95 + 0.5) - 8000 and d1.profitPerUnit == 3400,
+		"AS +20% with deApplyAHCut=true keeps deDisplayValue=12000 and sets profit=3400")
+
+	-- Toggle AS back OFF -> marginal 59002 prunes cleanly!
+	SE.SetOption("deUseArcaneSalvager", false)
+	SE.RefreshDEDealsFromCache("Forever-EU")
+	check(SE.deDealsByKey["de:59002"] == nil and SE.deDealsByKey["de:59001"].profitPerUnit == 1500,
+		"Turning deApplyAHCut back ON prunes marginal 59002 and restores 59001 profit=1500")
+
+	-- 12b. UI_Sniper verification: deView.filters.applyAHCut exists, defaults checked, toggles math & onRowTooltip
+	local uiFrames = {}
+	local function makeUIWidget(frameType, name, parent)
+		local w = {
+			_type = frameType,
+			_name = name,
+			_parent = parent,
+			_shown = true,
+			_enabled = true,
+			_checked = false,
+			_text = "",
+			_width = (parent == nil) and 980 or 160,
+			_height = (parent == nil) and 620 or ((frameType == "Frame") and 500 or 26),
+			_scripts = {},
+			_events = {},
+			_points = {},
+			_children = {},
+		}
+		if parent and parent._children then parent._children[#parent._children + 1] = w end
+		local methods = {
+			SetSize = function(self, x, y) self._width = x; self._height = y end,
+			SetWidth = function(self, x) self._width = x end,
+			SetHeight = function(self, y) self._height = y end,
+			GetWidth = function(self) return self._width end,
+			GetHeight = function(self) return self._height end,
+			GetStringWidth = function(self) return #(self._text or "") * 6 end,
+			SetPoint = function(self, ...) self._points[#self._points + 1] = { ... } end,
+			SetAllPoints = function(self, rel)
+				if rel and rel._width then self._width = rel._width; self._height = rel._height end
+			end,
+			ClearAllPoints = function(self) self._points = {} end,
+			GetPoint = function(self, i) return unpack(self._points[i or 1] or {}) end,
+			Show = function(self) self._shown = true end,
+			Hide = function(self) self._shown = false end,
+			IsShown = function(self) return self._shown == true end,
+			SetShown = function(self, v) self._shown = (v == true) end,
+			SetEnabled = function(self, v) self._enabled = (v == true) end,
+			IsEnabled = function(self) return self._enabled ~= false end,
+			Enable = function(self) self._enabled = true end,
+			Disable = function(self) self._enabled = false end,
+			SetChecked = function(self, v) self._checked = (v == true) end,
+			GetChecked = function(self) return self._checked == true end,
+			SetText = function(self, t) self._text = tostring(t or "") end,
+			GetText = function(self) return self._text end,
+			SetTextColor = function() end,
+			SetColorTexture = function() end,
+			SetTexture = function() end,
+			SetTexCoord = function() end,
+			SetFont = function() return true end,
+			SetFontString = function(self, fs) self.fs = fs end,
+			SetJustifyH = function() end,
+			SetJustifyV = function() end,
+			SetWordWrap = function() end,
+			SetMaxLines = function() end,
+			SetShadowOffset = function() end,
+			SetShadowColor = function() end,
+			SetAutoFocus = function() end,
+			SetMaxLetters = function() end,
+			SetOrientation = function() end,
+			SetMinMaxValues = function() end,
+			SetValueStep = function() end,
+			SetValue = function() end,
+			GetValue = function() return 0 end,
+			SetThumbTexture = function() end,
+			EnableMouse = function() end,
+			EnableMouseWheel = function() end,
+			RegisterForClicks = function() end,
+			RegisterEvent = function(self, ev) self._events[ev] = true end,
+			SetParent = function(self, p) self._parent = p end,
+			SetScript = function(self, k, fn) self._scripts[k] = fn end,
+			GetScript = function(self, k) return self._scripts[k] end,
+			HookScript = function(self, k, fn)
+				local prev = self._scripts[k]
+				self._scripts[k] = prev and function(...) prev(...) return fn(...) end or fn
+			end,
+			Click = function(self, btn)
+				if self._type == "CheckButton" then
+					self._checked = not self._checked
+				end
+				if self._scripts.OnClick then self._scripts.OnClick(self, btn or "LeftButton") end
+			end,
+			CreateTexture = function(self) return makeUIWidget("Texture", nil, self) end,
+			CreateFontString = function(self) return makeUIWidget("FontString", nil, self) end,
+		}
+		for k, fn in pairs(methods) do w[k] = fn end
+		uiFrames[#uiFrames + 1] = w
+		return w
+	end
+
+	_G.CreateFrame = function(ft, nm, par) return makeUIWidget(ft, nm, par) end
+	_G.UIParent = makeUIWidget("Frame", "UIParent", nil)
+	_G.AuctionHouseFrame = makeUIWidget("Frame", "MockAuctionHouseFrame", nil)
+	_G.AuctionHouseFrame:Show()
+	local tipLines = {}
+	_G.GameTooltip = {
+		_lines = tipLines,
+		SetOwner = function() end,
+		ClearLines = function() for i = #tipLines, 1, -1 do tipLines[i] = nil end end,
+		AddLine = function(_, l) tipLines[#tipLines + 1] = tostring(l or "") end,
+		AddDoubleLine = function(_, l, r) tipLines[#tipLines + 1] = tostring(l or "") .. " | " .. tostring(r or "") end,
+		SetHyperlink = function(_, link) tipLines[#tipLines + 1] = tostring(link or "") end,
+		SetItemByID = function(_, id) tipLines[#tipLines + 1] = "item:" .. tostring(id) end,
+		Show = function() end,
+		Hide = function() end,
+	}
+
+	ns.UISniper = nil
+	ns.sniperProvider = nil
+	local uiChunk, uiErr = loadfile(mmDir .. "UI_Sniper.lua")
+	check(uiChunk ~= nil, "UI_Sniper.lua compiled cleanly: " .. tostring(uiErr))
+	uiChunk("MerchantMaster", ns)
+	local UIS = ns.UISniper
+	check(UIS ~= nil, "ns.UISniper mounted in Section 12")
+	local hostRoot = makeUIWidget("Frame", "SniperHostRoot", _G.UIParent)
+	hostRoot:SetSize(980, 620)
+	UIS.Mount(hostRoot)
+	UIS.Show("sniper_de")
+
+	local ahCutCheck, ahCutRow = nil, nil
+	for _, f in ipairs(uiFrames) do
+		if f._type == "CheckButton" and f.label and f.label._text == "5% AH Cut" then
+			ahCutCheck = f
+		elseif f._deal and f._deal.idKey == "de:59001" and f:IsShown() then
+			ahCutRow = f
+		end
+	end
+	check(ahCutCheck ~= nil and ahCutCheck:GetChecked() == true,
+		"UI_Sniper deView exposes '5% AH Cut' filter checkbox defaulted checked")
+	check(ahCutRow ~= nil and ahCutRow.cells[4]:GetText() == "1g" and ahCutRow.cells[5]:GetText() == "+15s",
+		"UI_Sniper DE row shows gross DE Value (1g) and 5%-cut Profit/Unit (+15s) when ON")
+
+	-- Tooltip with 5% AH Cut ON shows Gross and -5% AH lines
+	_G.GameTooltip:ClearLines()
+	ahCutRow:GetScript("OnEnter")(ahCutRow)
+	local tipOn = table.concat(tipLines, "\n")
+	check(tipOn:find("Expected DE Value (Gross):", 1, true) ~= nil
+		and tipOn:find("Expected DE Revenue (-5% AH):", 1, true) ~= nil,
+		"UI_Sniper DE onRowTooltip shows Gross and -5% AH lines when ON")
+
+	-- Click '5% AH Cut' OFF -> DE Value stays 1g, Profit/Unit updates to +20s, marginal 59002 appears, tooltip shows AH Cut: Off
+	ahCutCheck:Click("LeftButton")
+	check(SE.GetSettings().deApplyAHCut == false, "Clicking '5% AH Cut' OFF sets deApplyAHCut=false")
+	local row59001Off, row59002Off = nil, nil
+	for _, f in ipairs(uiFrames) do
+		if f._deal and f:IsShown() then
+			if f._deal.idKey == "de:59001" then row59001Off = f end
+			if f._deal.idKey == "de:59002" then row59002Off = f end
+		end
+	end
+	check(row59001Off ~= nil and row59001Off.cells[4]:GetText() == "1g" and row59001Off.cells[5]:GetText() == "+20s",
+		"UI_Sniper DE row keeps DE Value 1g and updates Profit/Unit to +20s when OFF")
+	check(row59002Off ~= nil, "UI_Sniper DE table renders marginal 59002 when '5% AH Cut' is turned OFF")
+
+	_G.GameTooltip:ClearLines()
+	row59001Off:GetScript("OnEnter")(row59001Off)
+	local tipOff = table.concat(tipLines, "\n")
+	check(tipOff:find("Expected DE Value (Gross):", 1, true) ~= nil
+		and tipOff:find("Off (using gross mats)", 1, true) ~= nil
+		and tipOff:find("-5% AH", 1, true) == nil,
+		"UI_Sniper DE onRowTooltip shows Gross and 'Off (using gross mats)' when OFF")
+
+	-- Click '5% AH Cut' back ON -> marginal 59002 prunes and 59001 reverts to +15s
+	ahCutCheck:Click("LeftButton")
+	check(SE.GetSettings().deApplyAHCut == true and SE.deDealsByKey["de:59002"] == nil,
+		"Clicking '5% AH Cut' back ON sets deApplyAHCut=true and prunes marginal 59002")
+
+	UIS.Hide()
+	SE.ClearDEDeals()
+	SE.PruneBrowseCache("Forever-EU")
+	mockItemInfo[59001] = nil
+	mockItemInfo[59002] = nil
+	mockItemInstant[59001] = nil
+	mockItemInstant[59002] = nil
+	ns.GetItemDEBreakdown = origGetDEBD
+	ns._defaultGetItemDEBreakdown = origDefaultDEBD
+	ns.IsItemDisenchantable = origIsDE
+	ns.GetFastDEExpectedValue = origFastEV
+	ns.HasDEObservations = origHasObs
+	_G.CreateFrame = origCreateFrame
+	_G.GameTooltip = origGameTooltip
+	_G.UIParent = origUIParent
+	_G.AuctionHouseFrame = origAHF
+	ns.UISniper = origUISniper
+	ns.sniperProvider = origSniperProvider
+end
+
 check(ledgerAppendCalls == 0, "Analytics.Store.Append still called 0 times across all regression & All-Items paths")
 
 print("PASS: test_sniper (" .. assertions .. " assertions)")

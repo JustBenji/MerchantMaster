@@ -3827,6 +3827,7 @@ function Theme.DecorateMainWindow(panel, opts)
 		defaultH = opts.defaultH,
 		adaptiveLargeDefault = opts.adaptiveLargeDefault,
 		comfortableZoom = opts.comfortableZoom,
+		positionKey = opts.positionKey,
 	})
 	if isFable and resizeGrip.HookScript then
 		resizeGrip:HookScript("OnEnter", function(self)
@@ -3945,22 +3946,59 @@ function Theme.CreateFloatingWindow(frameName, title, width, height, opts)
 	f:SetMovable(true)
 	f:SetClampedToScreen(true)
 	f:EnableMouse(true)
-	if opts.dontSaveLayout or opts.resizable then
+	f._mmPositionKey = opts.positionKey
+	f._mmCombatSafeDrag = (opts.combatSafeDrag == true)
+	if opts.dontSaveLayout or opts.resizable or opts.positionKey then
 		if f.SetDontSavePosition then f:SetDontSavePosition(true) end
 		if f.SetUserPlaced then f:SetUserPlaced(false) end
 	end
-	f:RegisterForDrag("LeftButton")
-	f:SetScript("OnDragStart", f.StartMoving)
-	f:SetScript("OnDragStop", function(self)
-		if self.StopMovingOrSizing then self:StopMovingOrSizing() end
-		if opts.dontSaveLayout or opts.resizable then
-			if self.SetUserPlaced then self:SetUserPlaced(false) end
+	local dragOpts = {
+		canDrag = function(win)
+			if type(opts.canDrag) == "function" then
+				return opts.canDrag(win)
+			end
+			return true
+		end,
+		onDragStart = function(win)
+			if type(opts.onDragStart) == "function" then
+				opts.onDragStart(win)
+			end
+		end,
+	}
+	f._mmDragOpts = dragOpts
+	f._mmCanDrag = dragOpts.canDrag
+	f._mmOnDragStart = dragOpts.onDragStart
+	local function startDrag()
+		if f._mmCombatSafeDrag and _G.InCombatLockdown and _G.InCombatLockdown() then return end
+		if dragOpts.canDrag(f) == false then return end
+		dragOpts.onDragStart(f)
+		if ns.Window and ns.Window.DetachToUIParent then ns.Window.DetachToUIParent(f) end
+		if f.StartMoving then f:StartMoving() end
+	end
+	local function finishDrag()
+		if f.StopMovingOrSizing then f:StopMovingOrSizing() end
+		if opts.dontSaveLayout or opts.resizable or opts.positionKey then
+			if f.SetUserPlaced then f:SetUserPlaced(false) end
+		end
+		local locked = (opts.positionKey and ns.Window and ns.Window.GetMode and ns.Window.GetMode(opts.positionKey, opts.defaultMode) == "lock")
+		if not locked and opts.positionKey and ns.Window and ns.Window.SavePosition then
+			ns.Window.SavePosition(f, opts.positionKey)
+		end
+		if opts.onDragStop then
+			opts.onDragStop(f)
 		end
 		if opts.onMove then
-			local pt, _, relPt, x, y = self:GetPoint(1)
+			local pt, _, relPt, x, y = f:GetPoint(1)
 			opts.onMove(pt, relPt, x, y)
 		end
-	end)
+	end
+	if ns.Window and ns.Window.MakeDragHandle then
+		ns.Window.MakeDragHandle(f, f, finishDrag, dragOpts)
+	else
+		f:RegisterForDrag("LeftButton")
+		f:SetScript("OnDragStart", startDrag)
+		f:SetScript("OnDragStop", finishDrag)
+	end
 	f:Hide()
 	if frameName and UISpecialFrames then
 		tinsert(UISpecialFrames, frameName)
@@ -3995,6 +4033,16 @@ function Theme.CreateFloatingWindow(frameName, title, width, height, opts)
 	hdr:SetPoint("TOPLEFT", 2, -2)
 	hdr:SetPoint("TOPRIGHT", -2, -2)
 	hdr:SetHeight(opts.headerHeight or (compactChrome and 38 or 42))
+	if ns.Window and ns.Window.MakeDragHandle then
+		ns.Window.MakeDragHandle(hdr, f, finishDrag, dragOpts)
+	else
+		if hdr.EnableMouse then hdr:EnableMouse(true) end
+		if hdr.RegisterForDrag then hdr:RegisterForDrag("LeftButton") end
+		if hdr.SetScript then
+			hdr:SetScript("OnDragStart", startDrag)
+			hdr:SetScript("OnDragStop", finishDrag)
+		end
+	end
 	local function syncHdrTileCoords(fallbackW, fallbackH)
 		if not (hdrSkinTile and wantWarcraft and Theme.IsCustomSkin()) then return end
 		local w = (hdr.GetWidth and hdr:GetWidth()) or 0
@@ -4207,6 +4255,10 @@ function Theme.CreateFloatingWindow(frameName, title, width, height, opts)
 			local ch = (f.GetHeight and f:GetHeight()) or defaultH
 			if warcraftChrome and Theme.IsCustomSkin() then warcraftChrome:Layout() end
 			if opts.onResize then opts.onResize(cw, ch, true) end
+			if opts.positionKey and ns.Window and ns.Window.SavePosition and ns.Window.HasSavedPosition
+				and ns.Window.HasSavedPosition(opts.positionKey) then
+				ns.Window.SavePosition(f, opts.positionKey)
+			end
 		end
 
 		resizeGrip:SetScript("OnMouseDown", function(self, btn)
@@ -4289,6 +4341,16 @@ function Theme.CreateFloatingWindow(frameName, title, width, height, opts)
 		self._mmBaseTitle = tostring(txt or "Shopping List")
 		local isCustom = wantWarcraft and Theme.IsCustomSkin()
 		titleFs:SetText((customTitleUpper and isCustom) and string.upper(self._mmBaseTitle) or self._mmBaseTitle)
+	end
+
+	function f:ApplySavedOrDefaultPosition(defaultFn)
+		if ns.Window and ns.Window.ApplyPosition then
+			return ns.Window.ApplyPosition(self, self._mmPositionKey, defaultFn)
+		end
+		if type(defaultFn) == "function" then
+			defaultFn(self)
+		end
+		return "default"
 	end
 
 	local function paintModal(_, pal)
@@ -4420,25 +4482,26 @@ function Theme.CreateFloatingWindow(frameName, title, width, height, opts)
 		end
 
 		titleFs:ClearAllPoints()
+		local titleRight = f._mmTitleRightAnchor or closeBtn
 		if hdrSubFs then
 			titleFs:SetPoint("TOPLEFT", hdr, "TOPLEFT", titleLeft, -8)
 			if opts.titleMaxWidth then
 				titleFs:SetWidth(opts.titleMaxWidth)
 			else
-				titleFs:SetPoint("RIGHT", closeBtn, "LEFT", -8, 0)
+				titleFs:SetPoint("RIGHT", titleRight, "LEFT", -8, 0)
 			end
 			hdrSubFs:ClearAllPoints()
 			hdrSubFs:SetPoint("TOPLEFT", titleFs, "BOTTOMLEFT", 0, -2)
 			if opts.titleMaxWidth then
 				hdrSubFs:SetWidth(opts.titleMaxWidth)
 			else
-				hdrSubFs:SetPoint("RIGHT", closeBtn, "LEFT", -8, 0)
+				hdrSubFs:SetPoint("RIGHT", titleRight, "LEFT", -8, 0)
 			end
 			local subCol = isCustom and (pal.accentGreen or pal.textSecondary) or (pal.textSecondary or pal.textMuted)
 			hdrSubFs:SetTextColor(subCol[1], subCol[2], subCol[3], 1)
 		else
 			titleFs:SetPoint("LEFT", hdr, "LEFT", titleLeft, 0)
-			titleFs:SetPoint("RIGHT", closeBtn, "LEFT", -8, 0)
+			titleFs:SetPoint("RIGHT", titleRight, "LEFT", -8, 0)
 		end
 
 		body:ClearAllPoints()

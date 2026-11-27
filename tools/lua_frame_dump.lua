@@ -393,7 +393,7 @@ local function makeWidget(frameType, name, parent, template)
 		_frameLevel = nil,
 		_drawLayer = "ARTWORK",
 		_subLevel = 0,
-		_clipsChildren = false,
+		_clipsChildren = (frameType == "ScrollFrame"),
 		_ignoreParentAlpha = false,
 		_ignoreParentScale = false,
 		_points = {},
@@ -2844,7 +2844,7 @@ if audit then
 	local auditTabs = {
 		"vendor_crafter", "writs", "outliers", "crates", "forged", "rep", "calc_favor", "calc_rep",
 		"prof_shop", "prof_browse", "an_ledger", "an_items", "an_portfolio", "an_invest", "an_writs",
-		"console_overview", "console_database", "console_perf", "console_setup", "console_settings", "console_ui", "console_data", "bags",
+		"console_overview", "console_database", "console_perf", "console_setup2", "console_settings", "console_ui", "console_data", "bags",
 	}
 	local activeChar = ns.activeChar
 	local priorWritCooldowns = activeChar and activeChar.writCooldowns
@@ -3727,6 +3727,391 @@ if not cartAhOnly then
 	end
 	skinScene("overview-goblin-bright", "goblin", nil, "dashboard", { brightBackdrop = true })
 
+	-- Rich synthetic seeder for Bloomberg TV Multi-Pane Workstation Dashboard scenes
+	local function withBloombergSeed(fn)
+		local Store = ns.Analytics and ns.Analytics.Store
+		local WL = ns.Watchlist
+		local db = _G.MerchantMasterDB
+		local econ = ns.CurrentEconomyInfo().effectiveKey
+		local priorSimTime = simTime
+		local priorLedgerDB = _G.MerchantMasterLedgerDB
+		local priorStoreDB = Store and Store.db
+		local priorDashMode = db.dashboardMode
+		local priorDashRange = db.dashboardBriefRange
+		local priorAhDaily = db.ahDaily
+		local priorAhSnaps = db.ahSnapshots
+		local priorLivePrices = db.ahPrices and db.ahPrices[econ]
+		local priorScannedAt = priorLivePrices and priorLivePrices._scannedAt
+		local priorWL = db.watchlist and _G.CopyTable(db.watchlist) or nil
+		local priorSnapRaw, priorSnapParsed, priorSnapHeat = ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache
+		local savedPrices = {}
+
+		local morningTs = priorSimTime + 7 * 3600
+		simTime = morningTs
+		local curDay = math.floor(morningTs / 86400)
+
+		-- Market items with rich 7d price + supply volume curves.
+		-- Green Lens (12622 / 10504): historical craft avg 15g -> live 20g (+33.3%) driven by Wildvine (8153) spike.
+		-- Thick Leather (4304): bought x400 at 8s avg -> now 6s (-25%) with high supply (140 listed) -> Slide 1 vol_price!
+		local bloomItems = {
+			[4304]  = { cur = 600,    base = 800,    qty = 140,
+				pCurve = { 860, 910, 825, 870, 735, 780, 600 },
+				qCurve = { 62,  74,  92,  84,  118, 108, 140 } }, -- Thick Leather
+			[10504] = { cur = 265000, base = 248000, qty = 7,
+				pCurve = { 236000, 242000, 248000, 251000, 255000, 260000, 265000 },
+				qCurve = { 9, 8, 8, 7, 6, 7, 7 } },              -- Green Lens
+			[1529]  = { cur = 8000,   base = 8000,   qty = 28,
+				pCurve = { 7800, 8100, 7950, 8050, 8000, 7950, 8000 },
+				qCurve = { 24, 26, 25, 29, 27, 26, 28 } },       -- Jade
+			[7909]  = { cur = 12000,  base = 12000,  qty = 22,
+				pCurve = { 11800, 12100, 11900, 12200, 12000, 11950, 12000 },
+				qCurve = { 19, 21, 20, 24, 22, 21, 22 } },       -- Aquamarine
+			[10286] = { cur = 16000,  base = 16000,  qty = 19,
+				pCurve = { 15600, 15900, 16100, 16000, 15800, 16200, 16000 },
+				qCurve = { 16, 18, 20, 17, 19, 18, 19 } },       -- Heart of the Wild
+			[8153]  = { cur = 51600,  base = 25800,  qty = 14,
+				pCurve = { 24800, 25200, 26000, 27400, 34500, 44200, 51600 },
+				qCurve = { 38, 35, 32, 28, 22, 17, 14 } },       -- Wildvine (top cost driver +100%)
+			[13512] = { cur = 685000, base = 610000, qty = 9,
+				pCurve = { 588000, 602000, 610000, 624000, 646000, 668000, 685000 },
+				qCurve = { 15, 14, 13, 12, 11, 10, 9 } },        -- Flask of Supreme Power
+			[13454] = { cur = 79500,  base = 74000,  qty = 18,
+				pCurve = { 72000, 73500, 74500, 76000, 77200, 78400, 79500 },
+				qCurve = { 22, 21, 20, 19, 19, 18, 18 } },       -- Greater Arcane Elixir
+			[13452] = { cur = 69000,  base = 64000,  qty = 24,
+				pCurve = { 62000, 63200, 64100, 65400, 66800, 67900, 69000 },
+				qCurve = { 30, 28, 27, 26, 25, 24, 24 } },       -- Elixir of the Mongoose
+			[13463] = { cur = 4200,   base = 5200,   qty = 64,
+				pCurve = { 5200, 5480, 5040, 5260, 4680, 4860, 4200 },
+				qCurve = { 34, 38, 42, 46, 54, 58, 64 } },       -- Dreamfoil
+			[13465] = { cur = 6800,   base = 8200,   qty = 42,
+				pCurve = { 8400, 8250, 8100, 7850, 7450, 7100, 6800 },
+				qCurve = { 22, 25, 28, 32, 36, 39, 42 } },       -- Mountain Silversage
+			[13464] = { cur = 3100,   base = 3800,   qty = 48,
+				pCurve = { 3950, 3850, 3750, 3600, 3420, 3260, 3100 },
+				qCurve = { 26, 30, 34, 38, 42, 45, 48 } },       -- Golden Sansam
+			[8925]  = { cur = 500,    base = 500,    qty = 100,
+				pCurve = { 500, 500, 500, 500, 500, 500, 500 },
+				qCurve = { 90, 95, 92, 98, 96, 99, 100 } },      -- Crystal Vial
+		}
+
+		db.ahPrices = db.ahPrices or {}
+		db.ahPrices[econ] = db.ahPrices[econ] or {}
+		db.ahPrices[econ]._scannedAt = morningTs - 240
+		local dailyCopy, snapsCopy = {}, {}
+		local lParts, hParts, mParts = {}, {}, {}
+		local hourOffsets = { -21, -18, -15, -12, -9, -6, -3, 0 }
+		for id, spec in pairs(bloomItems) do
+			savedPrices[id] = db.ahPrices[econ][id]
+			db.ahPrices[econ][id] = { price = spec.cur, qty = spec.qty, at = morningTs - 240 }
+			local dRows = {}
+			for i = 1, 7 do
+				local dOff = 7 - i
+				local curP = spec.pCurve[i]
+				local prevP = spec.pCurve[math.max(1, i - 1)]
+				local openP = (i == 1) and math.floor(curP * 1.04 + 0.5) or prevP
+				local loP = math.floor(math.min(openP, curP) * (0.94 - (i % 2) * 0.02) + 0.5)
+				local hiP = math.floor(math.max(openP, curP) * (1.05 + ((i + 1) % 2) * 0.02) + 0.5)
+				dRows[i] = {
+					d = curDay - dOff,
+					openP = openP,
+					minP = loP,
+					maxP = hiP,
+					lastP = curP,
+					lastQ = spec.qCurve[i],
+					at = (dOff == 0) and (morningTs - 240) or (morningTs - dOff * 86400),
+				}
+			end
+			dailyCopy[id] = dRows
+			local hRows = {}
+			for i, hOff in ipairs(hourOffsets) do
+				local ts = (hOff == 0) and (morningTs - 240) or (morningTs + hOff * 3600)
+				local p = (hOff == 0) and spec.cur or math.floor(spec.base * (0.92 + i * 0.015) + 0.5)
+				local q = (hOff == 0) and spec.qty or math.max(4, math.floor(spec.qty * (0.68 + (i % 4) * 0.16) + 0.5))
+				hRows[#hRows + 1] = ts
+				hRows[#hRows + 1] = p
+				hRows[#hRows + 1] = q
+			end
+			snapsCopy[id] = hRows
+
+			local l, h, m = buildBaronSnapPayloads(id, spec.base, spec.qty, morningTs)
+			lParts[#lParts + 1] = l
+			hParts[#hParts + 1] = h
+			mParts[#mParts + 1] = m
+		end
+		db.ahDaily = { [econ] = dailyCopy }
+		db.ahSnapshots = { [econ] = snapsCopy }
+
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = {}, {}, {}
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("META", econ,
+			string.format([[return {v=1,updatedAt=%d,source="blizzard",windowDays=30,itemCount=%d,heatmapCount=%d}]],
+				morningTs - 600, #lParts, #lParts))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("LATEST", econ, table.concat(lParts, ";"))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("HEAT24", econ, table.concat(hParts, ";"))
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("HEAT7X24", econ, table.concat(mParts, ";"))
+
+		db.dashboardMode = "bloomberg"
+		db.dashboardBriefRange = "7d"
+
+		-- Watchlist favorites (mix of recipes + reagents/items)
+		if WL and WL.Clear then
+			WL.Clear()
+			WL.Add({ kind = "recipe", spellID = 12622, itemID = 10504, name = "Green Lens" })
+			WL.Add({ kind = "item", itemID = 4304, name = "Thick Leather" })
+			WL.Add({ kind = "item", itemID = 13512, name = "Flask of Supreme Power" })
+			WL.Add({ kind = "item", itemID = 13454, name = "Greater Arcane Elixir" })
+			WL.Add({ kind = "item", itemID = 13452, name = "Elixir of the Mongoose" })
+			WL.Add({ kind = "item", itemID = 13463, name = "Dreamfoil" })
+		end
+
+		-- Fresh synthetic ledger: 250x Green Lens CRAFT, 400x Thick Leather AH_BUY, 7d AH_SELL & wealth snapshots
+		_G.MerchantMasterLedgerDB = {}
+		if Store and Store.Init then Store.Init() end
+		local charKey = Store and select(1, Store.CurrentCharAndEcon()) or "Normal-Horde-Forever-Grommash"
+
+		-- 250 crafts Green Lens at 15g avg craft cost -> live craft cost 20g (+33.3%, top driver Wildvine)
+		for i = 1, 10 do
+			Store.Append({
+				time = morningTs - (i + 1) * 3600,
+				type = "CRAFT",
+				char = charKey,
+				econ = econ,
+				itemID = 10504,
+				qty = 25,
+				unit = 150000,
+				total = 0,
+				cogs = 25 * 150000,
+				where = "Orgrimmar",
+				skipRecon = true,
+				extra = { spellID = 12622, name = "Green Lens" },
+			})
+		end
+		-- Additional crafts for cost drop + active variety
+		Store.Append({
+			time = morningTs - 4 * 3600,
+			type = "CRAFT",
+			char = charKey,
+			econ = econ,
+			itemID = 13454,
+			qty = 24,
+			unit = 42000,
+			total = 0,
+			cogs = 24 * 42000,
+			where = "Orgrimmar",
+			skipRecon = true,
+			extra = { spellID = 17573, name = "Greater Arcane Elixir" },
+		})
+		Store.Append({
+			time = morningTs - 5 * 3600,
+			type = "CRAFT",
+			char = charKey,
+			econ = econ,
+			itemID = 13452,
+			qty = 18,
+			unit = 36000,
+			total = 0,
+			cogs = 18 * 36000,
+			where = "Orgrimmar",
+			skipRecon = true,
+			extra = { spellID = 17571, name = "Elixir of the Mongoose" },
+		})
+
+		-- 400x Thick Leather AH_BUY at 8s avg (drives Slide 1 Vol vs Min Price + Prime Buy Zone headline)
+		for i = 1, 4 do
+			Store.Append({
+				time = morningTs - (i + 2) * 3600,
+				type = "AH_BUY",
+				char = charKey,
+				econ = econ,
+				itemID = 4304,
+				qty = 100,
+				unit = 800,
+				total = -80000,
+				where = "Orgrimmar",
+				skipRecon = true,
+				extra = { name = "Thick Leather" },
+			})
+		end
+		-- 120x Dreamfoil AH_BUY at 52s avg
+		Store.Append({
+			time = morningTs - 6 * 3600,
+			type = "AH_BUY",
+			char = charKey,
+			econ = econ,
+			itemID = 13463,
+			qty = 120,
+			unit = 5200,
+			total = -624000,
+			where = "Orgrimmar",
+			skipRecon = true,
+			extra = { name = "Dreamfoil" },
+		})
+		-- 60x Mountain Silversage AH_BUY at 82s avg
+		Store.Append({
+			time = morningTs - 8 * 3600,
+			type = "AH_BUY",
+			char = charKey,
+			econ = econ,
+			itemID = 13465,
+			qty = 60,
+			unit = 8200,
+			total = -492000,
+			where = "Orgrimmar",
+			skipRecon = true,
+			extra = { name = "Mountain Silversage" },
+		})
+
+		-- 7 days of AH_SELL + daily/hourly wealth snapshots
+		local runGold = 15200000
+		local dailySales = {
+			{ id = 13512, name = "Flask of Supreme Power", gross = 685000, cogs = 490000, qty = 2 },
+			{ id = 10504, name = "Green Lens",             gross = 265000, cogs = 150000, qty = 3 },
+			{ id = 13454, name = "Greater Arcane Elixir",  gross = 79500,  cogs = 42000,  qty = 6 },
+			{ id = 13452, name = "Elixir of the Mongoose", gross = 69000,  cogs = 36000,  qty = 8 },
+		}
+		for dOff = 6, 1, -1 do
+			local baseTs = morningTs - dOff * 86400 - 3600
+			local dayProfit = 0
+			for idx, it in ipairs(dailySales) do
+				local g = it.gross * it.qty
+				local f = math.floor(g * 0.05)
+				local c = it.cogs * it.qty
+				dayProfit = dayProfit + (g - f - c)
+				Store.Append({
+					time = baseTs - idx * 1200,
+					type = "AH_SELL",
+					char = charKey,
+					econ = econ,
+					itemID = it.id,
+					qty = it.qty,
+					unit = it.gross,
+					total = g - f,
+					cogs = c,
+					where = "Orgrimmar",
+					skipRecon = true,
+					extra = { name = it.name, gross = g, fee = f },
+				})
+			end
+			runGold = runGold + dayProfit
+			Store.SaveSnapshot(charKey, Store.DayKey(baseTs), {
+				gold = runGold,
+				items = 4150000 + (7 - dOff) * 85000,
+				listed = 2250000,
+				bags = 1450000,
+				bank = 2700000 + (7 - dOff) * 85000,
+				mail = 0,
+				econ = econ,
+				time = baseTs,
+			})
+		end
+		-- Today's AH sales
+		for idx, it in ipairs(dailySales) do
+			local g = it.gross * it.qty
+			local f = math.floor(g * 0.05)
+			local c = it.cogs * it.qty
+			Store.Append({
+				time = morningTs - idx * 1500,
+				type = "AH_SELL",
+				char = charKey,
+				econ = econ,
+				itemID = it.id,
+				qty = it.qty,
+				unit = it.gross,
+				total = g - f,
+				cogs = c,
+				where = "Orgrimmar",
+				skipRecon = true,
+				extra = { name = it.name, gross = g, fee = f },
+			})
+		end
+		Store.SaveSnapshot(charKey, Store.DayKey(morningTs), {
+			gold = runGold + 1480000,
+			items = 4680000,
+			listed = 2180000,
+			bags = 1520000,
+			bank = 3160000,
+			mail = 0,
+			econ = econ,
+			time = morningTs,
+		})
+		simTime = morningTs
+
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+		if ns.DashboardBloombergModel and ns.DashboardBloombergModel.InvalidateCache then
+			ns.DashboardBloombergModel.InvalidateCache()
+		end
+		if ns.DashboardBrief and ns.DashboardBrief.InvalidateCache then ns.DashboardBrief.InvalidateCache() end
+		if ns.Analytics and ns.Analytics.Model and ns.Analytics.Model.Invalidate then ns.Analytics.Model.Invalidate() end
+
+		local ok, err = pcall(fn)
+
+		simTime = priorSimTime
+		_G.MerchantMasterLedgerDB = priorLedgerDB
+		if Store then Store.db = priorStoreDB end
+		db.dashboardMode = priorDashMode
+		db.dashboardBriefRange = priorDashRange
+		db.ahDaily = priorAhDaily
+		db.ahSnapshots = priorAhSnaps
+		db.watchlist = priorWL
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = priorSnapRaw, priorSnapParsed, priorSnapHeat
+		if priorLivePrices then
+			for id in pairs(bloomItems) do db.ahPrices[econ][id] = savedPrices[id] end
+			db.ahPrices[econ]._scannedAt = priorScannedAt
+		end
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+		if ns.DashboardBloombergModel and ns.DashboardBloombergModel.InvalidateCache then
+			ns.DashboardBloombergModel.InvalidateCache()
+		end
+		if ns.DashboardBrief and ns.DashboardBrief.InvalidateCache then ns.DashboardBrief.InvalidateCache() end
+		if ns.Analytics and ns.Analytics.Model and ns.Analytics.Model.Invalidate then ns.Analytics.Model.Invalidate() end
+		if not ok then error(err, 0) end
+	end
+
+	if not onlyScenes or onlyScenes["bloomberg-goblin"] then
+		withBloombergSeed(function()
+			sizeSkinViewport("goblin")
+			applySkin("goblin")
+			if app.setDashboardMode then app.setDashboardMode("bloomberg") end
+			switchTab("dashboard")
+			if app.ui and app.ui.dashBloombergView then
+				local bl = app.ui.dashBloombergView
+				if bl.SetRange then bl:SetRange("7d", true) end
+				if bl.Refresh then bl:Refresh(true, simTime) end
+			end
+			if app.refreshSkinLayout then app.refreshSkinLayout() end
+			drainTimers(500)
+			flushPendingLayout()
+			if app.ui and app.ui.dashBloombergView and app.ui.dashBloombergView.Refresh then
+				app.ui.dashBloombergView:Refresh(true, simTime)
+			end
+			if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+			dumpScene("bloomberg-goblin")
+		end)
+	end
+
+	if not onlyScenes or onlyScenes["bloomberg-glass"] then
+		withBloombergSeed(function()
+			sizeSkinViewport("standard")
+			applySkin("standard")
+			setThemeMode("dark")
+			if app.setDashboardMode then app.setDashboardMode("bloomberg") end
+			switchTab("dashboard")
+			if app.ui and app.ui.dashBloombergView then
+				local bl = app.ui.dashBloombergView
+				if bl.SetRange then bl:SetRange("7d", true) end
+				if bl.Refresh then bl:Refresh(true, simTime) end
+			end
+			if app.refreshSkinLayout then app.refreshSkinLayout() end
+			drainTimers(500)
+			flushPendingLayout()
+			if app.ui and app.ui.dashBloombergView and app.ui.dashBloombergView.Refresh then
+				app.ui.dashBloombergView:Refresh(true, simTime)
+			end
+			if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+			dumpScene("bloomberg-glass")
+		end)
+	end
+
 	-- options-goblin: the Interface > AddOns options page shown on its own with the UI Theme dropdown open.
 	if not onlyScenes or onlyScenes["options-goblin"] then
 	do
@@ -3873,6 +4258,27 @@ if not cartAhOnly then
 		flushPendingLayout()
 		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
 		dumpScene("deep-analysis-goblin")
+
+		if onlyScenes and onlyScenes["deep-analysis-dark"] then
+			sizeSkinViewport("standard")
+			applySkin("standard")
+			setThemeMode("dark")
+			if ns.DeepAnalysis and ns.DeepAnalysis.Refresh then ns.DeepAnalysis.Refresh() end
+			drainTimers(500)
+			flushPendingLayout()
+			if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+			dumpScene("deep-analysis-dark")
+		end
+		if onlyScenes and onlyScenes["deep-analysis-light"] then
+			sizeSkinViewport("standard")
+			applySkin("standard")
+			setThemeMode("light")
+			if ns.DeepAnalysis and ns.DeepAnalysis.Refresh then ns.DeepAnalysis.Refresh() end
+			drainTimers(500)
+			flushPendingLayout()
+			if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+			dumpScene("deep-analysis-light")
+		end
 
 		if app.returnFromDeepAnalysis then app.returnFromDeepAnalysis() end
 		_G.MerchantMasterLedgerDB = priorLedgerDB
@@ -4295,9 +4701,9 @@ if not cartAhOnly then
 	end
 	end
 
-	-- sell-helper-goblin (14-baron-sell-helper.png): Standalone Auction House "MM Sell" Tab
-	if not onlyScenes or onlyScenes["sell-helper-goblin"] then
-	do
+	-- sell-helper-goblin (14-baron-sell-helper.png) and mmsell-goblin: Standalone Auction House "MM Sell" Tab
+	local function dumpSellHelperScene(sceneName, withNotice)
+		if onlyScenes and not onlyScenes[sceneName] then return end
 		local AHSell = assert(ns.AHSellTab, "ns.AHSellTab missing")
 		local OF = assert(app.orderFlow, "app.orderFlow missing")
 		local priorPanelShown = app.panel:IsShown()
@@ -4359,7 +4765,7 @@ if not cartAhOnly then
 		_G.GetItemInfo = _G.C_Item.GetItemInfo
 
 		-- Build realistic full AuctionHouseFrame host with native tabs + MM Sell selected
-		local hostAH = makeWidget("Frame", "AuctionHouseFramePreviewSell", _G.UIParent)
+		local hostAH = makeWidget("Frame", "AuctionHouseFramePreviewSell_" .. sceneName, _G.UIParent)
 		hostAH:SetSize(1080, 660)
 		hostAH:ClearAllPoints()
 		hostAH:SetPoint("CENTER", _G.UIParent, "CENTER", 0, 12)
@@ -4375,7 +4781,7 @@ if not cartAhOnly then
 		hostAH.Tabs = {}
 		local tabNames = { "Buy", "Sell", "Auctions" }
 		for i, lbl in ipairs(tabNames) do
-			local tb = makeWidget("Button", "PreviewAHTab" .. i, hostAH)
+			local tb = makeWidget("Button", "PreviewAHTab_" .. sceneName .. "_" .. i, hostAH)
 			tb:SetSize(84, 26)
 			if i == 1 then
 				tb:SetPoint("TOPLEFT", hostAH, "BOTTOMLEFT", 14, 0)
@@ -4396,8 +4802,15 @@ if not cartAhOnly then
 
 		-- Seed OrderFlow Sell stage queue + live competitor listings on active item
 		local st = OF.GetState()
+		local priorNotice, priorNoticeKind = st.notice, st.noticeKind
 		st.env.atAH = true
-		st.notice = nil
+		if withNotice then
+			st.notice = "Added [Elixir of the Mongoose] x12 to Sell Queue - undercut 1c ready"
+			st.noticeKind = "positive"
+		else
+			st.notice = nil
+			st.noticeKind = nil
+		end
 		local sl = st.stages.sell
 		sl.duration = 3
 		sl.undercutMode = "1c"
@@ -4457,24 +4870,30 @@ if not cartAhOnly then
 				tfs:SetTextColor(1.0, 0.94, 0.72, 1)
 			end
 		end
+		if app.ensureAuctionHouseMMTab then app.ensureAuctionHouseMMTab() end
 		AHSell.Render()
 		drainTimers(500)
 		flushPendingLayout()
 		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
-		dumpScene("sell-helper-goblin", hostAH)
+		dumpScene(sceneName, hostAH)
 
 		-- Clean up
 		AHSell.HideTab()
+		if app.ui and app.ui.ahMMTab then app.ui.ahMMTab:Hide() end
 		hostAH:Hide()
 		_G.AuctionHouseFrame = priorAhf
 		_G.C_Container = priorContainer
 		_G.NUM_BAG_SLOTS = priorNumBags
 		_G.C_Item.GetItemInfo = priorGetItemInfo
 		_G.GetItemInfo = priorGetItemInfo
+		st.notice = priorNotice
+		st.noticeKind = priorNoticeKind
 		sl.items = {}
 		if priorPanelShown then app.panel:Show() end
 	end
-	end
+
+	dumpSellHelperScene("sell-helper-goblin", false)
+	dumpSellHelperScene("mmsell-goblin", true)
 
 	-- sniper-goblin (16-baron-sniper.png): Gap Sniper with multi-tier snapshot order-book depth deals & price ladder
 	if not onlyScenes or onlyScenes["sniper-goblin"] then
@@ -4568,7 +4987,7 @@ if not cartAhOnly then
 	end
 	end
 
-	-- console-snapshots-goblin (17-baron-console-snapshots.png): Console -> Snapshot Settings split Windows PowerShell + Linux/Steam Deck view
+	-- console-snapshots-goblin (17-baron-console-snapshots.png): Console -> Snapshot Sync
 	if not onlyScenes or onlyScenes["console-snapshots-goblin"] then
 	do
 		local priorSnapRaw, priorSnapParsed, priorSnapHeat = ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache
@@ -4577,7 +4996,7 @@ if not cartAhOnly then
 
 		sizeSkinViewport("goblin")
 		applySkin("goblin")
-		switchTab("console_setup")
+		switchTab("console_setup2")
 		if app.refreshSkinLayout then app.refreshSkinLayout() end
 		drainTimers(500)
 		flushPendingLayout()
@@ -4586,6 +5005,61 @@ if not cartAhOnly then
 
 		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = priorSnapRaw, priorSnapParsed, priorSnapHeat
 		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+	end
+	end
+
+	-- console-snapshots2-goblin: Console -> Snapshot Settings 2 (GitHub Auto-Sync V2)
+	if not onlyScenes or onlyScenes["console-snapshots2-goblin"] then
+	do
+		local priorSnapRaw, priorSnapParsed, priorSnapHeat = ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = {}, {}, {}
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+
+		sizeSkinViewport("goblin")
+		applySkin("goblin")
+		switchTab("console_setup2")
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		drainTimers(500)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("console-snapshots2-goblin")
+
+		ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache = priorSnapRaw, priorSnapParsed, priorSnapHeat
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+	end
+	end
+
+	-- console-tooltips-goblin: Console -> Tooltip Setup with Green Lens live Example Tooltip preview
+	if not onlyScenes or onlyScenes["console-tooltips-goblin"] then
+	do
+		local db = _G.MerchantMasterDB or {}
+		local savedKeys = {
+			"ttEnabled", "ttPriceFormat", "ttModifier",
+			"ttMarketEnabled", "ttMinBuyout", "ttMarketValue", "ttListedCount", "ttVendorSell",
+			"tooltipCraftCost", "ttCraftProfit", "tooltipDEValue", "ttDEArcaneSalvager", "tooltipDEBreakdown", "crateTooltips",
+			"anTooltips", "ttAccSell", "ttAccBasis", "ttAccProfit", "ttAccLastSold", "ttAccSaleRate", "ttAccSlowing", "ttHideEmpty",
+			"anTooltipInventory", "ttInvByChar", "ttInvHideZero", "ttInvCompact",
+		}
+		local priorTT = {}
+		for _, k in ipairs(savedKeys) do priorTT[k] = db[k] end
+
+		if ns.TooltipPrefs and type(ns.TooltipPrefs.ApplyPreset) == "function" then
+			ns.TooltipPrefs.ApplyPreset("reset")
+		end
+
+		sizeSkinViewport("goblin")
+		applySkin("goblin")
+		switchTab("console_tooltips")
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		drainTimers(500)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("console-tooltips-goblin")
+
+		for _, k in ipairs(savedKeys) do db[k] = priorTT[k] end
+		if ns.TooltipPrefs and type(ns.TooltipPrefs.InvalidateAll) == "function" then
+			ns.TooltipPrefs.InvalidateAll()
+		end
 	end
 	end
 

@@ -2862,6 +2862,8 @@ do
         crates = "Crates",
         forged = "Forged",
         rep = "Reputation",
+        all_items = "All Items",
+        watchlist = "Watchlist",
         calc = "Calculator",
         calc_favor = "Favor Calc",
         calc_rep = "Rep Calc",
@@ -2883,11 +2885,26 @@ do
         data = nil,
         window = "7d",
         scrollOffset = 0,
+        lastDrillSection = nil,
+        sectionAnchorY = {},
+        studioCards = {},
         viewportW = 1060,
         viewportH = 620,
         contentH = 920,
         reagentRows = {},
         reagentUsedCount = 0,
+        hasCraftBreakdown = false,
+        craftSectionActive = false,
+        craftSourceKind = nil,
+        craftSourceText = nil,
+        usedInRows = {},
+        usedInShownCount = 0,
+        usedInTotalCount = 0,
+        usedInExpanded = false,
+        usedInTargetItemID = nil,
+        _recipeIndexCount = 0,
+        _recipesByOutput = nil,
+        _usedInByItem = nil,
         vcRow = nil,
         vcCapRows = {},
         vcCapUsed = 0,
@@ -2934,6 +2951,14 @@ do
             if type(p) == "table" then return p end
         end
         return getPalette()
+    end
+
+    local function daLinkColor(pal)
+        local T = daTheme()
+        if (pal and pal.mode ~= "light") and (T and T.IsCustomSkin and T.IsCustomSkin()) then
+            return { 0.42, 0.84, 1.00, 1.0 }
+        end
+        return (pal and (pal.textBlue or pal.accentBlue or pal.text)) or { 0.42, 0.84, 1.00, 1.0 }
     end
 
     local function daHex(pal, key, fallbackKey)
@@ -3001,15 +3026,47 @@ do
         return s:sub(1, math.max(1, maxLen - 3)) .. "..."
     end
 
-    local function makeCard(parent, kind, fillKey, strokeKey)
+    local function makeCard(parent, kind, fillKey, strokeKey, accentKey)
         local f = CreateFrame("Frame", nil, parent)
         local T = daTheme()
+        f._daFillKey = fillKey or "cardBg"
+        f._daAccentKey = accentKey
         if T and T.NineApple then
             f._daSurf = T.NineApple(f, kind or "glass_r10", fillKey or "cardBg", strokeKey or "border", { noSpecular = true })
         else
             local pal = daPal()
             applySurface(f, kind or "glass_r10", pal[fillKey or "cardBg"] or pal.cardBg, pal[strokeKey or "border"] or pal.border)
         end
+        local studioBg = f:CreateTexture(nil, "BACKGROUND", nil, 2)
+        studioBg:SetPoint("TOPLEFT", 1, -1)
+        studioBg:SetPoint("BOTTOMRIGHT", -1, 1)
+        studioBg:Hide()
+        f._daStudioBg = studioBg
+
+        local topEdge = f:CreateTexture(nil, "BORDER", nil, 3)
+        topEdge:SetPoint("TOPLEFT", 1, -1)
+        topEdge:SetPoint("TOPRIGHT", -1, -1)
+        topEdge:SetHeight(2)
+        topEdge:Hide()
+        f._daTopEdge = topEdge
+
+        local edges = {}
+        for _, side in ipairs({ "top", "bottom", "left", "right" }) do
+            local e = f:CreateTexture(nil, "BORDER", nil, 2)
+            if side == "top" then
+                e:SetPoint("TOPLEFT", 0, 0); e:SetPoint("TOPRIGHT", 0, 0); e:SetHeight(1)
+            elseif side == "bottom" then
+                e:SetPoint("BOTTOMLEFT", 0, 0); e:SetPoint("BOTTOMRIGHT", 0, 0); e:SetHeight(1)
+            elseif side == "left" then
+                e:SetPoint("TOPLEFT", 0, 0); e:SetPoint("BOTTOMLEFT", 0, 0); e:SetWidth(1)
+            else
+                e:SetPoint("TOPRIGHT", 0, 0); e:SetPoint("BOTTOMRIGHT", 0, 0); e:SetWidth(1)
+            end
+            e:Hide()
+            edges[#edges + 1] = e
+        end
+        f._daBorderEdges = edges
+        state.studioCards[#state.studioCards + 1] = f
         return f
     end
 
@@ -3108,18 +3165,250 @@ do
         return md.demandSource or md.source or nil
     end
 
+    local function paintMutedFs(fs, color, mutedFlag, alphaFactor)
+        if not fs then return end
+        local a = mutedFlag and (alphaFactor or 0.60) or (color and color[4] or 1)
+        if color then
+            setTextColor(fs, { color[1], color[2], color[3], (color[4] or 1) * (mutedFlag and (alphaFactor or 0.60) or 1) })
+        end
+        if fs.SetAlpha then
+            fs:SetAlpha(mutedFlag and (alphaFactor or 0.60) or 1.0)
+        end
+    end
+
+    local function formatProfLabel(profKey)
+        if not profKey or profKey == "" then return nil end
+        local key = tostring(profKey)
+        local h = H() or host
+        if h and h.PROF_LABELS and h.PROF_LABELS[key] then
+            return tostring(h.PROF_LABELS[key])
+        end
+        if h and h.PROF_META and h.PROF_META[key] and h.PROF_META[key].label then
+            return tostring(h.PROF_META[key].label)
+        end
+        local formatted = key:gsub("_", " "):gsub("(%a)([%w']*)", function(a, b)
+            return a:upper() .. b:lower()
+        end)
+        return formatted
+    end
+
+    local function ensureRecipeIndexes()
+        local h = H() or host
+        local recs = (h and h.RECIPES) or {}
+        local count = #recs
+        if state._recipesByOutput and state._usedInByItem and state._recipeIndexCount == count then
+            return state._recipesByOutput, state._usedInByItem
+        end
+        local byOut, usedBy = {}, {}
+        for _, rec in ipairs(recs) do
+            local outID = tonumber(rec.outputItemID)
+            if outID and outID > 0 and type(rec.reagents) == "table" and #rec.reagents > 0 then
+                local list = byOut[outID]
+                if not list then list = {}; byOut[outID] = list end
+                list[#list + 1] = rec
+            end
+            local reqQtyByID = {}
+            for _, rg in ipairs(rec.reagents or {}) do
+                local rid = tonumber(rg.itemID or rg.id or rg[1])
+                local rqty = tonumber(rg.qty or rg[2]) or 1
+                if rid and rid > 0 and rid ~= outID and rqty > 0 then
+                    reqQtyByID[rid] = (reqQtyByID[rid] or 0) + rqty
+                end
+            end
+            for rid, q in pairs(reqQtyByID) do
+                local uList = usedBy[rid]
+                if not uList then uList = {}; usedBy[rid] = uList end
+                uList[#uList + 1] = { recipe = rec, qty = q }
+            end
+        end
+        state._recipeIndexCount = count
+        state._recipesByOutput = byOut
+        state._usedInByItem = usedBy
+        return byOut, usedBy
+    end
+
+    local function chooseBestCraftRecipe(itemID, target)
+        local r = target and target.row or nil
+        local rec = (target and target.recipe) or (r and r.recipe) or nil
+        if type(rec) == "table" and type(rec.reagents) == "table" and #rec.reagents > 0 then
+            return rec
+        end
+        if not itemID or itemID <= 0 then return nil end
+        local byOut = ensureRecipeIndexes()
+        local list = byOut and byOut[itemID]
+        if not list or #list == 0 then return nil end
+        local best = nil
+        for _, cand in ipairs(list) do
+            if not best then
+                best = cand
+            else
+                local aCd = (cand.cd ~= nil and cand.cd ~= false and cand.cd ~= 0) and 1 or 0
+                local bCd = (best.cd ~= nil and best.cd ~= false and best.cd ~= 0) and 1 or 0
+                if aCd ~= bCd then
+                    if aCd < bCd then best = cand end
+                else
+                    local aSk = tonumber(cand.skill) or 9999
+                    local bSk = tonumber(best.skill) or 9999
+                    if aSk ~= bSk then
+                        if aSk < bSk then best = cand end
+                    elseif (tonumber(cand.spellID) or 999999) < (tonumber(best.spellID) or 999999) then
+                        best = cand
+                    end
+                end
+            end
+        end
+        return best
+    end
+
+    local function classifyNonCraftableSource(itemID, target)
+        if not itemID or itemID <= 0 then
+            return "not_craftable", "Not craftable"
+        end
+        local h = H() or host
+        local r = target and target.row or nil
+        local g = h and h.GATHER_BY_ITEM and h.GATHER_BY_ITEM[itemID] or nil
+        if g then
+            local profLbl = formatProfLabel(g.prof) or "Gather"
+            local sk = tonumber(g.skill)
+            return "drop", "Not craftable  |  Drop (" .. profLbl .. (sk and (" " .. tostring(sk)) or "") .. ")"
+        end
+        local item = h and h.ITEMS and h.ITEMS[itemID] or nil
+        local vBuy = (h and h.VENDOR_REAGENTS and h.VENDOR_REAGENTS[itemID])
+            or (item and tonumber(item.vendorPrice))
+            or (r and tonumber(r.vendorBuy))
+            or (h and h.GetVendorBuyPrice and h.GetVendorBuyPrice(itemID, nil, false))
+        if (vBuy and vBuy > 0) or (r and r.itemType == "vendor") then
+            return "vendor", "Not craftable  |  Vendor"
+                .. ((vBuy and vBuy > 0) and (" (" .. daMoney(vBuy, false) .. ")") or "")
+        end
+        local deMeta = h and h.DE_ITEM_META and h.DE_ITEM_META[itemID] or nil
+        if item or deMeta or (r and (r.itemType == "material" or r.itemType == "scroll" or r.itemType == "turnin" or r.itemType == "gather")) then
+            local sl = (r and type(r.sourceLabel) == "string" and r.sourceLabel ~= "") and stripCodes(r.sourceLabel) or ""
+            if sl ~= "" and sl ~= "-" then
+                if sl:find("Drop", 1, true) then
+                    return "drop", "Not craftable  |  " .. sl
+                end
+                return "drop", "Not craftable  |  Drop (" .. sl .. ")"
+            end
+            return "drop", "Not craftable  |  Drop"
+        end
+        return "not_craftable", "Not craftable"
+    end
+
+    local function collectUsedInEntries(itemID, econKey)
+        if not itemID or itemID <= 0 then return {} end
+        local _, usedBy = ensureRecipeIndexes()
+        local rawList = usedBy and usedBy[itemID]
+        if not rawList or #rawList == 0 then return {} end
+        local h = H() or host
+        local out = {}
+        for _, e in ipairs(rawList) do
+            local rec = e.recipe
+            local oid = tonumber(rec.outputItemID)
+            local rName = rec.name or (oid and h and h.ItemName and h.ItemName(oid)) or "Recipe"
+            local outPrice = (oid and h and h.GetItemMarketPrice and h.GetItemMarketPrice(oid)) or nil
+            if (not outPrice or outPrice <= 0) and oid and h and h.GetFallbackMarketPrice then
+                outPrice = h.GetFallbackMarketPrice(oid)
+            end
+            out[#out + 1] = {
+                recipe = rec,
+                qty = e.qty or 1,
+                outID = oid,
+                name = rName,
+                price = (outPrice and outPrice > 0) and outPrice or nil,
+            }
+        end
+        table.sort(out, function(a, b)
+            local ap = a.price or -1
+            local bp = b.price or -1
+            if ap ~= bp then return ap > bp end
+            if a.qty ~= b.qty then return a.qty > b.qty end
+            return tostring(a.name or "") < tostring(b.name or "")
+        end)
+        return out
+    end
+
+    local function resolveCraftBundle(target, itemID, econKey, win, applyAHCut)
+        local h = H() or host
+        local a = app()
+        local kind = target.kind or "recipe"
+        local r = target.row or {}
+        local rec = target.recipe or r.recipe
+        if kind ~= "recipe" and kind ~= "item" then
+            return nil, nil, nil, nil
+        end
+        local craftRec = (kind == "recipe") and rec or chooseBestCraftRecipe(itemID, target)
+        if not craftRec then
+            return nil, nil, nil, nil
+        end
+        local craftRow = (kind == "recipe" and target.row) or nil
+        local ctx = {}
+        if a and a.getRecipeStatsContext then
+            for k, v in pairs(a.getRecipeStatsContext()) do ctx[k] = v end
+        end
+        for k, v in pairs(target.context or {}) do ctx[k] = v end
+        ctx.kind = "recipe"
+        local priceVer = (h and h.GetPriceDataRevision and h.GetPriceDataRevision()) or (h and h.priceCacheEpoch) or 0
+        if not craftRow or not craftRow.recipe then
+            if h and h.RecipeStats and h.RecipeStats.Get then
+                craftRow = h.RecipeStats.Get(craftRec, ctx)
+            elseif h and h.BuildRecipeRow then
+                craftRow = h.BuildRecipeRow(craftRec, ctx)
+            end
+        elseif craftRow._daPriceVer ~= nil and craftRow._daPriceVer ~= priceVer then
+            local rebuilt = nil
+            if h and h.RecipeStats and h.RecipeStats.Get then
+                rebuilt = h.RecipeStats.Get(craftRec, ctx)
+            elseif h and h.BuildRecipeRow then
+                rebuilt = h.BuildRecipeRow(craftRec, ctx)
+            end
+            if rebuilt then craftRow = rebuilt end
+        end
+        if craftRow then craftRow._daPriceVer = priceVer end
+        if not craftRow or not (h and h.RecipeStats and h.RecipeStats.BuildQuickLook) then
+            return nil, craftRow, craftRec, nil
+        end
+        local cacheKey = tostring(kind) .. "|" .. tostring(itemID or 0) .. "|"
+            .. tostring(craftRec.spellID or 0) .. "|" .. tostring(econKey or "") .. "|"
+            .. tostring(priceVer) .. "|" .. tostring(applyAHCut)
+        local function buildWin(w)
+            local wCtx = {}
+            for k, v in pairs(ctx) do wCtx[k] = v end
+            wCtx.kind = "recipe"
+            wCtx.window = w
+            return h.RecipeStats.BuildQuickLook(craftRow, wCtx)
+        end
+        local q24, q7
+        if state.qlDualCache and state.qlDualCache.key == cacheKey then
+            q24 = state.qlDualCache.ql24
+            q7 = state.qlDualCache.ql7d
+            if win == "24h" and not q24 then q24 = buildWin("24h"); state.qlDualCache.ql24 = q24 end
+            if win ~= "24h" and not q7 then q7 = buildWin("7d"); state.qlDualCache.ql7d = q7 end
+        else
+            q24 = buildWin("24h")
+            q7 = buildWin("7d")
+            state.qlDualCache = { key = cacheKey, ql24 = q24, ql7d = q7 }
+        end
+        local qActive = (win == "24h") and (q24 or q7) or (q7 or q24)
+        return qActive, craftRow, craftRec, { ql24 = q24, ql7d = q7 }
+    end
+
     local function buildItemDeepData(target, itemID, econKey)
         local h = H() or host
         local win = (db().quickLookWindow == "24h") and "24h" or "7d"
-        local livePrice = (h and h.GetItemMarketPrice and h.GetItemMarketPrice(itemID)) or nil
+        local canon = (itemID and h and h.GetCanonicalItemPrice) and h.GetCanonicalItemPrice(itemID, econKey) or nil
+        local livePrice = (canon and canon.price)
+            or (not (canon and canon.isAbsent) and itemID and h and h.GetItemMarketPrice and h.GetItemMarketPrice(itemID))
+            or nil
         local snapPrice, snapRec = nil, nil
         if h and h.QueryLocalSnapshot then
             snapPrice, snapRec = h.QueryLocalSnapshot(itemID, econKey)
         end
-        if not livePrice then livePrice = snapPrice end
+        local val7d = (itemID and h and h.GetItemMarketValue7d and h.GetItemMarketValue7d(itemID, econKey)) or nil
         local vendorSell = (h and h.GetVendorSellPrice and h.GetVendorSellPrice(itemID)) or nil
         local dep24 = (h and h.GetAHListingDeposit and h.GetAHListingDeposit(itemID, 2, 1)) or nil
-        local listed = (h and h.GetNumListed and h.GetNumListed(itemID))
+        local listed = (canon and canon.listed ~= nil and canon.listed)
+            or (h and h.GetNumListed and h.GetNumListed(itemID))
             or (snapRec and (snapRec.numAuctions or snapRec.quantity or snapRec.qty)) or nil
         local md = (h and h.GetMultiSourceDemand and h.GetMultiSourceDemand(itemID, econKey)) or nil
         local salesPerDay = resolveDemandRate(md)
@@ -3165,7 +3454,7 @@ do
         local overviewRows = {
             { key = "sellPrice", label = "Market price", qtyText = "1x", liveValue = livePrice, valueKind = "money", series = outputSeries, lowerIsBetter = false },
             hasSnaps
-                and { key = "snapValue", label = "Snapshot market value", qtyText = "Snap", liveValue = (snapRec and snapRec.marketValue) or (overall and overall.avgPrice) or snapPrice, valueKind = "money", fixed = true }
+                and { key = "snapValue", label = "Snapshot 7d value", qtyText = "7d", liveValue = val7d or (snapRec and snapRec.marketValue) or (overall and overall.avgPrice) or snapPrice, valueKind = "money", fixed = true }
                 or  { key = "liveAvg", label = "Live AH history", qtyText = win, liveValue = outputSeries.last, valueKind = "money", series = outputSeries, lowerIsBetter = false },
             { key = "vendorFloor", label = "Vendor sell floor", qtyText = "Vendor", liveValue = vendorSell, valueKind = "money", fixed = true },
             { key = "deposit24", label = "24h AH deposit", qtyText = "24h", liveValue = dep24, valueKind = "money", fixed = true },
@@ -3309,6 +3598,7 @@ do
         btn:SetScript("OnClick", function(self)
             local a = app()
             if not (a and a.openDeepAnalysis) then return end
+            state.lastDrillSection = "crafting"
             if self.drillRecipe then
                 a.openDeepAnalysis({ kind = "recipe", recipe = self.drillRecipe })
             elseif self.clickable and self.itemID and self.itemID > 0 then
@@ -3317,6 +3607,62 @@ do
         end)
         btn:Hide()
         state.reagentRows[index] = btn
+        return btn
+    end
+
+    local function ensureUsedInRow(index)
+        if state.usedInRows[index] then return state.usedInRows[index] end
+        local parent = state.leftCard
+        local btn = CreateFrame("Button", nil, parent)
+        btn:SetHeight(26)
+        btn:EnableMouse(true)
+        btn:RegisterForClicks("LeftButtonUp")
+        btn.bg = btn:CreateTexture(nil, "BACKGROUND")
+        btn.bg:SetAllPoints(btn)
+        btn.bg:Hide()
+        btn.sep = btn:CreateTexture(nil, "BORDER")
+        btn.sep:SetPoint("TOPLEFT", 4, 0)
+        btn.sep:SetPoint("TOPRIGHT", -4, 0)
+        btn.sep:SetHeight(1)
+        btn.icon = btn:CreateTexture(nil, "ARTWORK")
+        btn.icon:SetSize(18, 18)
+        btn.icon:SetPoint("LEFT", 6, 0)
+        btn.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        btn.nameFs = makeFs(btn, 11, "semibold", "LEFT", "text")
+        if btn.nameFs.SetWordWrap then btn.nameFs:SetWordWrap(false) end
+        btn.qtyFs = makeFs(btn, 11, "regular", "RIGHT", "textSecondary")
+        btn.unitFs = makeFs(btn, 11, "regular", "RIGHT", "text")
+        btn.extFs = makeFs(btn, 10, "regular", "RIGHT", "textSecondary")
+        btn.tagFs = makeFs(btn, 10, "semibold", "RIGHT", "textMuted")
+        btn.stockFs = makeFs(btn, 10, "regular", "RIGHT", "textSecondary")
+
+        btn:SetScript("OnEnter", function(self)
+            local pal = daPal()
+            if self.clickable and self.bg then
+                local hc = pal.cardHover or { 1, 1, 1, 0.06 }
+                self.bg:SetColorTexture(hc[1], hc[2], hc[3], hc[4] or 0.08)
+                self.bg:Show()
+            end
+            if self.itemID and self.itemID > 0 then
+                showItemTooltip(self, self.itemID)
+            end
+        end)
+        btn:SetScript("OnLeave", function(self)
+            if self.bg then self.bg:Hide() end
+            hideTooltip()
+        end)
+        btn:SetScript("OnClick", function(self)
+            local a = app()
+            if not (a and a.openDeepAnalysis) then return end
+            state.lastDrillSection = "used_in"
+            if self.drillRecipe then
+                a.openDeepAnalysis({ kind = "recipe", recipe = self.drillRecipe })
+            elseif self.clickable and self.itemID and self.itemID > 0 then
+                a.openDeepAnalysis({ kind = "item", itemID = self.itemID, name = self.itemName, icon = self.itemIcon })
+            end
+        end)
+        btn:Hide()
+        state.usedInRows[index] = btn
         return btn
     end
 
@@ -3363,6 +3709,7 @@ do
         btn:SetScript("OnClick", function(self)
             local a = app()
             if a and a.openDeepAnalysis and self.clickable and self.itemID and self.itemID > 0 then
+                state.lastDrillSection = "vc"
                 a.openDeepAnalysis({ kind = "item", itemID = self.itemID, name = self.itemName, icon = self.itemIcon })
             end
         end)
@@ -3416,6 +3763,7 @@ do
         btn:SetScript("OnClick", function(self)
             local a = app()
             if a and a.openDeepAnalysis and self.clickable and self.itemID and self.itemID > 0 then
+                state.lastDrillSection = "de"
                 a.openDeepAnalysis({ kind = "item", itemID = self.itemID, name = self.itemName, icon = self.itemIcon })
             end
         end)
@@ -3833,11 +4181,65 @@ do
         return 1
     end
 
+    local function paintStudioCard(card, pal, overrideAccent)
+        if not (card and card._daStudioBg) then return end
+        if overrideAccent ~= nil then card._daAccentKey = overrideAccent end
+        local T = daTheme()
+        local isLight = pal and (pal.mode == "light")
+        local custom = T and T.IsCustomSkin and T.IsCustomSkin()
+        local ak = card._daAccentKey or "neutral"
+        local accentMap = {
+            gold    = isLight and { 0.80, 0.48, 0.06, 0.85 } or { 0.96, 0.74, 0.22, 0.94 },
+            orange  = isLight and { 0.84, 0.40, 0.04, 0.85 } or { 0.98, 0.58, 0.16, 0.94 },
+            blue    = isLight and { 0.06, 0.48, 0.88, 0.85 } or { 0.20, 0.74, 0.98, 0.95 },
+            green   = isLight and { 0.08, 0.58, 0.28, 0.85 } or (pal and pal.accentGreen or { 0.19, 0.82, 0.35, 0.92 }),
+            red     = isLight and { 0.78, 0.16, 0.16, 0.85 } or (pal and pal.accentRed or { 1.00, 0.32, 0.30, 0.92 }),
+            purple  = isLight and { 0.56, 0.24, 0.82, 0.85 } or (pal and pal.accentPurple or { 0.78, 0.42, 0.96, 0.90 }),
+            neutral = isLight and { 0.18, 0.22, 0.28, 0.16 } or { 0.46, 0.56, 0.68, 0.48 },
+        }
+        local ac = accentMap[ak] or accentMap.neutral
+        if not isLight then
+            local bgA = (card._daFillKey == "cardAltBg")
+                and (custom and 0.90 or 0.74)
+                or  (custom and 0.86 or 0.68)
+            card._daStudioBg:SetColorTexture(0.010, 0.015, 0.024, bgA)
+            card._daStudioBg:Show()
+            card._daTopEdge:SetColorTexture(ac[1], ac[2], ac[3], 0.94)
+            card._daTopEdge:Show()
+            local edgeThick = (ak == "blue") and 2 or 1
+            local edgeCol = ac
+            local edgeA = (ak == "blue") and (custom and 0.74 or 0.54)
+                or ((ak == "gold" or ak == "red") and (custom and 0.56 or 0.42) or (custom and 0.46 or 0.30))
+            if ak == "green" then
+                edgeCol = { 0.44, 0.54, 0.66, 1.0 }
+                edgeA = custom and 0.48 or 0.34
+            end
+            for idx, e in ipairs(card._daBorderEdges or {}) do
+                if idx <= 2 then
+                    e:SetHeight(edgeThick)
+                else
+                    e:SetWidth(edgeThick)
+                end
+                e:SetColorTexture(edgeCol[1], edgeCol[2], edgeCol[3], edgeA)
+                e:Show()
+            end
+        else
+            card._daStudioBg:Hide()
+            for _, e in ipairs(card._daBorderEdges or {}) do e:Hide() end
+            card._daTopEdge:SetColorTexture(ac[1], ac[2], ac[3], (ak ~= "neutral") and 0.76 or 0.14)
+            card._daTopEdge:Show()
+        end
+    end
+
     local function paintVisualCards(pal)
         local sep = pal.separator or pal.border or { 1, 1, 1, 0.14 }
         local isLight = (pal.mode == "light")
         local trackAlpha = isLight and 0.14 or 0.16
         local trackCol = { sep[1], sep[2], sep[3], math.max(trackAlpha, (sep[4] or 0.4) * 0.55) }
+
+        for _, sc in ipairs(state.studioCards or {}) do
+            paintStudioCard(sc, pal)
+        end
 
         local function paintFsLocal(fs, overrideCol)
             if not fs then return end
@@ -3854,9 +4256,13 @@ do
 
         local ec = state.leftCard and state.leftCard.econBarCard
         if ec then
+            local T = daTheme()
+            local customDark = (not isLight) and (T and T.IsCustomSkin and T.IsCustomSkin())
+            local studioBlue = { 0.20, 0.74, 0.98, 1.00 }
             for _, slot in ipairs(ec.craftBars or {}) do
                 paintFsLocal(slot.lblFs, pal.textSecondary)
-                local col = (slot._colorKey and pal[slot._colorKey]) or pal.accentBlue
+                local col = (customDark and slot._colorKey == "accentBlue") and studioBlue
+                    or ((slot._colorKey and pal[slot._colorKey]) or pal.accentBlue)
                 paintFsLocal(slot.valFs, slot._valColorKey and pal[slot._valColorKey] or pal.text)
                 if slot.trackTex then
                     slot.trackTex:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], trackCol[4])
@@ -3887,7 +4293,10 @@ do
                 r.shareTrack:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], trackCol[4])
             end
             if r.shareFill then
-                local col = pal[r._shareColorKey or "accentBlue"] or pal.accentBlue
+                local T = daTheme()
+                local customDark = (not isLight) and (T and T.IsCustomSkin and T.IsCustomSkin())
+                local sk = r._shareColorKey or "accentBlue"
+                local col = (customDark and sk == "accentBlue") and { 0.20, 0.74, 0.98, 1.00 } or (pal[sk] or pal.accentBlue)
                 r.shareFill:SetColorTexture(col[1], col[2], col[3], col[4] or 0.85)
             end
         end
@@ -3947,10 +4356,14 @@ do
                 paintFsLocal(colFrame.valFs, colFrame._valColorKey and pal[colFrame._valColorKey] or pal.text)
                 paintFsLocal(colFrame.lblFs, pal.textMuted)
                 if colFrame.barTrack then
-                    colFrame.barTrack:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], trackCol[4])
+                    if isLight then
+                        colFrame.barTrack:SetColorTexture(trackCol[1], trackCol[2], trackCol[3], trackCol[4])
+                    else
+                        colFrame.barTrack:SetColorTexture(0.014, 0.020, 0.032, 0.86)
+                    end
                 end
                 if colFrame.barFill then
-                    colFrame.barFill:SetColorTexture(col[1], col[2], col[3], col[4] or 0.88)
+                    colFrame.barFill:SetColorTexture(col[1], col[2], col[3], isLight and (col[4] or 0.88) or 0.92)
                 end
             end
             if lc.saleRateRow then
@@ -3991,8 +4404,19 @@ do
 
     local function applyTheme()
         if not state.built or not state.root then return end
+        local T = daTheme()
         local pal = daPal()
         local sep = pal.separator or pal.border or { 1, 1, 1, 0.14 }
+        local isLight = pal and (pal.mode == "light")
+        local custom = T and T.IsCustomSkin and T.IsCustomSkin()
+        if state.root._studioCanvasBg then
+            if custom and not isLight then
+                state.root._studioCanvasBg:SetColorTexture(0.006, 0.010, 0.016, 0.64)
+                state.root._studioCanvasBg:Show()
+            else
+                state.root._studioCanvasBg:Hide()
+            end
+        end
 
         local function paintFs(fs, overrideCol)
             if not fs then return end
@@ -4001,6 +4425,9 @@ do
             setTextColor(fs, col)
         end
 
+        for _, sc in ipairs(state.studioCards or {}) do
+            paintStudioCard(sc, pal)
+        end
         if state.header then
             paintFs(state.header.titleFs, pal.text)
             paintFs(state.header.subtitleFs, pal.textSecondary)
@@ -4008,7 +4435,10 @@ do
         end
         for _, card in ipairs(state.kpiCards or {}) do
             paintFs(card.titleFs, pal.textMuted)
-            paintFs(card.valueFs, card._valColorKey and pal[card._valColorKey] or pal.text)
+            local col = (custom and not isLight and card._valColorKey == "textBlue")
+                and { 0.38, 0.82, 1.00, 1.0 }
+                or (card._valColorKey and pal[card._valColorKey] or pal.text)
+            paintFs(card.valueFs, col)
             paintFs(card.subFs, pal.textSecondary)
         end
         if state.chart24h and state.chart24h.ApplyTheme then
@@ -4025,7 +4455,7 @@ do
         end
         if state.vcCard then
             local vc = state.vcCard
-            paintFs(vc.titleFs, pal.textMuted)
+            paintFs(vc.titleFs, pal.accentOrange or pal.textMuted)
             paintFs(vc.badgeFs, vc._badgeColKey and pal[vc._badgeColKey] or pal.accentGreen or pal.text)
             paintFs(vc.spreadFs, pal.text)
             paintFs(vc.capHdrFs, pal.textMuted)
@@ -4036,7 +4466,7 @@ do
             if vc.div then vc.div:SetColorTexture(sep[1], sep[2], sep[3], sep[4] or 0.4) end
             if vc.vDiv then vc.vDiv:SetColorTexture(sep[1], sep[2], sep[3], (sep[4] or 0.4) * 0.7) end
             for _, r in ipairs(state.vcCapRows or {}) do
-                paintFs(r.nameFs, r.clickable and (pal.textBlue or pal.accentBlue or pal.text) or pal.text)
+                paintFs(r.nameFs, r.clickable and daLinkColor(pal) or pal.text)
                 paintFs(r.capFs, pal.text)
                 paintFs(r.statusFs, r._statusColKey and pal[r._statusColKey] or pal.accentGreen or pal.text)
                 if r.sep then r.sep:SetColorTexture(sep[1], sep[2], sep[3], (sep[4] or 0.4) * 0.55) end
@@ -4056,7 +4486,7 @@ do
         end
         if state.deCard then
             local de = state.deCard
-            paintFs(de.titleFs, pal.textMuted)
+            paintFs(de.titleFs, pal.accentPurple or pal.textMuted)
             paintFs(de.badgeFs, de._badgeColKey and pal[de._badgeColKey] or pal.textBlue or pal.text)
             paintFs(de.summaryFs, pal.text)
             paintFs(de.exitFs, de._exitColKey and pal[de._exitColKey] or pal.textSecondary)
@@ -4064,7 +4494,7 @@ do
             paintFs(de.matEmptyFs, pal.textMuted)
             if de.div then de.div:SetColorTexture(sep[1], sep[2], sep[3], sep[4] or 0.4) end
             for _, r in ipairs(state.deOutcomeRows or {}) do
-                paintFs(r.nameFs, r.clickable and (pal.textBlue or pal.accentBlue or pal.text) or pal.text)
+                paintFs(r.nameFs, r.clickable and daLinkColor(pal) or pal.text)
                 paintFs(r.chanceFs, pal.textSecondary)
                 paintFs(r.unitFs, pal.text)
                 paintFs(r.evFs, pal.text)
@@ -4072,9 +4502,9 @@ do
             end
         end
         if state.leftCard then
-            paintFs(state.leftCard.hdrTitle, pal.textMuted)
-            paintFs(state.leftCard.reagTitle, pal.textMuted)
-            paintFs(state.leftCard.reagEmptyFs, pal.textMuted)
+            paintFs(state.leftCard.hdrTitle, pal.gold or pal.accentOrange or pal.textMuted)
+            paintMutedFs(state.leftCard.reagTitle, pal.gold or pal.accentOrange or pal.textMuted, not state.craftSectionActive, 0.58)
+            paintMutedFs(state.leftCard.reagEmptyFs, pal.textMuted, not state.craftSectionActive, 0.62)
             for _, hfs in ipairs(state.leftCard.colHeaders or {}) do paintFs(hfs, pal.textMuted) end
             if state.leftCard.divider then
                 state.leftCard.divider:SetColorTexture(sep[1], sep[2], sep[3], sep[4] or 0.4)
@@ -4088,7 +4518,7 @@ do
                 if r.sep then r.sep:SetColorTexture(sep[1], sep[2], sep[3], (sep[4] or 0.4) * 0.55) end
             end
             for _, r in ipairs(state.reagentRows or {}) do
-                paintFs(r.nameFs, r.clickable and (pal.textBlue or pal.accentBlue or pal.text) or pal.text)
+                paintFs(r.nameFs, r.clickable and daLinkColor(pal) or pal.text)
                 paintFs(r.qtyFs, pal.textSecondary)
                 paintFs(r.unitFs, pal.text)
                 paintFs(r.extFs, pal.text)
@@ -4096,17 +4526,40 @@ do
                 paintFs(r.stockFs, pal.textSecondary)
                 if r.sep then r.sep:SetColorTexture(sep[1], sep[2], sep[3], (sep[4] or 0.4) * 0.55) end
             end
-        end
-        for _, card in ipairs({ state.compCard, state.ledgerCard, state.acqCard }) do
-            if card then
-                paintFs(card.titleFs, pal.textMuted)
-                paintFs(card.bodyFs, pal.text)
+            if state.leftCard.usedInDivider then
+                state.leftCard.usedInDivider:SetColorTexture(sep[1], sep[2], sep[3], sep[4] or 0.4)
             end
+            local usedInMuted = (state.usedInShownCount or 0) == 0
+            paintMutedFs(state.leftCard.usedInTitle, daLinkColor(pal), usedInMuted, 0.58)
+            paintMutedFs(state.leftCard.usedInEmptyFs, pal.textMuted, true, 0.62)
+            for _, hfs in ipairs(state.leftCard.usedInColHeaders or {}) do paintFs(hfs, pal.textMuted) end
+            for _, r in ipairs(state.usedInRows or {}) do
+                paintFs(r.nameFs, r.clickable and daLinkColor(pal) or pal.text)
+                paintFs(r.qtyFs, pal.textSecondary)
+                paintFs(r.unitFs, pal.text)
+                paintFs(r.extFs, pal.textSecondary)
+                paintFs(r.tagFs, r._tagColKey and pal[r._tagColKey] or pal.textMuted)
+                paintFs(r.stockFs, pal.textSecondary)
+                if r.sep then r.sep:SetColorTexture(sep[1], sep[2], sep[3], (sep[4] or 0.4) * 0.55) end
+            end
+        end
+        if state.compCard then
+            local sbCol = (custom and not isLight) and { 0.36, 0.80, 1.00, 1.0 } or (pal.accentBlue or pal.textBlue or pal.textMuted)
+            paintFs(state.compCard.titleFs, sbCol)
+            paintFs(state.compCard.bodyFs, pal.text)
+        end
+        if state.ledgerCard then
+            paintFs(state.ledgerCard.titleFs, pal.accentGreen or pal.textMuted)
+            paintFs(state.ledgerCard.bodyFs, pal.text)
+        end
+        if state.acqCard then
+            paintFs(state.acqCard.titleFs, pal.accentPurple or pal.gold or pal.textMuted)
+            paintFs(state.acqCard.bodyFs, pal.text)
         end
         paintVisualCards(pal)
         if state.allAhCard then
             local allAh = state.allAhCard
-            paintFs(allAh.titleFs, pal.textMuted)
+            paintFs(allAh.titleFs, pal.accentBlue or pal.textMuted)
             paintFs(allAh.summaryFs, pal.textSecondary)
             paintFs(allAh.emptyFs, pal.textMuted)
             if allAh.div then allAh.div:SetColorTexture(sep[1], sep[2], sep[3], sep[4] or 0.4) end
@@ -4135,11 +4588,15 @@ do
         local root = CreateFrame("Frame", nil, parent)
         root:SetPoint("TOPLEFT", 0, 0)
         root:SetPoint("BOTTOMRIGHT", 0, 0)
+        local studioCanvasBg = root:CreateTexture(nil, "BACKGROUND", nil, -3)
+        studioCanvasBg:SetAllPoints(root)
+        studioCanvasBg:Hide()
+        root._studioCanvasBg = studioCanvasBg
         state.root = root
         DeepAnalysis.frame = root
 
         -- 1. Sticky Top Header (54px, glass_r12)
-        local hdr = makeCard(root, "glass_r12", "cardBg", "border")
+        local hdr = makeCard(root, "glass_r12", "cardBg", "border", "gold")
         hdr:SetPoint("TOPLEFT", 0, 0)
         hdr:SetPoint("TOPRIGHT", 0, 0)
         hdr:SetHeight(54)
@@ -4305,8 +4762,9 @@ do
 
         -- Row 1: 5 KPI Cards (68px, glass_r10)
         state.kpiCards = {}
+        local kpiAccents = { "gold", "gold", "orange", "blue", "purple" }
         for i = 1, 5 do
-            local card = makeCard(sc, "glass_r10", "cardBg", "border")
+            local card = makeCard(sc, "glass_r10", "cardBg", "border", kpiAccents[i])
             card:SetHeight(68)
             card.titleFs = makeFs(card, 10, "semibold", "LEFT", "textMuted")
             card.titleFs:SetPoint("TOPLEFT", 12, -9)
@@ -4336,6 +4794,7 @@ do
             preserveOrder = true,
             compact = true,
             borderKey = "border",
+            studioAccent = "blue",
             emptyText = "Need 2+ AH scans for 24h trend",
         }) or nil
         local chart7d = Chart and Chart.CreateLineChart and Chart.CreateLineChart(chartsFrame, 480, 152, {
@@ -4344,10 +4803,11 @@ do
             preserveOrder = true,
             compact = true,
             borderKey = "border",
+            studioAccent = "blue",
             emptyText = "Need 2+ daily scans for 7d trend",
         }) or nil
 
-        local baselineCard = makeCard(chartsFrame, "glass_r10", "cardBg", "border")
+        local baselineCard = makeCard(chartsFrame, "glass_r10", "cardBg", "border", "blue")
         baselineCard:SetHeight(44)
         baselineCard.titleFs = makeFs(baselineCard, 9, "semibold", "LEFT", "textMuted")
         baselineCard.titleFs:SetPoint("TOPLEFT", 12, -6)
@@ -4401,7 +4861,7 @@ do
         end
 
         -- Vendor Yield & Material Buy Caps Card (Proposal A, shown for recipes with buy caps / variable or measured yield)
-        local vc = makeCard(sc, "glass_r10", "cardBg", "border")
+        local vc = makeCard(sc, "glass_r10", "cardBg", "border", "orange")
         vc.titleFs = makeFs(vc, 10, "semibold", "LEFT", "textMuted")
         vc.titleFs:SetPoint("TOPLEFT", 12, -10)
         vc.titleFs:SetText("VENDOR YIELD & MATERIAL BUY CAPS")
@@ -4470,7 +4930,7 @@ do
         DeepAnalysis.vcCard = vc
 
         -- Disenchanting Analysis Card (shown for disenchantable items and crafted gear)
-        local de = makeCard(sc, "glass_r10", "cardBg", "border")
+        local de = makeCard(sc, "glass_r10", "cardBg", "border", "purple")
         de.titleFs = makeFs(de, 10, "semibold", "LEFT", "textMuted")
         de.titleFs:SetPoint("TOPLEFT", 12, -10)
         de.titleFs:SetText("DISENCHANTING ANALYSIS")
@@ -4509,7 +4969,7 @@ do
         DeepAnalysis.deCard = de
 
         -- Row 3 Left Card: Overview + Full Reagents & Movers Breakdown
-        local left = makeCard(sc, "glass_r10", "cardBg", "border")
+        local left = makeCard(sc, "glass_r10", "cardBg", "border", "gold")
         state.leftCard = left
         DeepAnalysis.leftCard = left
 
@@ -4536,7 +4996,7 @@ do
         left.win7dBtn:SetScript("OnClick", function() switchWindow("7d") end)
 
         -- Visual Economy Bar Card (54px at y=-36 inside leftCard)
-        local econCard = makeCard(left, "glass_r10", "cardAltBg", "border")
+        local econCard = makeCard(left, "glass_r10", "cardAltBg", "border", "neutral")
         econCard:SetHeight(54)
         econCard.craftFrame = CreateFrame("Frame", nil, econCard)
         econCard.craftFrame:SetAllPoints(econCard)
@@ -4612,7 +5072,7 @@ do
         left.divider:SetColorTexture(sep[1], sep[2], sep[3], sep[4] or 0.4)
 
         left.reagTitle = makeFs(left, 10, "semibold", "LEFT", "textMuted")
-        left.reagTitle:SetText("REAGENTS & MOVERS BREAKDOWN")
+        left.reagTitle:SetText("CRAFTING BREAKDOWN")
 
         left.colHeaders = {}
         local hdrSpecs = {
@@ -4629,13 +5089,54 @@ do
             left.colHeaders[i] = fs
         end
 
-        left.reagEmptyFs = makeFs(left, 11, "regular", "CENTER", "textMuted")
-        left.reagEmptyFs:SetText("No reagents listed.")
+        left.reagEmptyFs = makeFs(left, 11, "regular", "LEFT", "textMuted")
+        left.reagEmptyFs:SetText("Not craftable")
         left.reagEmptyFs:Hide()
 
+        left.usedInDivider = left:CreateTexture(nil, "BORDER")
+        left.usedInDivider:SetHeight(1)
+        left.usedInDivider:SetColorTexture(sep[1], sep[2], sep[3], sep[4] or 0.4)
+
+        left.usedInTitle = makeFs(left, 10, "semibold", "LEFT", "textMuted")
+        left.usedInTitle:SetText("USED IN")
+
+        left.usedInToggleBtn = mkBtn(left, "Show all", 82, 18, pillOpts)
+        left.usedInToggleBtn:SetScript("OnClick", function()
+            state.usedInExpanded = not state.usedInExpanded
+            if state.target then
+                DeepAnalysis.Render(state.target, true)
+            end
+        end)
+        left.usedInToggleBtn:Hide()
+
+        left.usedInColHeaders = {}
+        local usedInHdrSpecs = {
+            { "RECIPE", "LEFT" },
+            { "USES", "RIGHT" },
+            { "SELL PRICE", "RIGHT" },
+            { "PROFESSION", "RIGHT" },
+            { "TREND", "RIGHT" },
+            { "OWN / AH", "RIGHT" },
+        }
+        for i, hs in ipairs(usedInHdrSpecs) do
+            local fs = makeFs(left, 9, "semibold", hs[2], "textMuted")
+            fs:SetText(hs[1])
+            left.usedInColHeaders[i] = fs
+        end
+
+        left.usedInEmptyFs = makeFs(left, 10, "regular", "LEFT", "textMuted")
+        left.usedInEmptyFs:SetText("Not used in any crafting recipes.")
+        left.usedInEmptyFs:Hide()
+        DeepAnalysis.usedInRows = state.usedInRows
+
         -- Row 3 Right Column: 3 Stacked Cards
+        local rightCardAccents = {
+            ["COMPETITION, VELOCITY & QUALITY"] = "blue",
+            ["PERSONAL LEDGER & CROSS-ALT INVENTORY"] = "green",
+            ["ACQUISITION, SCROLL, SKILL & COOLDOWN"] = "purple",
+        }
         local function makeInfoCard(title)
-            local c = makeCard(sc, "glass_r10", "cardBg", "border")
+            local c = makeCard(sc, "glass_r10", "cardBg", "border", rightCardAccents[title] or "neutral")
             c.titleFs = makeFs(c, 10, "semibold", "LEFT", "textMuted")
             c.titleFs:SetPoint("TOPLEFT", 12, -10)
             c.titleFs:SetPoint("TOPRIGHT", -12, -10)
@@ -4782,7 +5283,7 @@ do
         DeepAnalysis.rightCol = { state.compCard, state.ledgerCard, state.acqCard }
 
         -- Row 4 Full Width: All Auction Houses (Latest-Only Price & Qty Comparison)
-        local allAh = makeCard(sc, "glass_r10", "cardBg", "border")
+        local allAh = makeCard(sc, "glass_r10", "cardBg", "border", "blue")
         allAh.titleFs = makeFs(allAh, 10, "semibold", "LEFT", "textMuted")
         allAh.titleFs:SetText("ALL AUCTION HOUSES (LATEST)")
         allAh.summaryFs = makeFs(allAh, 11, "regular", "LEFT", "textSecondary")
@@ -5060,6 +5561,7 @@ do
 
             local bodyH = twoColVC and math.max(capRowsH, histH) or (capRowsH + 12 + histH)
             local vcH = math.abs(bodyTopY) + bodyH + 12
+            state.sectionAnchorY.vc = math.abs(nextY)
             vc:ClearAllPoints()
             vc:SetPoint("TOPLEFT", state.scrollChild, "TOPLEFT", 0, nextY)
             vc:SetSize(W, vcH)
@@ -5099,6 +5601,7 @@ do
             end
 
             local deH = math.abs(rowsTopY) + math.max(1, deUsed) * 24 + 12
+            state.sectionAnchorY.de = math.abs(nextY)
             de:ClearAllPoints()
             de:SetPoint("TOPLEFT", state.scrollChild, "TOPLEFT", 0, nextY)
             de:SetSize(W, deH)
@@ -5244,6 +5747,7 @@ do
         local reagTitleY = divY - 10
         left.reagTitle:ClearAllPoints()
         left.reagTitle:SetPoint("TOPLEFT", left, "TOPLEFT", 12, reagTitleY)
+        state.sectionAnchorY.crafting = math.abs(row3Y) + math.abs(reagTitleY)
 
         local hdrY = reagTitleY - 16
         local colDefs = {
@@ -5254,58 +5758,129 @@ do
             { r = -62, w = 58 },
             { r = -2, w = 56 },
         }
-        for i, fs in ipairs(left.colHeaders) do
-            local cd = colDefs[i]
-            fs:ClearAllPoints()
-            if cd.x then
-                fs:SetPoint("TOPLEFT", left, "TOPLEFT", 12 + cd.x, hdrY)
-            else
-                fs:SetPoint("TOPRIGHT", left, "TOPRIGHT", -12 + cd.r, hdrY)
+        local used = state.reagentUsedCount or 0
+        local craftBottomY
+        if state.craftSectionActive ~= false then
+            for i, fs in ipairs(left.colHeaders) do
+                local cd = colDefs[i]
+                fs:ClearAllPoints()
+                if cd.x then
+                    fs:SetPoint("TOPLEFT", left, "TOPLEFT", 12 + cd.x, hdrY)
+                else
+                    fs:SetPoint("TOPRIGHT", left, "TOPRIGHT", -12 + cd.r, hdrY)
+                end
+                fs:SetSize(cd.w, 13)
+                fs:Show()
             end
-            fs:SetSize(cd.w, 13)
+
+            local rowsTopY = hdrY - 18
+            for i = 1, used do
+                local row = state.reagentRows[i]
+                if row then
+                    row:ClearAllPoints()
+                    row:SetPoint("TOPLEFT", left, "TOPLEFT", 12, rowsTopY - (i - 1) * 26)
+                    row:SetSize(rw, 26)
+                    row.nameFs:ClearAllPoints()
+                    if row._hasShareBar and row._shareRatio then
+                        row.nameFs:SetPoint("LEFT", 28, 3)
+                        row.nameFs:SetWidth(colDefs[1].w)
+                        local trackW = math.max(32, colDefs[1].w - 6)
+                        row.shareTrack:ClearAllPoints()
+                        row.shareTrack:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 28, 3)
+                        row.shareTrack:SetSize(trackW, 3)
+                        row.shareTrack:Show()
+                        row.shareFill:ClearAllPoints()
+                        row.shareFill:SetPoint("LEFT", row.shareTrack, "LEFT", 0, 0)
+                        row.shareFill:SetSize(math.max(3, math.floor(trackW * row._shareRatio + 0.5)), 3)
+                        row.shareFill:Show()
+                    else
+                        row.nameFs:SetPoint("LEFT", 28, 0)
+                        row.nameFs:SetWidth(colDefs[1].w)
+                        if row.shareTrack then row.shareTrack:Hide() end
+                        if row.shareFill then row.shareFill:Hide() end
+                    end
+                    row.qtyFs:ClearAllPoints(); row.qtyFs:SetPoint("RIGHT", row, "RIGHT", colDefs[2].r, 0); row.qtyFs:SetWidth(colDefs[2].w)
+                    row.unitFs:ClearAllPoints(); row.unitFs:SetPoint("RIGHT", row, "RIGHT", colDefs[3].r, 0); row.unitFs:SetWidth(colDefs[3].w)
+                    row.extFs:ClearAllPoints(); row.extFs:SetPoint("RIGHT", row, "RIGHT", colDefs[4].r, 0); row.extFs:SetWidth(colDefs[4].w)
+                    row.tagFs:ClearAllPoints(); row.tagFs:SetPoint("RIGHT", row, "RIGHT", colDefs[5].r, 0); row.tagFs:SetWidth(colDefs[5].w)
+                    row.stockFs:ClearAllPoints(); row.stockFs:SetPoint("RIGHT", row, "RIGHT", colDefs[6].r, 0); row.stockFs:SetWidth(colDefs[6].w)
+                end
+            end
+            if used == 0 then
+                left.reagEmptyFs:ClearAllPoints()
+                left.reagEmptyFs:SetPoint("TOPLEFT", left, "TOPLEFT", 12, rowsTopY - 4)
+                left.reagEmptyFs:SetSize(rw, 22)
+            end
+            craftBottomY = rowsTopY - math.max(1, used) * 26 - 10
+        else
+            for _, fs in ipairs(left.colHeaders) do fs:Hide() end
+            left.reagEmptyFs:ClearAllPoints()
+            left.reagEmptyFs:SetPoint("TOPLEFT", left, "TOPLEFT", 12, reagTitleY - 17)
+            left.reagEmptyFs:SetSize(rw, 20)
+            craftBottomY = reagTitleY - 42
         end
 
-        local rowsTopY = hdrY - 18
-        local used = state.reagentUsedCount or 0
-        for i = 1, used do
-            local row = state.reagentRows[i]
-            if row then
-                row:ClearAllPoints()
-                row:SetPoint("TOPLEFT", left, "TOPLEFT", 12, rowsTopY - (i - 1) * 26)
-                row:SetSize(rw, 26)
-                row.nameFs:ClearAllPoints()
-                if row._hasShareBar and row._shareRatio then
-                    row.nameFs:SetPoint("LEFT", 28, 3)
-                    row.nameFs:SetWidth(colDefs[1].w)
-                    local trackW = math.max(32, colDefs[1].w - 6)
-                    row.shareTrack:ClearAllPoints()
-                    row.shareTrack:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 28, 3)
-                    row.shareTrack:SetSize(trackW, 3)
-                    row.shareTrack:Show()
-                    row.shareFill:ClearAllPoints()
-                    row.shareFill:SetPoint("LEFT", row.shareTrack, "LEFT", 0, 0)
-                    row.shareFill:SetSize(math.max(3, math.floor(trackW * row._shareRatio + 0.5)), 3)
-                    row.shareFill:Show()
+        if left.usedInDivider then
+            left.usedInDivider:ClearAllPoints()
+            left.usedInDivider:SetPoint("TOPLEFT", left, "TOPLEFT", 12, craftBottomY)
+            left.usedInDivider:SetPoint("TOPRIGHT", left, "TOPRIGHT", -12, craftBottomY)
+        end
+
+        local usedInTitleY = craftBottomY - 10
+        if left.usedInTitle then
+            left.usedInTitle:ClearAllPoints()
+            left.usedInTitle:SetPoint("TOPLEFT", left, "TOPLEFT", 12, usedInTitleY)
+        end
+        state.sectionAnchorY.used_in = math.abs(row3Y) + math.abs(usedInTitleY)
+        if left.usedInToggleBtn and left.usedInToggleBtn:IsShown() then
+            left.usedInToggleBtn:ClearAllPoints()
+            left.usedInToggleBtn:SetPoint("TOPRIGHT", left, "TOPRIGHT", -12, usedInTitleY + 4)
+        end
+
+        local uUsed = state.usedInShownCount or 0
+        local usedInBottomY
+        if uUsed > 0 then
+            local uHdrY = usedInTitleY - 16
+            for i, fs in ipairs(left.usedInColHeaders or {}) do
+                local cd = colDefs[i]
+                fs:ClearAllPoints()
+                if cd.x then
+                    fs:SetPoint("TOPLEFT", left, "TOPLEFT", 12 + cd.x, uHdrY)
                 else
+                    fs:SetPoint("TOPRIGHT", left, "TOPRIGHT", -12 + cd.r, uHdrY)
+                end
+                fs:SetSize(cd.w, 13)
+                fs:Show()
+            end
+            local uRowsTopY = uHdrY - 18
+            for i = 1, uUsed do
+                local row = state.usedInRows[i]
+                if row then
+                    row:ClearAllPoints()
+                    row:SetPoint("TOPLEFT", left, "TOPLEFT", 12, uRowsTopY - (i - 1) * 26)
+                    row:SetSize(rw, 26)
+                    row.nameFs:ClearAllPoints()
                     row.nameFs:SetPoint("LEFT", 28, 0)
                     row.nameFs:SetWidth(colDefs[1].w)
-                    if row.shareTrack then row.shareTrack:Hide() end
-                    if row.shareFill then row.shareFill:Hide() end
+                    row.qtyFs:ClearAllPoints(); row.qtyFs:SetPoint("RIGHT", row, "RIGHT", colDefs[2].r, 0); row.qtyFs:SetWidth(colDefs[2].w)
+                    row.unitFs:ClearAllPoints(); row.unitFs:SetPoint("RIGHT", row, "RIGHT", colDefs[3].r, 0); row.unitFs:SetWidth(colDefs[3].w)
+                    row.extFs:ClearAllPoints(); row.extFs:SetPoint("RIGHT", row, "RIGHT", colDefs[4].r, 0); row.extFs:SetWidth(colDefs[4].w)
+                    row.tagFs:ClearAllPoints(); row.tagFs:SetPoint("RIGHT", row, "RIGHT", colDefs[5].r, 0); row.tagFs:SetWidth(colDefs[5].w)
+                    row.stockFs:ClearAllPoints(); row.stockFs:SetPoint("RIGHT", row, "RIGHT", colDefs[6].r, 0); row.stockFs:SetWidth(colDefs[6].w)
                 end
-                row.qtyFs:ClearAllPoints(); row.qtyFs:SetPoint("RIGHT", row, "RIGHT", colDefs[2].r, 0); row.qtyFs:SetWidth(colDefs[2].w)
-                row.unitFs:ClearAllPoints(); row.unitFs:SetPoint("RIGHT", row, "RIGHT", colDefs[3].r, 0); row.unitFs:SetWidth(colDefs[3].w)
-                row.extFs:ClearAllPoints(); row.extFs:SetPoint("RIGHT", row, "RIGHT", colDefs[4].r, 0); row.extFs:SetWidth(colDefs[4].w)
-                row.tagFs:ClearAllPoints(); row.tagFs:SetPoint("RIGHT", row, "RIGHT", colDefs[5].r, 0); row.tagFs:SetWidth(colDefs[5].w)
-                row.stockFs:ClearAllPoints(); row.stockFs:SetPoint("RIGHT", row, "RIGHT", colDefs[6].r, 0); row.stockFs:SetWidth(colDefs[6].w)
             end
-        end
-        if used == 0 then
-            left.reagEmptyFs:ClearAllPoints()
-            left.reagEmptyFs:SetPoint("TOPLEFT", left, "TOPLEFT", 12, rowsTopY - 6)
-            left.reagEmptyFs:SetSize(rw, 28)
+            usedInBottomY = uRowsTopY - uUsed * 26 - 12
+        else
+            for _, fs in ipairs(left.usedInColHeaders or {}) do fs:Hide() end
+            if left.usedInEmptyFs then
+                left.usedInEmptyFs:ClearAllPoints()
+                left.usedInEmptyFs:SetPoint("TOPLEFT", left, "TOPLEFT", 12, usedInTitleY - 17)
+                left.usedInEmptyFs:SetSize(rw, 20)
+            end
+            usedInBottomY = usedInTitleY - 42
         end
 
-        local leftH = math.max(340, math.abs(rowsTopY) + math.max(1, used) * 26 + 16)
+        local leftH = math.max(340, math.abs(usedInBottomY) + 8)
         left:ClearAllPoints()
         left:SetPoint("TOPLEFT", state.scrollChild, "TOPLEFT", 0, row3Y)
         left:SetSize(leftW, leftH)
@@ -5392,9 +5967,9 @@ do
                         cf.lblFs:SetSize(math.max(40, w), 12)
                         cf.barTrack:ClearAllPoints()
                         cf.barTrack:SetPoint("BOTTOMLEFT", cf, "BOTTOMLEFT", 4, 15)
-                        cf.barTrack:SetSize(math.max(24, w - 8), 22)
-                        local ratio = math.max(0.08, math.min(1, tonumber(cf._ratio) or 0))
-                        local fillH = math.max(4, math.floor(22 * ratio + 0.5))
+                        cf.barTrack:SetSize(math.max(24, w - 8), 18)
+                        local ratio = math.max(0.10, math.min(1, tonumber(cf._ratio) or 0))
+                        local fillH = math.max(3, math.floor(8 * ratio + 0.5))
                         cf.barFill:ClearAllPoints()
                         cf.barFill:SetPoint("BOTTOMLEFT", cf.barTrack, "BOTTOMLEFT", 0, 0)
                         cf.barFill:SetSize(math.max(24, w - 8), fillH)
@@ -5617,22 +6192,6 @@ do
         if left.win7dBtn and left.win7dBtn.SetActive then left.win7dBtn:SetActive(not is24) end
     end
 
-    local function formatProfLabel(profKey)
-        if not profKey or profKey == "" then return nil end
-        local key = tostring(profKey)
-        local h = H() or host
-        if h and h.PROF_LABELS and h.PROF_LABELS[key] then
-            return tostring(h.PROF_LABELS[key])
-        end
-        if h and h.PROF_META and h.PROF_META[key] and h.PROF_META[key].label then
-            return tostring(h.PROF_META[key].label)
-        end
-        local formatted = key:gsub("_", " "):gsub("(%a)([%w']*)", function(a, b)
-            return a:upper() .. b:lower()
-        end)
-        return formatted
-    end
-
     local function formatRepLabel(r, rec)
         local lbl = r and (r.repLabel or r.repText)
         if type(lbl) == "string" then
@@ -5657,12 +6216,12 @@ do
         return nil
     end
 
-    local function buildSubtitle(target, data)
+    local function buildSubtitle(target, data, craftRow, craftRec)
         local kind = target.kind or "recipe"
-        local r = target.row or {}
-        local rec = target.recipe or r.recipe
+        local r = craftRow or target.row or {}
+        local rec = craftRec or target.recipe or r.recipe
         local parts = {}
-        if kind == "recipe" and rec then
+        if rec and (kind == "recipe" or kind == "item") then
             local prof = formatProfLabel(r.prof or rec.prof)
             if prof and prof ~= "" then
                 local sk = tonumber(r.skill or rec.skill)
@@ -5735,7 +6294,118 @@ do
         return row.liveValue ~= nil and tostring(row.liveValue) or "-"
     end
 
-    function DeepAnalysis.Render(target, preserveScroll)
+    local function renderUsedInSection(itemID, econKey, win, pal, preserveExpanded)
+        local left = state.leftCard
+        if not left then return end
+        if preserveExpanded ~= nil then
+            state.usedInExpanded = (preserveExpanded == true)
+            state.usedInTargetItemID = itemID
+        elseif state.usedInTargetItemID ~= itemID then
+            state.usedInExpanded = false
+            state.usedInTargetItemID = itemID
+        end
+        local usedInList = collectUsedInEntries(itemID, econKey)
+        local total = #usedInList
+        state.usedInTotalCount = total
+        if total == 0 then
+            state.usedInShownCount = 0
+            for i = 1, #(state.usedInRows or {}) do
+                state.usedInRows[i]:Hide()
+            end
+            for _, hfs in ipairs(left.usedInColHeaders or {}) do hfs:Hide() end
+            if left.usedInToggleBtn then left.usedInToggleBtn:Hide() end
+            if left.usedInTitle then
+                left.usedInTitle:SetText("USED IN")
+                paintMutedFs(left.usedInTitle, pal.textMuted, true, 0.58)
+            end
+            if left.usedInEmptyFs then
+                left.usedInEmptyFs:SetText("Not used in any crafting recipes.")
+                paintMutedFs(left.usedInEmptyFs, pal.textMuted, true, 0.62)
+                left.usedInEmptyFs:Show()
+            end
+            return
+        end
+
+        local h = H() or host
+        local ms = h and h.MarketScan
+        local trendFn = (win == "24h") and (ms and ms.GetItemTrend24h) or (ms and ms.GetItemTrend7d)
+        local USED_IN_LIMIT = 10
+        local showCount = state.usedInExpanded and total or math.min(USED_IN_LIMIT, total)
+        state.usedInShownCount = showCount
+        if left.usedInTitle then
+            local titleStr
+            if total > USED_IN_LIMIT then
+                titleStr = state.usedInExpanded
+                    and ("USED IN (" .. tostring(total) .. " recipes | highest price first | click to inspect)")
+                    or ("USED IN (top " .. tostring(showCount) .. " of " .. tostring(total) .. " recipes | highest price first | click to inspect)")
+            else
+                titleStr = "USED IN (" .. tostring(total) .. (total == 1 and " recipe" or " recipes") .. " | click to inspect)"
+            end
+            left.usedInTitle:SetText(titleStr)
+            paintMutedFs(left.usedInTitle, daLinkColor(pal), false, 1.0)
+        end
+        if left.usedInToggleBtn then
+            if total > USED_IN_LIMIT then
+                left.usedInToggleBtn:SetText(state.usedInExpanded and "Show top 10" or ("Show all " .. tostring(total)))
+                left.usedInToggleBtn:Show()
+            else
+                left.usedInToggleBtn:Hide()
+            end
+        end
+        for _, hfs in ipairs(left.usedInColHeaders or {}) do hfs:Show() end
+        if left.usedInEmptyFs then left.usedInEmptyFs:Hide() end
+
+        for i = 1, showCount do
+            local entry = usedInList[i]
+            local row = ensureUsedInRow(i)
+            local urec = entry.recipe
+            local oid = entry.outID
+            local rIcon = (oid and h and h.ItemIcon and h.ItemIcon(oid)) or (h and h.QUESTION_ICON) or 134400
+            local ownOut = oid and getOwnedTotal(oid) or 0
+            local listedOut = oid and h and h.GetNumListed and h.GetNumListed(oid)
+            local profLbl = formatProfLabel(urec.prof) or "-"
+            local sk = tonumber(urec.skill)
+            local tPct = nil
+            if oid and oid > 0 and type(trendFn) == "function" then
+                local ok, tObj = pcall(trendFn, oid, econKey)
+                if ok and type(tObj) == "table" and tObj.trendPct ~= nil then
+                    tPct = tonumber(tObj.trendPct)
+                end
+            end
+
+            row.itemID = oid
+            row.itemName = entry.name
+            row.itemIcon = rIcon
+            row.drillRecipe = urec
+            row.clickable = true
+            row.icon:SetTexture(rIcon)
+            row.nameFs:SetText(tostring(entry.name) .. " >")
+            setTextColor(row.nameFs, daLinkColor(pal))
+            row.qtyFs:SetText(tostring(entry.qty) .. "x")
+            row.unitFs:SetText(daMoney(entry.price, false))
+            row.extFs:SetText(sk and (profLbl .. " (" .. tostring(sk) .. ")") or profLbl)
+            setTextColor(row.extFs, pal.textSecondary)
+            if tPct ~= nil then
+                row.tagFs:SetText(daPct(tPct, true))
+                row._tagColKey = (tPct > 0) and "accentGreen" or ((tPct < 0) and "accentRed" or "textMuted")
+            else
+                row.tagFs:SetText("-")
+                row._tagColKey = "textMuted"
+            end
+            setTextColor(row.tagFs, pal[row._tagColKey] or pal.textMuted)
+            row.stockFs:SetText(daNum(ownOut) .. " / " .. (listedOut ~= nil and daNum(listedOut) or "-"))
+            if row.sep then
+                local sep = pal.separator or pal.border or { 1, 1, 1, 0.14 }
+                row.sep:SetColorTexture(sep[1], sep[2], sep[3], (sep[4] or 0.4) * 0.55)
+            end
+            row:Show()
+        end
+        for i = showCount + 1, #(state.usedInRows or {}) do
+            state.usedInRows[i]:Hide()
+        end
+    end
+
+    function DeepAnalysis.Render(target, preserveScroll, restoreOpts)
         if not ensureBuilt() then return false end
         if not target then return false end
         local h = H() or host
@@ -5744,6 +6414,8 @@ do
         local econKey, econInfo = getActiveEcon()
 
         state.dirtyThemeRender = false
+        state.lastDrillSection = nil
+        state.sectionAnchorY = {}
         local win = (db().quickLookWindow == "24h") and "24h" or "7d"
         state.window = win
         state.target = target
@@ -5753,14 +6425,23 @@ do
         local r = target.row or {}
         local rec = target.recipe or r.recipe
         local applyAHCut = not _G.MerchantMasterDB or _G.MerchantMasterDB.applyAHCut ~= false
-        local priceVer = (h and h.priceCacheEpoch) or 0
+        local priceVer = (h and h.GetPriceDataRevision and h.GetPriceDataRevision()) or (h and h.priceCacheEpoch) or 0
         local dualCacheKey = tostring(kind) .. "|" .. tostring(itemID or 0) .. "|"
             .. tostring(rec and rec.spellID or 0) .. "|" .. tostring(econKey or "") .. "|"
             .. tostring(priceVer) .. "|" .. tostring(applyAHCut)
 
         local qlData, ql24, ql7d
-        if kind == "item" then
-            qlData = buildItemDeepData(target, itemID, econKey)
+        local craftRow, craftRec, hasCraftBreakdown = nil, nil, false
+        if kind == "recipe" or kind == "item" then
+            local dualTbl
+            qlData, craftRow, craftRec, dualTbl = resolveCraftBundle(target, itemID, econKey, win, applyAHCut)
+            if qlData and craftRec then
+                hasCraftBreakdown = true
+                ql24 = dualTbl and dualTbl.ql24
+                ql7d = dualTbl and dualTbl.ql7d
+            else
+                qlData = buildItemDeepData(target, itemID, econKey)
+            end
         elseif h and h.RecipeStats and h.RecipeStats.BuildQuickLook and target.row then
             local function buildForWin(w)
                 local ctx = {}
@@ -5791,6 +6472,9 @@ do
         end
         state.data = qlData
 
+        local cr = craftRow or r
+        local crec = craftRec or rec
+
         local title = getTargetTitle(target, qlData)
         local icon = getTargetIcon(target, qlData)
         state.titleText = title
@@ -5800,7 +6484,7 @@ do
         paintReturnButton()
         hdr.icon:SetTexture(icon)
         hdr.titleFs:SetText(title)
-        hdr.subtitleFs:SetText(buildSubtitle(target, qlData))
+        hdr.subtitleFs:SetText(buildSubtitle(target, qlData, craftRow, craftRec))
         syncFavButton()
 
         -- Right action buttons
@@ -5841,7 +6525,14 @@ do
             or (itemID and h and h.GetMultiSourceDemand and h.GetMultiSourceDemand(itemID, econKey))
         local mdPrimary = md and (md.effectiveDailySold ~= nil and tonumber(md.effectiveDailySold)
             or (md.dailySold ~= nil and tonumber(md.dailySold) or nil)) or nil
-        local liveListed = (qlData and qlData.liveListed) or r.listed
+        local canonRec = (itemID and h and h.GetCanonicalItemPrice) and h.GetCanonicalItemPrice(itemID, econKey) or nil
+        local val7d = (itemID and h and h.GetItemMarketValue7d) and h.GetItemMarketValue7d(itemID, econKey) or nil
+        local liveSpot = (canonRec and canonRec.price)
+            or (not (canonRec and canonRec.isAbsent) and itemID and h and h.GetItemMarketPrice and h.GetItemMarketPrice(itemID))
+            or nil
+        local liveListed = (canonRec and canonRec.listed ~= nil and canonRec.listed)
+            or (itemID and h and h.GetNumListed and h.GetNumListed(itemID))
+            or (qlData and qlData.liveListed) or r.listed
         local liveSales = mdPrimary
         if liveSales == nil then liveSales = (qlData and qlData.liveSalesPerDay) or r.salesPerDay or resolveDemandRate(md) end
         local demandInfo = (qlData and qlData.demandInfo) or r.demand
@@ -5851,15 +6542,18 @@ do
         -- Row 1: 5 KPI Cards
         local hasSnaps = hasSnapshotUI()
         local k1, k2, k3, k4, k5 = state.kpiCards[1], state.kpiCards[2], state.kpiCards[3], state.kpiCards[4], state.kpiCards[5]
-        if kind == "recipe" then
-            local made = math.max(1, tonumber(qlData and qlData.made or r.numMade or (rec and rec.numMade)) or 1)
-            local profitVal = (tonumber(r.profit) and tonumber(r.profit) * made) or (qlData and qlData.net and qlData.net.last)
-            local costVal = (tonumber(r.craftCost) and tonumber(r.craftCost) * made) or (qlData and qlData.cost and qlData.cost.last)
-            local sellVal = tonumber(r.unitAH or r.ahPrice or r.targetPrice) or (qlData and qlData.output and qlData.output.last)
-            local marginPct = (profitVal and costVal and costVal > 0) and (profitVal / costVal * 100) or tonumber(r.marginPct)
+        if hasCraftBreakdown then
+            local made = math.max(1, tonumber(qlData and qlData.made or cr.numMade or (crec and crec.numMade)) or 1)
+            local profitVal = (tonumber(cr.profit) and tonumber(cr.profit) * made) or (qlData and qlData.net and qlData.net.last)
+            local costVal = (tonumber(cr.craftCost) and tonumber(cr.craftCost) * made) or (qlData and qlData.cost and qlData.cost.last)
+            local rowSpot = tonumber(cr.unitAH or cr.ahPrice or cr.targetPrice)
+            local sellVal = (cr.isCustomPrice or cr.usedVendorFloor) and rowSpot
+                or (liveSpot or rowSpot or (not (canonRec and canonRec.isAbsent) and qlData and qlData.output and qlData.output.last) or nil)
+            local marginPct = (profitVal and costVal and costVal > 0) and (profitVal / costVal * 100) or tonumber(cr.marginPct)
             k1.titleFs:SetText("NET PROFIT / CRAFT")
             k1.valueFs:SetText(daMoney(profitVal, true))
             k1._valColorKey = (profitVal and profitVal > 0) and "accentGreen" or ((profitVal and profitVal < 0) and "accentRed" or "text")
+            k1._daAccentKey = (profitVal and profitVal > 0) and "green" or ((profitVal and profitVal < 0) and "red" or "gold")
             setTextColor(k1.valueFs, pal[k1._valColorKey] or pal.text)
             k1.subFs:SetText("Margin " .. (marginPct and daPct(marginPct, false) or "-")
                 .. " · AH " .. (applyAHCut and "5%" or "Off")
@@ -5883,7 +6577,7 @@ do
             k3._valColorKey = "text"
             setTextColor(k3.valueFs, pal.text)
             local costPct = qlData and qlData.cost and qlData.cost.pct
-            local reagCount = qlData and qlData.movers and #qlData.movers or (rec and rec.reagents and #rec.reagents or 0)
+            local reagCount = qlData and qlData.movers and #qlData.movers or (crec and crec.reagents and #crec.reagents or 0)
             k3.subFs:SetText(win .. " " .. (costPct and daPct(costPct, true) or "-")
                 .. " · " .. tostring(reagCount) .. (reagCount == 1 and " reagent" or " reagents"))
         elseif kind == "writ" or kind == "crate" or kind == "forged" then
@@ -5911,10 +6605,11 @@ do
             local moverCount = qlData and qlData.movers and #qlData.movers or 0
             k3.subFs:SetText((kpis[3] and stripCodes(kpis[3].sub) or win) .. " · " .. tostring(moverCount) .. " parts")
         else
-            local livePrice = qlData and qlData.output and qlData.output.last
+            local livePrice = liveSpot or (not (canonRec and canonRec.isAbsent) and qlData and qlData.output and qlData.output.last) or nil
             k1.titleFs:SetText("MARKET PRICE")
             k1.valueFs:SetText(daMoney(livePrice, false))
             k1._valColorKey = "text"
+            k1._daAccentKey = "gold"
             setTextColor(k1.valueFs, pal.text)
             k1.subFs:SetText("Dep 24h " .. (dep24 and daMoney(dep24) or "-") .. " · " .. (econInfo and econInfo.label or "Active AH"))
 
@@ -5956,7 +6651,12 @@ do
         k4.titleFs:SetText("SALES / DAY")
         k4.valueFs:SetText(daRate(liveSales))
         k4._valColorKey = (liveSales and liveSales > 0) and "textBlue" or "text"
-        setTextColor(k4.valueFs, pal[k4._valColorKey] or pal.text)
+        local k4T = daTheme()
+        local k4CustomDark = (pal and pal.mode ~= "light") and (k4T and k4T.IsCustomSkin and k4T.IsCustomSkin())
+        local k4Col = (k4CustomDark and k4._valColorKey == "textBlue")
+            and { 0.38, 0.82, 1.00, 1.0 }
+            or (pal[k4._valColorKey] or pal.text)
+        setTextColor(k4.valueFs, k4Col)
         k4.subFs:SetText(heatLabel .. " · " .. salesSrc)
 
         k5.titleFs:SetText("COMPETITION")
@@ -5970,7 +6670,7 @@ do
         local series24, series7d = {}, {}
         local pct24, pct7d = nil, nil
         local title24, title7d = "24h Price Trend", "7d Price Trend"
-        if kind == "item" then
+        if kind == "item" and not hasCraftBreakdown then
             series24, pct24, series7d, pct7d = buildItemChartSeries(itemID, econKey)
             title24 = "24h Market Price"
             title7d = "7d Market Price"
@@ -5979,20 +6679,27 @@ do
             series7d = extractDualChartSeries(ql7d or qlData) or {}
             pct24 = (ql24 and ((ql24.output and ql24.output.pct) or (ql24.cost and ql24.cost.pct))) or nil
             pct7d = (ql7d and ((ql7d.output and ql7d.output.pct) or (ql7d.cost and ql7d.cost.pct))) or nil
+            if kind == "item" and (countMaxPoints(series24) < 2 or countMaxPoints(series7d) < 2) then
+                local i24, ip24, i7d, ip7d = buildItemChartSeries(itemID, econKey)
+                if countMaxPoints(series24) < 2 and countMaxPoints(i24) >= 2 then series24, pct24 = i24, ip24 end
+                if countMaxPoints(series7d) < 2 and countMaxPoints(i7d) >= 2 then series7d, pct7d = i7d, ip7d end
+            end
             local hasDual24 = (#series24 >= 2)
             local hasDual7d = (#series7d >= 2)
-            title24 = hasDual24 and "24h Price vs Cost" or "24h Trend"
-            title7d = hasDual7d and "7d Price vs Cost" or "7d Trend"
+            title24 = hasDual24 and "24h Price vs Cost" or (kind == "item" and "24h Market Price" or "24h Trend")
+            title7d = hasDual7d and "7d Price vs Cost" or (kind == "item" and "7d Market Price" or "7d Trend")
         end
         local pts24 = countMaxPoints(series24)
         local pts7d = countMaxPoints(series7d)
         state.charts24Pts = pts24
         state.charts7dPts = pts7d
 
-        local liveRefPrice = (kind == "recipe" and tonumber(r.unitAH or r.ahPrice or r.targetPrice))
-            or (qlData and qlData.output and tonumber(qlData.output.last))
+        local liveRefPrice = (hasCraftBreakdown and not cr.isCustomPrice and not cr.usedVendorFloor and liveSpot)
+            or (hasCraftBreakdown and tonumber(cr.unitAH or cr.ahPrice or cr.targetPrice))
+            or liveSpot
+            or (not (canonRec and canonRec.isAbsent) and qlData and qlData.output and tonumber(qlData.output.last))
             or (itemID and h and h.GetItemMarketPrice and h.GetItemMarketPrice(itemID))
-            or snapPrice
+            or (not (canonRec and canonRec.isAbsent) and snapPrice)
         if pts24 >= 2 or pts7d >= 2 then
             state.chartsCollapsed = false
             if state.chart24h then
@@ -6184,7 +6891,7 @@ do
                     crow.clickable = (mid and mid > 0) and true or false
                     crow.icon:SetTexture(mIcon)
                     crow.nameFs:SetText(string.format("%s (%gx)", mName, tonumber(ce.qty) or 1))
-                    setTextColor(crow.nameFs, crow.clickable and (pal.textBlue or pal.accentBlue or pal.text) or pal.text)
+                    setTextColor(crow.nameFs, crow.clickable and daLinkColor(pal) or pal.text)
                     local wallStr = (ce.wall and ce.wall > 0) and (" · Wall " .. daMoney(ce.wall, false)) or ""
                     local beStr = (ce.breakEven and ce.breakEven > 0) and (" · BE " .. daMoney(ce.breakEven, false)) or ""
                     crow.capFs:SetText("Max <= " .. daMoney(ce.maxBuy, false) .. beStr .. wallStr)
@@ -6365,7 +7072,7 @@ do
                 or (h and h.IsItemSoulbound and h.IsItemSoulbound(itemID))
                 or (h and h.RECIPE_BOP and h.RECIPE_BOP[itemID])
                 or false
-            local rawAH = (not isBoP) and ((kind == "recipe" and tonumber(r.unitAH or r.ahPrice or r.targetPrice)) or (qlData and qlData.output and tonumber(qlData.output.last))) or nil
+            local rawAH = (not isBoP) and (liveSpot or ((kind == "recipe" and tonumber(r.unitAH or r.ahPrice or r.targetPrice)) or (not (canonRec and canonRec.isAbsent) and qlData and qlData.output and tonumber(qlData.output.last)))) or nil
             local ahNet = (rawAH and rawAH > 0) and (applyAHCut and math.floor(rawAH * 0.95 + 0.5) or rawAH) or nil
             local vSell = (vendorFloor and vendorFloor > 0) and vendorFloor or nil
             local bestLabel, bestVal = netDE and "DE" or "None", netDE or -1
@@ -6396,7 +7103,7 @@ do
                 drow.clickable = (mid ~= nil and mid > 0) and true or false
                 drow.icon:SetTexture(mIcon)
                 drow.nameFs:SetText(drow.clickable and (mName .. " >") or mName)
-                setTextColor(drow.nameFs, drow.clickable and (pal.textBlue or pal.accentBlue or pal.text) or pal.text)
+                setTextColor(drow.nameFs, drow.clickable and daLinkColor(pal) or pal.text)
                 local minA = tonumber(oc.minAmount) or 1
                 local maxA = tonumber(oc.maxAmount) or minA
                 local amtSpan = (minA == maxA) and (tostring(minA) .. "x") or (tostring(minA) .. "-" .. tostring(maxA) .. "x")
@@ -6428,21 +7135,23 @@ do
             de:Hide()
         end
 
-        -- Row 3 Left Card: Economy Bar Card + Overview + Full Reagents / Linked Recipes
+        -- Row 3 Left Card: Economy Bar Card + Overview + Permanent Crafting Breakdown + Used In
         paintWindowButtons(win)
         local left = state.leftCard
-        left.hdrTitle:SetText(kind == "item" and "MARKET OVERVIEW" or "CRAFT & MARKET OVERVIEW")
+        left.hdrTitle:SetText((hasCraftBreakdown or kind ~= "item") and "CRAFT & MARKET OVERVIEW" or "MARKET OVERVIEW")
 
         if left.econBarCard then
             local ec = left.econBarCard
-            if kind == "recipe" then
-                local made = math.max(1, tonumber(qlData and qlData.made or r.numMade or (rec and rec.numMade)) or 1)
-                local costVal = (tonumber(r.craftCost) and tonumber(r.craftCost) * made) or (qlData and qlData.cost and qlData.cost.last) or 0
-                local sellUnit = tonumber(r.unitAH or r.ahPrice or r.targetPrice) or (qlData and qlData.output and qlData.output.last) or 0
+            if hasCraftBreakdown then
+                local made = math.max(1, tonumber(qlData and qlData.made or cr.numMade or (crec and crec.numMade)) or 1)
+                local costVal = (tonumber(cr.craftCost) and tonumber(cr.craftCost) * made) or (qlData and qlData.cost and qlData.cost.last) or 0
+                local sellUnit = (not cr.isCustomPrice and not cr.usedVendorFloor and liveSpot)
+                    or tonumber(cr.unitAH or cr.ahPrice or cr.targetPrice)
+                    or (not (canonRec and canonRec.isAbsent) and qlData and qlData.output and qlData.output.last) or 0
                 local grossSale = sellUnit * made
                 local netSale = applyAHCut and math.floor(grossSale * 0.95 + 0.5) or grossSale
-                local profitVal = (tonumber(r.profit) and tonumber(r.profit) * made) or (qlData and qlData.net and qlData.net.last) or (netSale - costVal)
-                local marginPct = (costVal and costVal > 0 and profitVal) and (profitVal / costVal * 100) or tonumber(r.marginPct)
+                local profitVal = (tonumber(cr.profit) and tonumber(cr.profit) * made) or (qlData and qlData.net and qlData.net.last) or (netSale - costVal)
+                local marginPct = (costVal and costVal > 0 and profitVal) and (profitVal / costVal * 100) or tonumber(cr.marginPct)
                 local maxBar = math.max(1, costVal or 0, netSale or 0, math.abs(profitVal or 0))
 
                 local b1, b2, b3 = ec.craftBars[1], ec.craftBars[2], ec.craftBars[3]
@@ -6474,7 +7183,7 @@ do
                     if cnt > 0 then avg7d = math.floor(sum / cnt + 0.5) end
                 end
                 if not avg7d then
-                    avg7d = (snapRec and snapRec.marketValue) or snapPrice or liveRefPrice
+                    avg7d = val7d or (snapRec and snapRec.marketValue) or snapPrice or liveRefPrice
                 end
                 local vFloor = (vendorFloor and vendorFloor > 0) and vendorFloor or nil
                 local vLive = (liveRefPrice and liveRefPrice > 0) and liveRefPrice or nil
@@ -6535,12 +7244,24 @@ do
         end
 
         local movers = (qlData and qlData.movers) or {}
-        local linked = (kind == "item" and qlData and qlData.linkedRecipes) or nil
         local used = 0
-        if kind ~= "item" then
-            left.reagTitle:SetText("REAGENTS & MOVERS BREAKDOWN (" .. tostring(#movers) .. " | click market item to inspect)")
+        if hasCraftBreakdown or kind == "writ" or kind == "crate" or kind == "forged" then
+            state.hasCraftBreakdown = hasCraftBreakdown
+            state.craftSectionActive = true
+            state.craftSourceKind = hasCraftBreakdown and "crafted" or "turnin"
+            state.craftSourceText = nil
+            if hasCraftBreakdown then
+                local profLbl = formatProfLabel(crec and crec.prof or cr.prof)
+                local sk = tonumber((cr and cr.skill) or (crec and crec.skill))
+                local profSuffix = profLbl and (" - " .. profLbl .. (sk and (" (" .. tostring(sk) .. ")") or "")) or ""
+                left.reagTitle:SetText("CRAFTING BREAKDOWN" .. profSuffix .. " (" .. tostring(#movers) .. " | click reagent to inspect)")
+            else
+                left.reagTitle:SetText("COMPONENTS BREAKDOWN (" .. tostring(#movers) .. " | click item to inspect)")
+            end
+            paintMutedFs(left.reagTitle, pal.gold or pal.accentOrange or pal.textMuted, false, 1.0)
+            for _, hfs in ipairs(left.colHeaders or {}) do hfs:Show() end
             local totalExt = 0
-            if kind == "recipe" then
+            if hasCraftBreakdown then
                 for _, m in ipairs(movers) do
                     local mQty = tonumber(m.qty) or 1
                     local mUnit = tonumber(m.unitPrice) or (m.series and m.series.last)
@@ -6569,11 +7290,11 @@ do
                 row.clickable = (mid ~= nil and mid > 0 and not m.pureVendor) and true or false
                 row.icon:SetTexture(mIcon)
                 row.nameFs:SetText(row.clickable and (mName .. " >") or mName)
-                setTextColor(row.nameFs, row.clickable and (pal.textBlue or pal.accentBlue or pal.text) or pal.text)
+                setTextColor(row.nameFs, row.clickable and daLinkColor(pal) or pal.text)
                 row.qtyFs:SetText(tostring(mQty) .. "x")
                 row.unitFs:SetText(daMoney(mUnit, false))
 
-                if kind == "recipe" and mExt and mExt > 0 and totalExt > 0 then
+                if hasCraftBreakdown and mExt and mExt > 0 and totalExt > 0 then
                     local sharePct = math.max(0, math.min(100, math.floor((mExt / totalExt) * 100 + 0.5)))
                     row._hasShareBar = true
                     row._shareRatio = math.max(0.03, math.min(1, mExt / totalExt))
@@ -6601,46 +7322,36 @@ do
                 row.stockFs:SetText(daNum(mOwn) .. " / " .. (mListed ~= nil and daNum(mListed) or "-"))
                 row:Show()
             end
-        else
-            left.reagTitle:SetText("RELATED CATALOG RECIPES (" .. tostring(linked and #linked or 0) .. " | click to inspect craft)")
-            for _, entry in ipairs(linked or {}) do
-                used = used + 1
-                local row = ensureReagentRow(used)
-                local lrec = entry.recipe
-                local oid = lrec.outputItemID
-                local rName = lrec.name or (oid and h and h.ItemName and h.ItemName(oid)) or "Recipe"
-                local rIcon = (oid and h and h.ItemIcon and h.ItemIcon(oid)) or (h and h.QUESTION_ICON) or 134400
-                local rPrice = oid and h and h.GetItemMarketPrice and h.GetItemMarketPrice(oid)
-                row.itemID = oid
-                row.itemName = rName
-                row.itemIcon = rIcon
-                row.drillRecipe = lrec
-                row.clickable = true
-                row._hasShareBar = false
-                row._shareRatio = nil
-                if row.shareTrack then row.shareTrack:Hide() end
-                if row.shareFill then row.shareFill:Hide() end
-                row.icon:SetTexture(rIcon)
-                row.nameFs:SetText(rName .. " >")
-                setTextColor(row.nameFs, pal.textBlue or pal.accentBlue or pal.text)
-                row.qtyFs:SetText(tostring(entry.qty or 1) .. "x")
-                row.unitFs:SetText(daMoney(rPrice, false))
-                row.extFs:SetText(formatProfLabel(lrec.prof) or "-")
-                row.tagFs:SetText(tostring(entry.role or "Recipe"))
-                row._tagColKey = "textMuted"
-                setTextColor(row.tagFs, pal.textMuted)
-                row.stockFs:SetText(oid and daNum(getOwnedTotal(oid)) or "-")
-                row:Show()
+            state.reagentUsedCount = used
+            for i = used + 1, #state.reagentRows do
+                state.reagentRows[i]:Hide()
             end
+            left.reagEmptyFs:SetShown(used == 0)
+            if used == 0 then
+                left.reagEmptyFs:SetText("No reagents listed.")
+                paintMutedFs(left.reagEmptyFs, pal.textMuted, true, 0.62)
+            end
+        else
+            local srcKind, srcText = classifyNonCraftableSource(itemID, target)
+            state.hasCraftBreakdown = false
+            state.craftSectionActive = false
+            state.craftSourceKind = srcKind
+            state.craftSourceText = srcText
+            state.reagentUsedCount = 0
+            for i = 1, #state.reagentRows do
+                state.reagentRows[i]:Hide()
+            end
+            for _, hfs in ipairs(left.colHeaders or {}) do hfs:Hide() end
+            left.reagTitle:SetText("CRAFTING BREAKDOWN")
+            paintMutedFs(left.reagTitle, pal.textMuted, true, 0.58)
+            left.reagEmptyFs:SetText(srcText)
+            paintMutedFs(left.reagEmptyFs, pal.textMuted, true, 0.62)
+            left.reagEmptyFs:Show()
         end
-        state.reagentUsedCount = used
-        for i = used + 1, #state.reagentRows do
-            state.reagentRows[i]:Hide()
-        end
-        left.reagEmptyFs:SetShown(used == 0)
-        if used == 0 then
-            left.reagEmptyFs:SetText(kind == "item" and "Standalone market item - no linked catalog recipes." or "No reagents listed.")
-        end
+
+        local preserveExpanded = (type(restoreOpts) == "table" and restoreOpts.usedInExpanded ~= nil)
+            and (restoreOpts.usedInExpanded == true) or nil
+        renderUsedInSection(itemID, econKey, win, pal, preserveExpanded)
 
         -- Row 3 Right Column Card 1: Competition, Velocity & Quality
         state.compCard._activeTier = resolveHeatTier(heatLabel, demandInfo, liveSales)
@@ -6940,7 +7651,20 @@ do
         end
         DeepAnalysis.Layout(state.viewportW, state.viewportH, true)
         if not preserveScroll then
-            setScrollOffset(0)
+            local targetScroll = 0
+            if type(restoreOpts) == "table" then
+                local saved = tonumber(restoreOpts.scrollOffset) or 0
+                if saved > 0 then
+                    targetScroll = saved
+                elseif restoreOpts.section and state.sectionAnchorY and state.sectionAnchorY[restoreOpts.section] then
+                    local anchorY = state.sectionAnchorY[restoreOpts.section]
+                    local viewH = (state.scrollFrame and state.scrollFrame.GetHeight and state.scrollFrame:GetHeight()) or state.viewportH or 500
+                    if anchorY > viewH * 0.45 then
+                        targetScroll = math.max(0, anchorY - 28)
+                    end
+                end
+            end
+            setScrollOffset(targetScroll)
         end
 
         if a and a.ui and a.ui.statusText then
@@ -6950,8 +7674,14 @@ do
         return true
     end
 
-    function DeepAnalysis.ShowTarget(target)
-        return DeepAnalysis.Render(target, false)
+    function DeepAnalysis.ShowTarget(target, restoreOpts)
+        return DeepAnalysis.Render(target, false, restoreOpts)
+    end
+
+    function DeepAnalysis.Invalidate()
+        state.qlDualCache = nil
+        state.lastCraftPriceVer = nil
+        state.dirtyThemeRender = true
     end
 
     function DeepAnalysis.Refresh()
@@ -6974,6 +7704,8 @@ do
             data = state.data,
             window = state.window,
             scrollOffset = state.scrollOffset,
+            lastDrillSection = state.lastDrillSection,
+            sectionAnchorY = state.sectionAnchorY,
             dirtyThemeRender = state.dirtyThemeRender == true,
             favWatched = (state.header and state.header.favBtn and state.header.favBtn._watched) and true or false,
             chartsCollapsed = state.chartsCollapsed == true,
@@ -6984,6 +7716,13 @@ do
             vcHistBuckets = state.vcHistBuckets,
             deShown = (state.deCard and state.deCard:IsShown()) and true or false,
             deOutcomeCount = state.deOutcomeUsed or 0,
+            hasCraftBreakdown = state.hasCraftBreakdown == true,
+            craftSourceKind = state.craftSourceKind,
+            craftSourceText = state.craftSourceText,
+            reagentUsedCount = state.reagentUsedCount or 0,
+            usedInTotalCount = state.usedInTotalCount or 0,
+            usedInShownCount = state.usedInShownCount or 0,
+            usedInExpanded = state.usedInExpanded == true,
             allAhShown = (state.allAhCard and state.allAhCard:IsShown()) and true or false,
             allAhUsed = state.allAhUsedCount or 0,
             allAhFilter = state.allAhFilter,

@@ -227,10 +227,23 @@ local function resolvePlayerName(override)
     if type(override) == "string" and override ~= "" and not isSecret(override) then
         return override
     end
+    if type(ns.GetPlayerFullName) == "function" then
+        local ok, full = pcall(ns.GetPlayerFullName)
+        if ok and type(full) == "string" and full ~= "" and not isSecret(full) then
+            return full
+        end
+    end
     if _G.UnitName then
-        local ok, nm = pcall(_G.UnitName, "player")
-        if ok and type(nm) == "string" and nm ~= "" and not isSecret(nm) then
-            return nm
+        local ok, first, second = pcall(_G.UnitName, "player")
+        if ok and type(first) == "string" and first ~= "" and not isSecret(first) then
+            if _G.RegionalUniqueNamesEnabled and _G.RegionalUniqueNamesEnabled()
+                and type(second) == "string" and second ~= "" and not isSecret(second) then
+                local cns = _G.Constants and _G.Constants.CharacterNameSeparatorConsts
+                local sep = (cns and cns.CHARACTERNAME_SURNAME_SEPARATOR) or " "
+                if isSecret(sep) or type(sep) ~= "string" then sep = " " end
+                return first .. sep .. second
+            end
+            return first
         end
     end
     local ck = ns.app and ns.app.charKey
@@ -1443,7 +1456,7 @@ function Brief.Create(parent, opts)
 
     local state = {
         rangeKey = savedRange,
-        mode = (db().dashboardMode == "classic") and "classic" or "brief",
+        mode = (db().dashboardMode == "classic" or db().dashboardMode == "bloomberg") and db().dashboardMode or "brief",
         wealthMode = "auto", -- "auto" | "hourly" | "daily"
         effectiveWealthMode = "hourly",
         width = max(960, safeNum(parent and parent.GetWidth and parent:GetWidth(), 1080) or 1080),
@@ -1508,19 +1521,21 @@ function Brief.Create(parent, opts)
     view.metaPill = metaPill
 
     local modeSeg = createSegmentedFallback(banner, {
-        { key = "brief",   label = "Morning Brief", width = 106 },
-        { key = "classic", label = "Market Pulse",  width = 100 },
+        { key = "bloomberg", label = "GoblinTV",      width = 88 },
+        { key = "brief",     label = "Morning Brief", width = 102 },
+        { key = "classic",   label = "Market Pulse",  width = 96 },
     }, {
         height = 26,
         fontSize = 11,
         activeKey = state.mode,
         onChange = function(k)
-            state.mode = (k == "classic") and "classic" or "brief"
+            local m = (k == "classic" or k == "bloomberg") and k or "brief"
+            state.mode = m
             if type(_G.MerchantMasterDB) == "table" then
-                _G.MerchantMasterDB.dashboardMode = state.mode
+                _G.MerchantMasterDB.dashboardMode = m
             end
             if type(opts.onModeChange) == "function" then
-                opts.onModeChange(state.mode)
+                opts.onModeChange(m)
             end
         end,
     })
@@ -1552,6 +1567,20 @@ function Brief.Create(parent, opts)
     })
     rangeSeg.frame:SetPoint("RIGHT", modeSeg.frame, "LEFT", -8, 0)
     view.rangeSeg = rangeSeg
+
+    local function fitBannerHeader()
+        local w = safeNum(state.width, safeNum(banner and banner.GetWidth and banner:GetWidth(), 1036)) or 1036
+        local modeW = safeNum(modeSeg.frame and modeSeg.frame.GetWidth and modeSeg.frame:GetWidth(), 286) or 286
+        local rangeW = safeNum(rangeSeg.frame and rangeSeg.frame.GetWidth and rangeSeg.frame:GetWidth(), 146) or 146
+        local pillW = safeNum(metaPill.frame and metaPill.frame.GetWidth and metaPill.frame:GetWidth(), 160) or 160
+        local maxGreetW = max(160, w - modeW - rangeW - pillW - 32)
+        local strW = greetingFs.GetStringWidth and safeNum(greetingFs:GetStringWidth(), 0) or 0
+        if strW > maxGreetW then
+            greetingFs:SetWidth(maxGreetW)
+        elseif greetingFs.SetWidth then
+            greetingFs:SetWidth(0)
+        end
+    end
 
     -----------------------------------------------------------------------------------------------
     -- Row 1: 4 Executive KPI Cards (kpiH = 86..92, zero internal overlap)
@@ -2153,6 +2182,7 @@ function Brief.Create(parent, opts)
         banner:ClearAllPoints()
         banner:SetPoint("TOPLEFT", self, "TOPLEFT", 0, 0)
         banner:SetSize(W, bannerH)
+        fitBannerHeader()
 
         -- Row 1: 4 Equal Executive KPI Cards
         local kpiY = -(bannerH + gap)
@@ -2263,6 +2293,7 @@ function Brief.Create(parent, opts)
         local freshness = (type(opts.getFreshnessText) == "function" and opts.getFreshnessText())
             or ((ns.Pricing and ns.Pricing.GetSnapshotFreshnessLabel and ns.Pricing.GetSnapshotFreshnessLabel(econKey)) or "Live")
         metaPill:SetVariant("neutral", econKey .. " | " .. tostring(freshness))
+        fitBannerHeader()
 
         local summary = Brief.ComputeAHSalesSummary(econKey, state.rangeKey, now)
         local portfolio = readPortfolio(econKey, state.rangeKey)
@@ -2274,6 +2305,7 @@ function Brief.Create(parent, opts)
         state.wealthSeries = wealthSeries
         state.effectiveWealthMode = wealthSeries.mode
         state.alerts = alerts
+        state.lastPriceRev = (type(ns.GetPriceDataRevision) == "function" and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
 
         -- Sync wealth toggle silently
         if wealthToggle and wealthToggle.SetActive then
@@ -2375,7 +2407,8 @@ function Brief.Create(parent, opts)
     end
 
     function view:SetMode(mode, silent)
-        state.mode = (mode == "classic") and "classic" or "brief"
+        local m = (mode == "classic" or mode == "bloomberg") and mode or "brief"
+        state.mode = m
         if modeSeg and modeSeg.SetActive then
             modeSeg:SetActive(state.mode, silent ~= false)
         end
@@ -2406,6 +2439,14 @@ function Brief.Create(parent, opts)
     function view:Invalidate()
         Brief.InvalidateCache()
     end
+
+    view:HookScript("OnShow", function()
+        local curRev = (type(ns.GetPriceDataRevision) == "function" and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
+        if state.lastPriceRev ~= nil and state.lastPriceRev ~= curRev then
+            Brief.InvalidateCache()
+            view:Refresh(false, state.lastNowOverride)
+        end
+    end)
 
     function view:GetState()
         return state

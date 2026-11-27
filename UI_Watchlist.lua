@@ -37,7 +37,7 @@ C.FILTER_PILLS = {
 	{ key = "recipes",    label = "Recipes",    tip = "Show only favorited crafting recipes." },
 	{ key = "items",      label = "Items",      tip = "Show only favorited standalone items and materials." },
 	{ key = "profitable", label = "Profitable", tip = "Show only favorited recipes with positive net crafting profit." },
-	{ key = "price_drop", label = "Price Drop", tip = "Show favorites whose current AH price is at least 10% below their 7-day baseline." },
+	{ key = "price_drop", label = "Price Drop", tip = "Show favorites whose current AH price is at least 10% below their 24-hour or 7-day baseline." },
 }
 
 C.KNOWN_FILTERS = {
@@ -57,18 +57,18 @@ C.DEMAND_FILTERS_FALLBACK = {
 }
 
 C.COLUMNS = {
-	-- 13 default visible columns (minWidth sum = 740px + 60px gaps = 800px, fits inside 1020px viewport)
+	-- 15 default visible columns (minWidth sum = 824px + 70px gaps = 894px, fits inside 1020px viewport)
 	{ key = "fav",           label = "",             width = 26,  minWidth = 24,  grow = 0,    align = "CENTER", defaultAsc = true,  locked = true, noSort = true, isStar = true,
 	  hint = "Favorite star: click to remove this recipe or item from your Watchlist." },
-	{ key = "name",          label = "Item / Recipe", width = 186, minWidth = 136, grow = 1.70, align = "LEFT",   defaultAsc = true,  locked = true, icon = true,
+	{ key = "name",          label = "Item / Recipe", width = 186, minWidth = 124, grow = 1.70, align = "LEFT",   defaultAsc = true,  locked = true, icon = true,
 	  hint = "Item or recipe name. Left-click for Quick Look, Right-click for Deep Analysis, Shift-click to add to Shopping List." },
-	{ key = "kindLabel",     label = "Type",         width = 58,  minWidth = 48,  grow = 0.25, align = "LEFT",   defaultAsc = true,
+	{ key = "kindLabel",     label = "Type",         width = 58,  minWidth = 42,  grow = 0.25, align = "LEFT",   defaultAsc = true,
 	  hint = "Profession abbreviation for recipes (e.g. LW, Alch) or Item for standalone items." },
-	{ key = "knownSort",     label = "Known",        width = 48,  minWidth = 42,  grow = 0.15, align = "CENTER", defaultAsc = false,
+	{ key = "knownSort",     label = "Known",        width = 48,  minWidth = 38,  grow = 0.15, align = "CENTER", defaultAsc = false,
 	  hint = "Whether you (or an alt in All Chars mode) know the recipe. Standalone items show -." },
-	{ key = "ownedQty",      label = "Owned",        width = 48,  minWidth = 40,  grow = 0.20, align = "RIGHT",  defaultAsc = false,
+	{ key = "ownedQty",      label = "Owned",        width = 48,  minWidth = 36,  grow = 0.20, align = "RIGHT",  defaultAsc = false,
 	  hint = "Quantity owned across bags, bank, and tracked alts." },
-	{ key = "listed",        label = "Listed",       width = 48,  minWidth = 38,  grow = 0.20, align = "RIGHT",  defaultAsc = false,
+	{ key = "listed",        label = "Listed",       width = 48,  minWidth = 36,  grow = 0.20, align = "RIGHT",  defaultAsc = false,
 	  hint = "Active Auction House listing quantity." },
 	{ key = "unitAH",        label = "AH Price",     width = 76,  minWidth = 62,  grow = 0.45, align = "RIGHT",  defaultAsc = false,
 	  hint = "Current Auction House unit buyout price." },
@@ -80,11 +80,17 @@ C.COLUMNS = {
 	  hint = "Return on craft cost (Profit / Craft Cost). Standalone items show -." },
 	{ key = "salesPerDay",   label = "Sales/d",      width = 66,  minWidth = 54,  grow = 0.35, align = "RIGHT",  defaultAsc = false,
 	  hint = "Estimated daily AH sales velocity." },
-	{ key = "demandSort",    label = "Demand",       width = 96,  minWidth = 76,  grow = 0.60, align = "LEFT",   defaultAsc = false, heatStrip = true,
+	{ key = "demandSort",    label = "Demand",       width = 96,  minWidth = 74,  grow = 0.60, align = "LEFT",   defaultAsc = false, heatStrip = true,
 	  hint = "Market demand rating and 24-hour heat strip. Click when snapshot data exists for hourly timing." },
+	{ key = "trend24hDelta", label = "24h Chg",      width = 72,  minWidth = 56,  grow = 0.40, align = "RIGHT",  defaultAsc = true,
+	  hint = "Price change in gold/silver over the last 24 hours (Current AH vs 24h ago). Green = cheaper now; red = higher." },
+	{ key = "trend24hPct",   label = "24h Trend",    width = 62,  minWidth = 48,  grow = 0.25, align = "RIGHT",  defaultAsc = true,
+	  hint = "Current AH unit price vs 24 hours ago percentage change. Green = dropped (buy deal); red = rose." },
 	{ key = "trendPct",      label = "7d Trend",     width = 60,  minWidth = 48,  grow = 0.25, align = "RIGHT",  defaultAsc = true,
 	  hint = "Current AH unit price vs 7-day baseline percentage change." },
-	-- 7 default hidden optional columns (toggleable in Cols popover)
+	-- 8 default hidden optional columns (toggleable in Cols popover)
+	{ key = "trend7dDelta",  label = "7d Chg",       width = 72,  minWidth = 56,  grow = 0.40, align = "RIGHT",  defaultAsc = true,  defaultHidden = true,
+	  hint = "Price change in gold/silver vs 7-day baseline." },
 	{ key = "subCraftLabel", label = "Sub-Craft",    width = 72,  minWidth = 56,  grow = 0.30, align = "LEFT",   defaultAsc = true,  defaultHidden = true,
 	  hint = "Sub-craft reagent sourcing mode for recipes (Sub-Craft or Buy). Standalone items show -." },
 	{ key = "vendorSell",    label = "Vendor Sell",  width = 74,  minWidth = 58,  grow = 0.40, align = "RIGHT",  defaultAsc = false, defaultHidden = true,
@@ -111,7 +117,10 @@ C.NUMERIC_KEYS = {
 	marginPct = true,
 	salesPerDay = true,
 	demandSort = true,
+	trend24hDelta = true,
+	trend24hPct = true,
 	trendPct = true,
+	trend7dDelta = true,
 	vendorSell = true,
 	turnoverPerDay = true,
 	requiredSkill = true,
@@ -867,6 +876,56 @@ function H.computeTrend7d(itemID, unitAH, econKey, now)
 	return nil, nil, nil
 end
 
+function H.computeTrend24h(itemID, unitAH, econKey, now)
+	local id = posInt(itemID)
+	if not id then return nil, nil, nil, nil end
+	local tNow = number(now) or H.now()
+
+	-- 1. Primary 24h trend engine (identical source to Quick Look & Bloomberg)
+	if ns.MarketScan and type(ns.MarketScan.GetItemTrend24h) == "function" then
+		local ok, t24 = pcall(ns.MarketScan.GetItemTrend24h, id, econKey, tNow)
+		if ok and type(t24) == "table" then
+			local startP = nonnegative(t24.startPrice24h)
+			local curP = (number(unitAH) and unitAH > 0) and unitAH or nonnegative(t24.currentPrice)
+			if startP and startP > 0 and curP and curP > 0 then
+				if number(t24.trendPct) ~= nil or (tonumber(t24.hoursCollected) or 0) >= 2 or curP ~= startP then
+					local delta = curP - startP
+					local pct = (delta / startP) * 100
+					if number(pct) then
+						return pct, delta, startP, t24.source or "trend24h"
+					end
+				end
+			end
+		end
+	end
+
+	-- 2. Fallback: Pricing.GetItemHeatStrip24h hourly curve when live 24h scans absent
+	if number(unitAH) and unitAH > 0 and ns.Pricing and type(ns.Pricing.GetItemHeatStrip24h) == "function" then
+		local ok, strip = pcall(ns.Pricing.GetItemHeatStrip24h, id, econKey)
+		if ok and type(strip) == "table" and type(strip.hourly) == "table" then
+			local curH = currentLocalHour()
+			local earliestP, posCount = nil, 0
+			for offset = 1, 24 do
+				local h = (curH + offset) % 24
+				local p = nonnegative(strip.hourly[h])
+				if p and p > 0 then
+					posCount = posCount + 1
+					if not earliestP then earliestP = p end
+				end
+			end
+			if earliestP and earliestP > 0 and (posCount >= 2 or earliestP ~= unitAH) then
+				local delta = unitAH - earliestP
+				local pct = (delta / earliestP) * 100
+				if number(pct) then
+					return pct, delta, earliestP, "heat24"
+				end
+			end
+		end
+	end
+
+	return nil, nil, nil, nil
+end
+
 function H.buildStatsContext(context, econKey, db, now)
 	if type(context) == "table" and type(context.statsContext) == "table" then
 		return context.statsContext
@@ -972,6 +1031,8 @@ function H.evaluateRecipeEntry(entry, recipe, context, statsCtx, econKey, now)
 	local known = (rRow.known == true) or (type(rRow.craftAbility) == "table" and rRow.craftAbility.known == true)
 	local knownSort = known and 1 or 0
 	local trendPct, trendBaseline, trendSource = H.computeTrend7d(outID, unitAH, econKey, now)
+	local trend7dDelta = (number(unitAH) and number(trendBaseline)) and (unitAH - trendBaseline) or nil
+	local trend24hPct, trend24hDelta, trend24hStart, trend24hSource = H.computeTrend24h(outID, unitAH, econKey, now)
 	local kindLabel = H.profShort(recipe.prof)
 	local profInfo = ns.PROF_BY_KEY and recipe.prof and ns.PROF_BY_KEY[recipe.prof]
 	local categoryLabel = (type(profInfo) == "table" and text(profInfo.label) ~= "" and profInfo.label) or kindLabel
@@ -1011,6 +1072,11 @@ function H.evaluateRecipeEntry(entry, recipe, context, statsCtx, econKey, now)
 		trendPct = trendPct,
 		trendBaseline = trendBaseline,
 		trendSource = trendSource,
+		trend7dDelta = trend7dDelta,
+		trend24hPct = trend24hPct,
+		trend24hDelta = trend24hDelta,
+		trend24hStart = trend24hStart,
+		trend24hSource = trend24hSource,
 		subCraftLabel = H.deriveSubCraftLabel(rRow),
 		vendorSell = vendorSell,
 		categoryLabel = categoryLabel,
@@ -1051,22 +1117,28 @@ function H.evaluateItemEntry(entry, context, econKey, now, catByID)
 	local salesPerDay, salesScope, salesWindowDays
 
 	if sellable then
+		local rawAH, rawSrc
 		if ns.GetItemMarketPrice then
-			local rawAH, rawSrc = ns.GetItemMarketPrice(id)
+			rawAH, rawSrc = ns.GetItemMarketPrice(id)
 			unitAH = nonnegative(rawAH)
 			if unitAH then ahSource = rawSrc end
 		end
 		if ns.GetNumListed then
 			listed = nonnegative(ns.GetNumListed(id))
 		end
+		if type(ns.GetItemMarketValue7d) == "function" then
+			marketValue = nonnegative(ns.GetItemMarketValue7d(id))
+		end
 		if type(ns.QueryLocalSnapshot) == "function" then
 			local _, snapRec = ns.QueryLocalSnapshot(id, econKey)
 			if type(snapRec) == "table" then
-				marketValue = nonnegative(snapRec.marketValue) or nonnegative(snapRec.historical)
-				if listed == nil and nonnegative(snapRec.qty) then
+				if marketValue == nil then
+					marketValue = nonnegative(snapRec.marketValue) or nonnegative(snapRec.historical)
+				end
+				if not ns.GetNumListed and listed == nil and nonnegative(snapRec.qty) then
 					listed = nonnegative(snapRec.qty)
 				end
-				if unitAH == nil then
+				if not ns.GetItemMarketPrice and unitAH == nil then
 					unitAH = nonnegative(snapRec.minBuyout) or marketValue
 				end
 			end
@@ -1102,6 +1174,8 @@ function H.evaluateItemEntry(entry, context, econKey, now, catByID)
 	local demand = ns.EvaluateMarketDemand and ns.EvaluateMarketDemand(listed, salesPerDay, sellable) or nil
 	local demandSort = demand and number(demand.demandScore) or nil
 	local trendPct, trendBaseline, trendSource = H.computeTrend7d(id, unitAH, econKey, now)
+	local trend7dDelta = (number(unitAH) and number(trendBaseline)) and (unitAH - trendBaseline) or nil
+	local trend24hPct, trend24hDelta, trend24hStart, trend24hSource = H.computeTrend24h(id, unitAH, econKey, now)
 
 	-- Standalone items MUST keep craftCost, profit, marginPct, knownSort as nil (rendered as muted "-")
 	return {
@@ -1138,6 +1212,11 @@ function H.evaluateItemEntry(entry, context, econKey, now, catByID)
 		trendPct = trendPct,
 		trendBaseline = trendBaseline,
 		trendSource = trendSource,
+		trend7dDelta = trend7dDelta,
+		trend24hPct = trend24hPct,
+		trend24hDelta = trend24hDelta,
+		trend24hStart = trend24hStart,
+		trend24hSource = trend24hSource,
 		subCraftLabel = nil,
 		vendorSell = vendorSell,
 		categoryLabel = (catEntry and catEntry.categoryLabel) or "Item",
@@ -1226,7 +1305,8 @@ function W.FilterSort(rows, filters, sort)
 		elseif pill == "profitable" then
 			keep = (number(r.profit) ~= nil and r.profit > 0)
 		elseif pill == "price_drop" then
-			keep = (number(r.trendPct) ~= nil and r.trendPct <= C.PRICE_DROP_THRESHOLD)
+			keep = (number(r.trend24hPct) ~= nil and r.trend24hPct <= C.PRICE_DROP_THRESHOLD)
+				or (number(r.trendPct) ~= nil and r.trendPct <= C.PRICE_DROP_THRESHOLD)
 		end
 		if keep and knownFilter ~= "all" then
 			if knownFilter == "known" then
@@ -1347,7 +1427,21 @@ function H.normalizeColumnConfig(db)
 	for _, col in ipairs(C.COLUMNS) do
 		if not seen[col.key] then
 			seen[col.key] = true
-			cleanOrder[#cleanOrder + 1] = col.key
+			if hadOrder and (col.key == "trend24hDelta" or col.key == "trend24hPct") then
+				local inserted = false
+				for i, existingKey in ipairs(cleanOrder) do
+					if existingKey == "trendPct" then
+						table.insert(cleanOrder, i, col.key)
+						inserted = true
+						break
+					end
+				end
+				if not inserted then
+					cleanOrder[#cleanOrder + 1] = col.key
+				end
+			else
+				cleanOrder[#cleanOrder + 1] = col.key
+			end
 			if col.defaultHidden and cfg.hidden[col.key] == nil then
 				cfg.hidden[col.key] = true
 			end
@@ -1630,7 +1724,9 @@ end
 
 function H.formatCellValues(data, pal)
 	local cached = S.cellValueCache[data]
-	local priceVer = (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion()) or ns.priceCacheEpoch
+	local priceVer = (ns.GetPriceDataRevision and ns.GetPriceDataRevision())
+		or (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion())
+		or ns.priceCacheEpoch
 	if cached and cached.epoch == S.cellCacheEpoch and cached.pal == pal and cached.priceVer == priceVer then
 		return cached.values
 	end
@@ -1685,22 +1781,32 @@ function H.formatCellValues(data, pal)
 	local dmBadge = dm and (dm.shortBadge or dm.badge or dm.label) or ""
 	values.demandSort = dmBadge ~= "" and (themeText(dmBadge) or dmBadge) or mutedDash
 
-	if number(data.trendPct) then
-		local tp = data.trendPct
+	local function formatSignedPct(val)
+		if not number(val) then return mutedDash end
 		local col
-		if tp <= C.PRICE_DROP_THRESHOLD then
+		if val <= C.PRICE_DROP_THRESHOLD then
 			col = okHex
-		elseif tp < -0.5 then
+		elseif val < -0.5 then
 			col = okHex
-		elseif tp > 0.5 then
+		elseif val > 0.5 then
 			col = badHex
 		else
 			col = mutedHex
 		end
-		values.trendPct = "|cff" .. col .. string.format("%+.0f%%", tp) .. "|r"
-	else
-		values.trendPct = mutedDash
+		return "|cff" .. col .. string.format("%+.0f%%", val) .. "|r"
 	end
+
+	local function formatSignedMoneyDelta(val)
+		if not number(val) then return mutedDash end
+		local col = (val < 0 and okHex) or (val > 0 and badHex) or mutedHex
+		local plain = money(val, "neutral"):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "")
+		return "|cff" .. col .. plain .. "|r"
+	end
+
+	values.trend24hDelta = formatSignedMoneyDelta(data.trend24hDelta)
+	values.trend24hPct = formatSignedPct(data.trend24hPct)
+	values.trendPct = formatSignedPct(data.trendPct)
+	values.trend7dDelta = formatSignedMoneyDelta(data.trend7dDelta)
 
 	values.subCraftLabel = text(data.subCraftLabel) ~= "" and data.subCraftLabel or mutedDash
 	values.vendorSell = number(data.vendorSell) and money(data.vendorSell) or ("|cff" .. mutedHex .. "n/a|r")
@@ -1941,10 +2047,38 @@ function H.showRowTooltip(owner, data)
 	if number(data.marginPct) then
 		GameTooltip:AddDoubleLine("Margin", string.format("%+.1f%%", data.marginPct), 0.72, 0.72, 0.76, data.marginPct >= 0 and 0.25 or 1, data.marginPct >= 0 and 0.9 or 0.35, 0.35)
 	end
+	if number(data.trend24hPct) then
+		local t24 = data.trend24hPct
+		local d24 = number(data.trend24hDelta)
+		local s24 = number(data.trend24hStart)
+		local curP = number(data.unitAH)
+		local detail = ""
+		local function plainMoney(v, sgn)
+			return (money(v, sgn):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""))
+		end
+		if d24 ~= nil and s24 and curP then
+			detail = string.format(" (%s: %s -> %s)", plainMoney(d24, "neutral"), plainMoney(s24), plainMoney(curP))
+		elseif d24 ~= nil then
+			detail = string.format(" (%s)", plainMoney(d24, "neutral"))
+		end
+		GameTooltip:AddDoubleLine("24h Trend", string.format("%+.1f%%%s", t24, detail), 0.72, 0.72, 0.76, t24 <= 0 and 0.25 or 1, t24 <= 0 and 0.9 or 0.35, 0.35)
+	end
 	if number(data.trendPct) then
 		local tp = data.trendPct
-		local baseText = number(data.trendBaseline) and (" (7d avg " .. money(data.trendBaseline) .. ")") or ""
-		GameTooltip:AddDoubleLine("7d Trend", string.format("%+.1f%%%s", tp, baseText), 0.72, 0.72, 0.76, tp <= 0 and 0.25 or 1, tp <= 0 and 0.9 or 0.35, 0.35)
+		local d7 = number(data.trend7dDelta)
+		local base = number(data.trendBaseline)
+		local function plainMoney(v, sgn)
+			return (money(v, sgn):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""))
+		end
+		local extra = ""
+		if d7 ~= nil and base then
+			extra = string.format(" (%s, 7d avg %s)", plainMoney(d7, "neutral"), plainMoney(base))
+		elseif d7 ~= nil then
+			extra = string.format(" (%s)", plainMoney(d7, "neutral"))
+		elseif base then
+			extra = string.format(" (7d avg %s)", plainMoney(base))
+		end
+		GameTooltip:AddDoubleLine("7d Trend", string.format("%+.1f%%%s", tp, extra), 0.72, 0.72, 0.76, tp <= 0 and 0.25 or 1, tp <= 0 and 0.9 or 0.35, 0.35)
 	end
 	GameTooltip:AddDoubleLine("Listed / Owned", string.format("%d / %d", math.floor(tonumber(data.listed) or 0), math.floor(tonumber(data.ownedQty) or 0)), 0.72, 0.72, 0.76, 1, 1, 1)
 	GameTooltip:AddLine(" ", 1, 1, 1)
@@ -2802,6 +2936,14 @@ end
 function W.Refresh(context)
 	if not (S.view and S.tbl) then return end
 	if context then S.latest = context end
+	local curPriceRev = (ns.GetPriceDataRevision and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
+	if S.lastPriceRev ~= curPriceRev then
+		S.evalSig = nil
+		S.rows = nil
+		S.filteredRows = nil
+		S.cellCacheEpoch = (S.cellCacheEpoch or 0) + 1
+		S.lastPriceRev = curPriceRev
+	end
 	local ctx = S.latest or {}
 	local db = H.getDB(ctx) or {}
 	H.updateFilterControls(db)
@@ -3013,6 +3155,15 @@ function W.Create(parent, context)
 		T.RegisterWidget(v, H.applyTheme)
 	elseif T and T.OnModeChanged then
 		T.OnModeChanged(H.applyTheme)
+	end
+	if v.HookScript then
+		v:HookScript("OnShow", function()
+			local curRev = (ns.GetPriceDataRevision and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
+			if S.lastPriceRev ~= curRev then
+				W.Invalidate()
+				W.Refresh(S.latest)
+			end
+		end)
 	end
 	H.applyTheme()
 	return v

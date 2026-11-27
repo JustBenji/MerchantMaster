@@ -47,7 +47,34 @@ local DEFAULT_CONFIG = {
 	vendorMinProfitCopper = 1000, -- 10s
 	vendorIncludeCommodities = true,
 	vendorAutoFromBrowse = true,
+	deMinProfitCopper = 1000, -- 10s
+	deAutoFromBrowse = true,
+	deUseArcaneSalvager = false,
+	deApplyAHCut = true,
+	deQualityFilter = "all",
 }
+
+local DE_QUALITY_LABELS = {
+	all = "All (Green+)",
+	green = "Uncommon",
+	blue = "Rare",
+	epic = "Epic",
+}
+
+local function normalizeDEQuality(q)
+	if q == "green" or q == "blue" or q == "epic" or q == "all" then
+		return q
+	end
+	return "all"
+end
+
+local function nextDEQuality(q)
+	local cur = normalizeDEQuality(q)
+	if cur == "all" then return "green" end
+	if cur == "green" then return "blue" end
+	if cur == "blue" then return "epic" end
+	return "all"
+end
 
 local GAP_SCOPE_LABELS = {
 	all = "All AH Items",
@@ -236,6 +263,9 @@ local function getTableStyle()
 end
 
 local function hasSnapshotMode()
+	if type(ns.IsLocalSnapshotSuppressed) == "function" and ns.IsLocalSnapshotSuppressed() then
+		return false
+	end
 	if type(ns.HasSnapshots) == "function" and ns.HasSnapshots() then
 		return true
 	end
@@ -443,6 +473,9 @@ local function normalizeSubTab(subTab)
 	if subTab == "sniper_vendor" or subTab == "vendor" then
 		return "sniper_vendor"
 	end
+	if subTab == "sniper_de" or subTab == "de" or subTab == "disenchant" then
+		return "sniper_de"
+	end
 	return "sniper_gap"
 end
 
@@ -611,6 +644,131 @@ local function getVendorTotalProfit(d)
 	return max(0, getVendorProfitUnit(d)) * getVendorQty(d)
 end
 
+local function getDEAhPrice(d)
+	return safeNum(d.ahPrice or d.minPrice or d.buyoutAmount or d.unitPrice, 0)
+end
+local function getDEGrossValue(d, useAS)
+	local bd = type(d.deBreakdown) == "table" and d.deBreakdown or nil
+	local gross = safeNum(d.deGross)
+	if gross == nil and bd then gross = safeNum(bd.grossCopper) end
+	local asGross = safeNum(d.deAsGross)
+	if asGross == nil and bd then asGross = safeNum(bd.asGrossCopper) end
+	local asMult = 1 + (ns.DE_ARCANE_SALVAGER_BONUS or 0.20)
+	if gross == nil then
+		local net = safeNum(d.deNet)
+		if net ~= nil then
+			gross = floor((net / 0.95) + 0.5)
+		end
+	end
+	if useAS then
+		if asGross ~= nil then return asGross end
+		if gross ~= nil then return floor(gross * asMult + 0.5) end
+		local asNet = safeNum(d.deAsNet)
+		if asNet ~= nil then return floor((asNet / 0.95) + 0.5) end
+	else
+		if gross ~= nil then return gross end
+	end
+	return safeNum(d.deDisplayValue or d.deValue or d.vendorSell, 0)
+end
+local function getDEDisplayValue(d, useAS)
+	return getDEGrossValue(d, useAS)
+end
+local function getDEValue(d, useAS)
+	return getDEDisplayValue(d, useAS)
+end
+local function getDEEffectiveValue(d, useAS, applyAHCut)
+	local cutOn = (applyAHCut ~= false)
+	if not cutOn then
+		return getDEGrossValue(d, useAS)
+	end
+	local net = safeNum(d.deNet)
+	local asNet = safeNum(d.deAsNet)
+	local asMult = 1 + (ns.DE_ARCANE_SALVAGER_BONUS or 0.20)
+	if useAS then
+		if asNet ~= nil then return asNet end
+		if net ~= nil then return floor(net * asMult + 0.5) end
+	else
+		if net ~= nil then return net end
+	end
+	local gross = safeNum(d.deGross)
+	if gross ~= nil then
+		local n = floor(gross * 0.95 + 0.5)
+		return useAS and floor(n * asMult + 0.5) or n
+	end
+	return safeNum(d.deValue or d.vendorSell, 0)
+end
+local function getDEProfitUnit(d, useAS, applyAHCut)
+	local val = getDEEffectiveValue(d, useAS, applyAHCut)
+	local ahp = getDEAhPrice(d)
+	if val > 0 or ahp > 0 then
+		return val - ahp
+	end
+	return safeNum(d.profitPerUnit or d.unitProfit, 0)
+end
+local function getDEProfitableQty(d)
+	return max(1, floor(safeNum(d.profitableQty or d.buyQty or d.quantity or d.totalQuantity, 1)))
+end
+local function getDEListedQty(d)
+	return max(getDEProfitableQty(d), floor(safeNum(d.listedQty or d.totalQuantity or d.quantity, 1)))
+end
+local function getDEQty(d)
+	return getDEProfitableQty(d)
+end
+local function getDETotalCost(d)
+	local c = safeNum(d.totalCost)
+	if c ~= nil and c > 0 then return c end
+	return getDEAhPrice(d) * getDEProfitableQty(d)
+end
+local function getDETotalRevenue(d, useAS, applyAHCut)
+	local cutOn = (applyAHCut ~= false)
+	local dealCut = (d.usedAHCut ~= false)
+	if (useAS == true) == (d.usedArcaneSalvager == true)
+		and cutOn == dealCut
+		and safeNum(d.totalRevenue) ~= nil then
+		return d.totalRevenue
+	end
+	return getDEEffectiveValue(d, useAS, cutOn) * getDEProfitableQty(d)
+end
+local function getDETotalProfit(d, useAS, applyAHCut)
+	local cutOn = (applyAHCut ~= false)
+	local dealCut = (d.usedAHCut ~= false)
+	if d.depthVerified == true
+		and safeNum(d.totalProfit) ~= nil
+		and ((useAS == true) == (d.usedArcaneSalvager == true))
+		and (cutOn == dealCut) then
+		return d.totalProfit
+	end
+	local rev = getDETotalRevenue(d, useAS, cutOn)
+	local cost = getDETotalCost(d)
+	if rev > 0 or cost > 0 then
+		return rev - cost
+	end
+	return getDEProfitUnit(d, useAS, cutOn) * getDEProfitableQty(d)
+end
+local function formatDEQty(d)
+	local prof = getDEProfitableQty(d)
+	local listed = getDEListedQty(d)
+	if d.depthVerified == true then
+		if listed > prof then
+			return format("%d/%d", prof, listed)
+		end
+		return tostring(prof)
+	end
+	if listed > 1 then
+		return format("<=%d", listed)
+	end
+	return "1"
+end
+local function getDEYieldText(d)
+	local s = safeStr(d.dePrimarySummary, "")
+	if s ~= "" then return s end
+	local bd = type(d.deBreakdown) == "table" and d.deBreakdown or nil
+	if bd and safeStr(bd.primarySummary, "") ~= "" then
+		return bd.primarySummary
+	end
+	return "--"
+end
+
 local function getActivePurchaseState()
 	local SE = getSE()
 	if SE and type(SE.GetPurchaseState) == "function" then
@@ -757,11 +915,14 @@ local state = {
 
 	gapView = nil,
 	vendorView = nil,
+	deView = nil,
 
 	gapSort = { col = "netProfit", asc = false },
 	vendorSort = { col = "profitPerUnit", asc = false },
+	deSort = { col = "totalProfit", asc = false },
 	gapRows = {},
 	vendorRows = {},
+	deRows = {},
 
 	selectedGapKey = nil,
 	selectedGapDeal = nil,
@@ -771,6 +932,7 @@ local state = {
 	statusMessage = nil,
 	statusVariant = nil,
 	vendorStatusMsg = nil,
+	deStatusMsg = nil,
 
 	styledCards = {},
 	themedText = {},
@@ -1560,6 +1722,30 @@ local function vendorSortValue(deal, col)
 	return getVendorProfitUnit(deal)
 end
 
+local function deSortValue(deal, col)
+	local cfg = getConfig()
+	local useAS = (cfg.deUseArcaneSalvager == true)
+	local applyAHCut = (cfg.deApplyAHCut ~= false)
+	if col == "name" then
+		local n = getDealItemVisual(deal)
+		return n
+	elseif col == "qty" then return getDEProfitableQty(deal)
+	elseif col == "ahPrice" then return getDEAhPrice(deal)
+	elseif col == "deValue" then return getDEDisplayValue(deal, useAS)
+	elseif col == "profitPerUnit" then return getDEProfitUnit(deal, useAS, applyAHCut)
+	elseif col == "totalProfit" then return getDETotalProfit(deal, useAS, applyAHCut)
+	elseif col == "yieldSummary" then return getDEYieldText(deal)
+	elseif col == "source" then return safeStr(deal.source, "Snapshot")
+	elseif col == "status" then
+		local _, _, _, statusLbl = vendorActionPresentation(deal, getActivePurchaseState())
+		return statusLbl
+	elseif col == "actionState" then
+		local lbl = vendorActionPresentation(deal, getActivePurchaseState())
+		return lbl
+	end
+	return getDEProfitUnit(deal, useAS, applyAHCut)
+end
+
 local function collectGapDeals()
 	local SE = getSE()
 	local raw = {}
@@ -1643,6 +1829,39 @@ local function collectVendorDeals()
 		end
 	end
 	return sortDeals(out, state.vendorSort, vendorSortValue)
+end
+
+local function collectDEDeals()
+	local SE = getSE()
+	local raw = {}
+	if SE and type(SE.GetDEDeals) == "function" then
+		local ok, res = pcall(SE.GetDEDeals)
+		if ok and type(res) == "table" then raw = res end
+	end
+	local cfg = getConfig()
+	local minProfit = safeNum(cfg.deMinProfitCopper, 0)
+	local useAS = (cfg.deUseArcaneSalvager == true)
+	local applyAHCut = (cfg.deApplyAHCut ~= false)
+	local qualFilter = normalizeDEQuality(cfg.deQualityFilter)
+	local ps = getActivePurchaseState()
+
+	local out = {}
+	for _, d in ipairs(raw) do
+		if type(d) == "table" then
+			local step = resolveDealStep(d, ps)
+			local preserveInProgress = (step ~= "ready" and step ~= "unverified")
+			local pUnit = getDEProfitUnit(d, useAS, applyAHCut)
+			local pass = (pUnit >= minProfit)
+			local q = safeNum(d.quality)
+			if qualFilter == "green" and q ~= 2 then pass = false end
+			if qualFilter == "blue" and q ~= 3 then pass = false end
+			if qualFilter == "epic" and q ~= 4 then pass = false end
+			if pass or preserveInProgress then
+				out[#out + 1] = d
+			end
+		end
+	end
+	return sortDeals(out, state.deSort, deSortValue)
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -2643,6 +2862,48 @@ local function buildGapView(parent)
 end
 
 ---------------------------------------------------------------------------------------------------
+-- Sub-View 2 & 3 Shared Helpers (Vendor Sniper & Disenchant Sniper)
+---------------------------------------------------------------------------------------------------
+
+local function triggerFullBrowseScan(statusField, cfg, tag)
+	if not isAtAH() then
+		state[statusField] = "Open Auction House to run Full AH Browse."
+		UI.Refresh(tag .. "_need_ah")
+		return
+	end
+	state[statusField] = "Scanning AH Browse..."
+	local SE = getSE()
+	if SE and type(SE.StartVendorBrowseScan) == "function" then
+		SE.StartVendorBrowseScan(cfg)
+	elseif ns.MarketScan and type(ns.MarketScan.EnsureBrowseRunning) == "function" then
+		ns.MarketScan.EnsureBrowseRunning()
+	else
+		local ms = ns.MarketScan and ns.MarketScan.GetState and ns.MarketScan.GetState()
+		if not (ms and ms.active) then
+			if ns.app and type(ns.app.refreshAllMarketValues) == "function" then
+				ns.app.refreshAllMarketValues()
+			elseif _G.MerchantMasterAPI and type(_G.MerchantMasterAPI.RefreshMarket) == "function" then
+				_G.MerchantMasterAPI.RefreshMarket()
+			end
+		end
+	end
+	UI.Refresh(tag .. "_browse_scan")
+end
+
+local function paintRowStatusCell(cell, statusLbl, pal)
+	cell:SetText(statusLbl)
+	if statusLbl == "Verified" or statusLbl == "Confirm" or statusLbl == "Bought" then
+		setFsColor(cell, pal.accentGreen)
+	elseif statusLbl == "Checking" or statusLbl == "Quoting" or statusLbl == "Buying" then
+		setFsColor(cell, pal.textBlue or pal.accentBlue)
+	elseif statusLbl == "Gone" or statusLbl == "Price Up" then
+		setFsColor(cell, pal.accentRed)
+	else
+		setFsColor(cell, pal.textSecondary)
+	end
+end
+
+---------------------------------------------------------------------------------------------------
 -- Sub-View 2: Vendor Sniper (sniper_vendor)
 ---------------------------------------------------------------------------------------------------
 
@@ -2865,16 +3126,7 @@ local function buildVendorView(parent)
 
 			local ps = getActivePurchaseState()
 			local btnLabel, variant, enabled, statusLbl = vendorActionPresentation(deal, ps)
-			row.cells[6]:SetText(statusLbl)
-			if statusLbl == "Verified" or statusLbl == "Confirm" or statusLbl == "Bought" then
-				setFsColor(row.cells[6], pal.accentGreen)
-			elseif statusLbl == "Checking" or statusLbl == "Quoting" or statusLbl == "Buying" then
-				setFsColor(row.cells[6], pal.textBlue or pal.accentBlue)
-			elseif statusLbl == "Gone" or statusLbl == "Price Up" then
-				setFsColor(row.cells[6], pal.accentRed)
-			else
-				setFsColor(row.cells[6], pal.textSecondary)
-			end
+			paintRowStatusCell(row.cells[6], statusLbl, pal)
 
 			local btn = row.cells[7].btn
 			btn:SetText(btnLabel)
@@ -2914,28 +3166,7 @@ local function buildVendorView(parent)
 	end)
 
 	browseBtn:SetScript("OnClick", function()
-		if not isAtAH() then
-			state.vendorStatusMsg = "Open Auction House to run Full AH Browse."
-			UI.Refresh("vendor_need_ah")
-			return
-		end
-		state.vendorStatusMsg = "Scanning AH Browse..."
-		local SE = getSE()
-		if SE and type(SE.StartVendorBrowseScan) == "function" then
-			SE.StartVendorBrowseScan(getConfig())
-		elseif ns.MarketScan and type(ns.MarketScan.EnsureBrowseRunning) == "function" then
-			ns.MarketScan.EnsureBrowseRunning()
-		else
-			local ms = ns.MarketScan and ns.MarketScan.GetState and ns.MarketScan.GetState()
-			if not (ms and ms.active) then
-				if ns.app and type(ns.app.refreshAllMarketValues) == "function" then
-					ns.app.refreshAllMarketValues()
-				elseif _G.MerchantMasterAPI and type(_G.MerchantMasterAPI.RefreshMarket) == "function" then
-					_G.MerchantMasterAPI.RefreshMarket()
-				end
-			end
-		end
-		UI.Refresh("vendor_browse_scan")
+		triggerFullBrowseScan("vendorStatusMsg", getConfig(), "vendor")
 	end)
 
 	clearBtn:SetScript("OnClick", function()
@@ -3032,6 +3263,624 @@ local function buildVendorView(parent)
 end
 
 ---------------------------------------------------------------------------------------------------
+-- Sub-View 3: Disenchant Sniper (sniper_de)
+---------------------------------------------------------------------------------------------------
+
+local DE_COLUMNS = {
+	{ key = "name",          label = "Item",          flex = true, align = "LEFT",   kind = "item",   hint = "Equipment listed below expected Disenchant value. Shift-click to link in chat." },
+	{ key = "qty",           label = "Qty",           width = 58,  align = "RIGHT",  hint = "Profitable Buy Moat / total listed (4/9 means 4 profitable out of 9 listed; <=N means Check needed for tiers)." },
+	{ key = "ahPrice",       label = "AH Price",      width = 82,  align = "RIGHT",  hint = "Cheapest Auction House buyout price per unit." },
+	{ key = "deValue",       label = "DE Value",      width = 82,  align = "RIGHT",  hint = "Expected gross Disenchant material value (+20% with AS)." },
+	{ key = "profitPerUnit", label = "Profit / Unit", width = 84,  align = "RIGHT",  hint = "Expected profit per unit (Effective DE Value - AH Price; applies 5% AH cut when toggled ON)." },
+	{ key = "totalProfit",   label = "Max Profit",    width = 90,  align = "RIGHT",  bold = true, hint = "Max potential Buy Moat profit across all profitable listings (Max DE Revenue - Total Buy Cost)." },
+	{ key = "yieldSummary",  label = "Expected Mat",  width = 104, align = "LEFT",   hint = "Primary expected Disenchant material and drop rate." },
+	{ key = "source",        label = "Source",        width = 62,  align = "CENTER", hint = "Where the deal was detected on the Auction House." },
+	{ key = "status",        label = "Status",        width = 68,  align = "CENTER", hint = "Live verification and purchase state." },
+	{ key = "actionState",   label = "Action",        width = 84,  align = "CENTER", kind = "action", sortable = false, hint = "Left-click: Check -> Buy (PlaceBid). Right-click: Cancel." },
+}
+
+local function buildDEView(parent)
+	local view = CreateFrame("Frame", nil, parent)
+	view:SetAllPoints(parent)
+
+	-- 1. Top Action & KPI Card
+	local topCard = createSurfaceCard(view, "glass_r10", "cardBg")
+	topCard:SetHeight(52)
+	topCard:SetPoint("TOPLEFT", view, "TOPLEFT", 0, 0)
+	topCard:SetPoint("TOPRIGHT", view, "TOPRIGHT", 0, 0)
+
+	local snapBtn = createButton(topCard, "Scan Snapshot", 118, 26, {
+		variant = "primary",
+		icon = "search",
+		iconSize = 12,
+		fontSize = 11,
+		weight = "semibold",
+	})
+	snapBtn:SetPoint("LEFT", topCard, "LEFT", 12, 0)
+
+	local browseBtn = createButton(topCard, "Scan All Equipment", 138, 26, {
+		variant = "secondary",
+		icon = "refresh",
+		iconSize = 12,
+		fontSize = 11,
+	})
+	browseBtn:SetPoint("LEFT", snapBtn, "RIGHT", 6, 0)
+	if browseBtn.HookScript then
+		browseBtn:HookScript("OnEnter", function(self)
+			if not _G.GameTooltip then return end
+			_G.GameTooltip:SetOwner(self, "ANCHOR_TOP")
+			_G.GameTooltip:ClearLines()
+			_G.GameTooltip:AddLine("Scan All Equipment", 1, 1, 1)
+			_G.GameTooltip:AddLine("Runs a server-filtered AH scan of Weapons & Armor (Green, Blue, Epic) using an ultra-light 2-stage EV pre-filter.", 0.85, 0.85, 0.90, true)
+			_G.GameTooltip:Show()
+		end)
+		browseBtn:HookScript("OnLeave", function()
+			if _G.GameTooltip then _G.GameTooltip:Hide() end
+		end)
+	end
+
+	local clearBtn = createButton(topCard, "Clear", 64, 26, {
+		variant = "secondary",
+		icon = "close",
+		iconSize = 10,
+		fontSize = 11,
+	})
+	clearBtn:SetPoint("LEFT", browseBtn, "RIGHT", 6, 0)
+
+	local function syncDESnapshotLayout()
+		local showSnap = hasSnapshotMode()
+		if showSnap then
+			snapBtn:Show()
+			if snapBtn.SetVariant then snapBtn:SetVariant("primary") end
+			if browseBtn.ClearAllPoints then browseBtn:ClearAllPoints() end
+			browseBtn:SetPoint("LEFT", snapBtn, "RIGHT", 6, 0)
+			if browseBtn.SetVariant then browseBtn:SetVariant("secondary") end
+		else
+			snapBtn:Hide()
+			if browseBtn.ClearAllPoints then browseBtn:ClearAllPoints() end
+			browseBtn:SetPoint("LEFT", topCard, "LEFT", 12, 0)
+			if browseBtn.SetVariant then browseBtn:SetVariant("primary") end
+		end
+	end
+	syncDESnapshotLayout()
+
+	local kpiPill = createBadgePill(topCard, "Est. DE Profit: 0c", "positive", { height = 22, fontSize = 11, weight = "semibold" })
+	kpiPill.frame:SetPoint("RIGHT", topCard, "RIGHT", -12, 0)
+
+	local statusFs = topCard:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	statusFs:SetPoint("LEFT", clearBtn, "RIGHT", 10, 0)
+	statusFs:SetPoint("RIGHT", kpiPill.frame, "LEFT", -8, 0)
+	statusFs:SetJustifyH("LEFT")
+	if statusFs.SetJustifyV then statusFs:SetJustifyV("MIDDLE") end
+	if statusFs.SetWordWrap then statusFs:SetWordWrap(true) end
+	if statusFs.SetMaxLines then statusFs:SetMaxLines(2) end
+	applyFont(statusFs, 11, "regular")
+	registerThemedFs(statusFs, "textSecondary")
+	statusFs:SetText("")
+
+	-- 2. Filter Strip Card
+	local filterCard = createSurfaceCard(view, "glass_r10", "cardBg")
+	filterCard:SetHeight(38)
+	filterCard:SetPoint("TOPLEFT", topCard, "BOTTOMLEFT", 0, -SECTION_GAP)
+	filterCard:SetPoint("TOPRIGHT", topCard, "BOTTOMRIGHT", 0, -SECTION_GAP)
+
+	local filters = {}
+	local deTable
+	local function refreshAfterFilter()
+		if deTable then deTable:ResetScroll() end
+		if UI.IsShown() then UI.Refresh("de_filter_changed") end
+	end
+
+	filters.minProfit = createNumericField(filterCard, "Min Profit (s/g)", 64, "Minimum expected disenchant profit per unit. Examples: 50s, 2g, 1g 50s, or bare silver (50).", function(txt, box)
+		local parsed = parseSilverGoldInput(txt)
+		if parsed ~= nil then
+			updateConfig("deMinProfitCopper", parsed)
+			box:SetText(formatSilverGoldInput(parsed))
+			local SE = getSE()
+			if SE and type(SE.RefreshDEDealsFromCache) == "function" then
+				SE.RefreshDEDealsFromCache()
+			end
+			refreshAfterFilter()
+		else
+			box:SetText(formatSilverGoldInput(getConfig().deMinProfitCopper))
+		end
+	end)
+	filters.minProfit.wrap:SetPoint("LEFT", filterCard, "LEFT", 12, 0)
+
+	filters.useAS = createToggleField(filterCard, "AS +20%", "Apply Arcane Salvager +20% expected extra disenchant yield.", function(on)
+		updateConfig("deUseArcaneSalvager", on)
+		local SE = getSE()
+		if SE and type(SE.RefreshDEDealsFromCache) == "function" then
+			local cfg = getConfig()
+			SE.RefreshDEDealsFromCache(nil, {
+				deUseArcaneSalvager = on,
+				useArcaneSalvager = on,
+				deApplyAHCut = cfg.deApplyAHCut ~= false,
+				applyAHCut = cfg.deApplyAHCut ~= false,
+			})
+		end
+		refreshAfterFilter()
+	end)
+	filters.useAS:SetPoint("LEFT", filters.minProfit.wrap, "RIGHT", 14, 0)
+
+	filters.applyAHCut = createToggleField(filterCard, "5% AH Cut", "Deduct the 5% Auction House fee from expected DE material value when calculating Profit / Unit and Max Profit. AH Price and DE Value stay raw.", function(on)
+		updateConfig("deApplyAHCut", on)
+		local SE = getSE()
+		if SE and type(SE.RefreshDEDealsFromCache) == "function" then
+			local cfg = getConfig()
+			SE.RefreshDEDealsFromCache(nil, {
+				deUseArcaneSalvager = cfg.deUseArcaneSalvager == true,
+				useArcaneSalvager = cfg.deUseArcaneSalvager == true,
+				deApplyAHCut = on,
+				applyAHCut = on,
+			})
+		end
+		refreshAfterFilter()
+	end)
+	filters.applyAHCut:SetPoint("LEFT", filters.useAS.label, "RIGHT", 14, 0)
+
+	local qualLbl = filterCard:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	qualLbl:SetPoint("LEFT", filters.applyAHCut.label, "RIGHT", 16, 0)
+	qualLbl:SetJustifyH("LEFT")
+	if qualLbl.SetWordWrap then qualLbl:SetWordWrap(false) end
+	applyFont(qualLbl, 11, "regular")
+	qualLbl:SetText("Quality")
+	registerThemedFs(qualLbl, "textSecondary")
+	filters.qualLabel = qualLbl
+
+	local qualBtn = createButton(filterCard, DE_QUALITY_LABELS.all, 90, 22, {
+		variant = "primary",
+		pill = true,
+		fontSize = 11,
+		weight = "semibold",
+	})
+	qualBtn:SetPoint("LEFT", qualLbl, "RIGHT", 6, 0)
+	qualBtn:SetScript("OnClick", function()
+		local cur = normalizeDEQuality(getConfig().deQualityFilter)
+		updateConfig("deQualityFilter", nextDEQuality(cur))
+		refreshAfterFilter()
+	end)
+	filters.qualBtn = qualBtn
+
+	filters.autoBrowse = createToggleField(filterCard, "Auto-browse", "Automatically capture disenchant snipes during every MarketScan AH browse.", function(on)
+		updateConfig("deAutoFromBrowse", on)
+		refreshAfterFilter()
+	end)
+	filters.autoBrowse:SetPoint("LEFT", qualBtn, "RIGHT", 14, 0)
+
+	-- 3. Sortable Deals Table
+	deTable = createPooledTable(view, DE_COLUMNS, {
+		onHeaderClick = function(colKey)
+			if state.deSort.col == colKey then
+				state.deSort.asc = not state.deSort.asc
+			else
+				state.deSort.col = colKey
+				state.deSort.asc = (colKey == "name" or colKey == "ahPrice" or colKey == "source" or colKey == "yieldSummary")
+			end
+			if deTable then deTable:ResetScroll() end
+			UI.Refresh("de_sort")
+		end,
+		-- Strictly synchronous OnClick invocation for protected AH calls!
+		onActionClick = function(deal, mouseButton)
+			local SE = getSE()
+			if not SE then
+				state.deStatusMsg = "SniperEngine not loaded"
+				UI.Refresh("no_engine")
+				return
+			end
+			if mouseButton == "RightButton" then
+				if type(SE.HandleDEAction) == "function" then
+					SE.HandleDEAction(deal, "cancel")
+				elseif type(SE.CancelActivePurchase) == "function" then
+					SE.CancelActivePurchase("Cancelled by user.")
+				end
+			else
+				if type(SE.HandleDEAction) == "function" then
+					local okAct, errCode = SE.HandleDEAction(deal)
+					if okAct == false then
+						local engMsg = (type(SE.scan) == "table" and safeStr(SE.scan.statusText, "")) or ""
+						local _, fullMsg = describeBlockedReason(errCode, engMsg)
+						state.deStatusMsg = fullMsg
+					else
+						state.deStatusMsg = nil
+					end
+				end
+			end
+			UI.Refresh("de_action")
+		end,
+		onActionTooltip = function(owner, deal)
+			if not _G.GameTooltip then return end
+			local ps = getActivePurchaseState()
+			local lbl, _, _, statusLbl = vendorActionPresentation(deal, ps)
+			_G.GameTooltip:SetOwner(owner, "ANCHOR_TOP")
+			_G.GameTooltip:ClearLines()
+			_G.GameTooltip:AddLine("Disenchant Action: " .. lbl, 1, 1, 1)
+			if statusLbl == "Verified" then
+				_G.GameTooltip:AddLine("Verified live auctionID + itemLink DE value. Click Buy to PlaceBid.", 0.30, 0.85, 0.45, true)
+			else
+				_G.GameTooltip:AddLine("Click Check to verify live buyout and exact itemLink DE value before buying.", 0.85, 0.85, 0.90, true)
+			end
+			_G.GameTooltip:AddLine("Right-click: Cancel pending check.", 0.70, 0.70, 0.76, true)
+			_G.GameTooltip:Show()
+		end,
+		onRowTooltip = function(owner, deal)
+			if not _G.GameTooltip then return end
+			_G.GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+			_G.GameTooltip:ClearLines()
+			local id = safeNum(deal.itemID, 0)
+			local name, link = getDealItemVisual(deal)
+			if link and _G.GameTooltip.SetHyperlink then
+				pcall(_G.GameTooltip.SetHyperlink, _G.GameTooltip, link)
+			elseif id > 0 and _G.GameTooltip.SetItemByID then
+				pcall(_G.GameTooltip.SetItemByID, _G.GameTooltip, id)
+			else
+				_G.GameTooltip:AddLine(name, 1, 1, 1)
+			end
+			local cfg = getConfig()
+			local useAS = (cfg.deUseArcaneSalvager == true)
+			local applyAHCut = (cfg.deApplyAHCut ~= false)
+			local ahP = getDEAhPrice(deal)
+			local deGrossVal = getDEDisplayValue(deal, useAS)
+			local deEffVal = getDEEffectiveValue(deal, useAS, applyAHCut)
+			local pUnit = getDEProfitUnit(deal, useAS, applyAHCut)
+			local roi = ahP > 0 and ((pUnit / ahP) * 100) or 0
+			local profQty = getDEProfitableQty(deal)
+			local listedQty = getDEListedQty(deal)
+			local totCost = getDETotalCost(deal)
+			local totRev = getDETotalRevenue(deal, useAS, applyAHCut)
+			local totProfit = getDETotalProfit(deal, useAS, applyAHCut)
+			local totRoi = totCost > 0 and ((totProfit / totCost) * 100) or 0
+			local bd = type(deal.deBreakdown) == "table" and deal.deBreakdown or nil
+			local clsName = safeStr(deal.className or (bd and bd.className), "")
+			local ilvlVal = safeNum(deal.ilvl or (bd and bd.ilvl), 0)
+			_G.GameTooltip:AddLine(" ")
+			if clsName ~= "" and ilvlVal > 0 then
+				_G.GameTooltip:AddLine(format("Class: %s | ilvl %d", clsName, floor(ilvlVal)), 0.78, 0.84, 0.92)
+			elseif clsName ~= "" then
+				_G.GameTooltip:AddLine("Class: " .. clsName, 0.78, 0.84, 0.92)
+			elseif ilvlVal > 0 then
+				_G.GameTooltip:AddLine(format("ilvl %d", floor(ilvlVal)), 0.78, 0.84, 0.92)
+			end
+			if deal.isEstimated == true or (bd and bd.isEstimated == true) then
+				local estReason = safeStr(deal.estimateReason or (bd and bd.estimateReason), "")
+				local note = (estReason ~= "") and ("Note: Estimated DE bracket (" .. estReason .. ")") or "Note: Estimated DE bracket"
+				_G.GameTooltip:AddLine(note, 1.0, 0.72, 0.22, true)
+			end
+			_G.GameTooltip:AddDoubleLine("AH Buyout:", formatMoney(ahP), 0.78, 0.78, 0.82, 1, 1, 1)
+			_G.GameTooltip:AddDoubleLine(
+				useAS and "Expected DE Value (AS +20%) (Gross):" or "Expected DE Value (Gross):",
+				formatMoney(deGrossVal),
+				0.78, 0.78, 0.82, 1, 0.82, 0.2
+			)
+			if applyAHCut then
+				_G.GameTooltip:AddDoubleLine(
+					useAS and "Expected DE Revenue (-5% AH, AS +20%):" or "Expected DE Revenue (-5% AH):",
+					formatMoney(deEffVal),
+					0.78, 0.78, 0.82, 0.95, 0.76, 0.25
+				)
+			else
+				_G.GameTooltip:AddDoubleLine(
+					"AH Cut:",
+					"Off (using gross mats)",
+					0.78, 0.78, 0.82, 0.65, 0.90, 1.0
+				)
+			end
+			_G.GameTooltip:AddDoubleLine("Expected Profit / Unit:", format("%s (%s ROI)", formatMoney(pUnit, true), formatPercent(roi)), 0.78, 0.78, 0.82, 0.2, 0.85, 0.4)
+			if deal.depthVerified == true then
+				_G.GameTooltip:AddDoubleLine("Buy Moat (Qty):", format("%d profitable / %d listed", profQty, listedQty), 0.78, 0.78, 0.82, 0.65, 0.90, 1.0)
+			else
+				_G.GameTooltip:AddDoubleLine("Buy Moat (Qty):", format("Up to %d listed (click Check for exact listings)", listedQty), 0.78, 0.78, 0.82, 0.95, 0.82, 0.35)
+			end
+			_G.GameTooltip:AddDoubleLine("Total Buy Cost:", formatMoney(totCost), 0.78, 0.78, 0.82, 1, 1, 1)
+			_G.GameTooltip:AddDoubleLine("Max DE Revenue:", formatMoney(totRev), 0.78, 0.78, 0.82, 1, 0.82, 0.2)
+			_G.GameTooltip:AddDoubleLine("Max Total Profit:", format("%s (%s ROI)", formatMoney(totProfit, true), formatPercent(totRoi)), 0.78, 0.78, 0.82, 0.2, 0.92, 0.45)
+			if type(deal.moatTiers) == "table" and #deal.moatTiers > 0 then
+				_G.GameTooltip:AddLine("Profitable Price Tiers:", 0.78, 0.78, 0.82)
+				local shownT = min(#deal.moatTiers, 5)
+				for idx = 1, shownT do
+					local t = deal.moatTiers[idx]
+					if type(t) == "table" then
+						_G.GameTooltip:AddDoubleLine(
+							format("  %dx @ %s", safeNum(t.qty, 1), formatMoney(safeNum(t.price, 0))),
+							format("+%s/u", formatMoney(safeNum(t.profitPerUnit, 0))),
+							0.70, 0.85, 1.0, 0.25, 0.88, 0.45
+						)
+					end
+				end
+			end
+			if safeNum(deal.wallPrice) and safeNum(deal.wallPrice) > 0 then
+				_G.GameTooltip:AddDoubleLine("Next Wall:", formatMoney(deal.wallPrice), 0.78, 0.78, 0.82, 0.95, 0.55, 0.25)
+			end
+			if bd and type(bd.outcomes) == "table" and #bd.outcomes > 0 then
+				_G.GameTooltip:AddLine("Expected Disenchant Materials:", 0.78, 0.78, 0.82)
+				local asMult = useAS and (1 + (ns.DE_ARCANE_SALVAGER_BONUS or 0.20)) or 1
+				local shownOut = min(#bd.outcomes, 5)
+				for idx = 1, shownOut do
+					local o = bd.outcomes[idx]
+					if type(o) == "table" then
+						local pctTxt = (ns.FormatDEChancePct and ns.FormatDEChancePct(o.matRate)) or format("%.0f", (o.matRate or 0) * 100)
+						local amtTxt = (ns.FormatDEAmount and ns.FormatDEAmount(o.amountOfMats)) or format("%.2f", o.amountOfMats or 0)
+						local baseEv
+						if applyAHCut then
+							baseEv = o.evNetRounded or (o.evNet and floor(o.evNet + 0.5)) or (o.evGross and floor(o.evGross * 0.95 + 0.5)) or 0
+						else
+							baseEv = (o.evGross and floor(o.evGross + 0.5))
+								or (o.evNetRounded and floor((o.evNetRounded / 0.95) + 0.5))
+								or (o.evNet and floor((o.evNet / 0.95) + 0.5))
+								or 0
+						end
+						local dispEv
+						if applyAHCut then
+							dispEv = useAS and (o.evAsNetRounded or floor(baseEv * asMult + 0.5)) or baseEv
+						else
+							dispEv = useAS and (o.evAsGrossRounded or floor(baseEv * asMult + 0.5)) or baseEv
+						end
+						_G.GameTooltip:AddDoubleLine(
+							format("  %s%% %s (x%s)", tostring(pctTxt), tostring(o.name or "Mat"), tostring(amtTxt)),
+							formatMoney(dispEv),
+							0.70, 0.85, 1.0, 1, 1, 1
+						)
+					end
+				end
+				if bd.learnedBlended then
+					_G.GameTooltip:AddLine(format("Includes Live DE Learner data (%d casts)", safeNum(bd.learnedCasts, 0)), 0.55, 0.90, 0.65)
+				end
+			end
+			_G.GameTooltip:AddDoubleLine("Source:", safeStr(deal.source, "Snapshot"), 0.78, 0.78, 0.82, 0.6, 0.82, 1)
+			_G.GameTooltip:Show()
+		end,
+		bindRow = function(row, deal, pal)
+			local T = getTheme()
+			local cfg = getConfig()
+			local useAS = (cfg.deUseArcaneSalvager == true)
+			local applyAHCut = (cfg.deApplyAHCut ~= false)
+			local name, _, quality, ic = getDealItemVisual(deal)
+			local itemCell = row.cells[1]
+			itemCell.icon:SetTexture(ic or (T and T.ASSETS and T.ASSETS.icon_star) or "Interface\\Icons\\INV_Misc_QuestionMark")
+			itemCell.fs:SetText(name)
+			setFsColor(itemCell.fs, qualityColorForDeal(quality, pal))
+
+			local profQty = getDEProfitableQty(deal)
+			row.cells[2]:SetText(formatDEQty(deal))
+			setFsColor(row.cells[2], (deal.depthVerified == true and profQty > 1) and (pal.accentBlue or pal.textBlue or pal.text) or pal.textSecondary)
+
+			row.cells[3]:SetText(formatMoney(getDEAhPrice(deal)))
+			setFsColor(row.cells[3], pal.text)
+
+			row.cells[4]:SetText(formatMoney(getDEDisplayValue(deal, useAS)))
+			setFsColor(row.cells[4], pal.textSecondary)
+
+			local pUnit = getDEProfitUnit(deal, useAS, applyAHCut)
+			row.cells[5]:SetText(formatMoney(pUnit, true))
+			setFsColor(row.cells[5], pUnit > 0 and pal.accentGreen or pal.accentRed)
+
+			local maxProf = getDETotalProfit(deal, useAS, applyAHCut)
+			row.cells[6]:SetText(formatMoney(maxProf, true))
+			setFsColor(row.cells[6], maxProf > 0 and pal.accentGreen or pal.accentRed)
+
+			row.cells[7]:SetText(getDEYieldText(deal))
+			setFsColor(row.cells[7], pal.textSecondary)
+
+			local src = safeStr(deal.source, "Snapshot")
+			row.cells[8]:SetText(src)
+			setFsColor(row.cells[8], src:lower() == "browse" and (pal.textBlue or pal.accentBlue) or pal.accentPurple)
+
+			local ps = getActivePurchaseState()
+			local btnLabel, variant, enabled, statusLbl = vendorActionPresentation(deal, ps)
+			if statusLbl == "Verified" and type(deal.buyQueue) == "table" and #deal.buyQueue > 1 then
+				btnLabel = format("Buy (%d)", #deal.buyQueue)
+			end
+			paintRowStatusCell(row.cells[9], statusLbl, pal)
+
+			local btn = row.cells[10].btn
+			btn:SetText(btnLabel)
+			if btn.SetVariant then btn:SetVariant(variant) end
+			if btn.SetEnabled then btn:SetEnabled(enabled) end
+		end,
+		onScroll = function()
+			if state.deView then
+				state.deView.repaintRows()
+			end
+		end,
+	})
+	deTable.container:SetPoint("TOPLEFT", filterCard, "BOTTOMLEFT", 0, -SECTION_GAP)
+	deTable.container:SetPoint("TOPRIGHT", filterCard, "BOTTOMRIGHT", 0, -SECTION_GAP)
+	deTable.container:SetPoint("BOTTOMLEFT", view, "BOTTOMLEFT", 0, 0)
+	deTable.container:SetPoint("BOTTOMRIGHT", view, "BOTTOMRIGHT", 0, 0)
+
+	-- Top bar button handlers
+	snapBtn:SetScript("OnClick", function()
+		local SE = getSE()
+		if not SE then
+			state.deStatusMsg = "SniperEngine not loaded"
+			UI.Refresh("no_engine")
+			return
+		end
+		state.deStatusMsg = nil
+		if type(SE.ScanSnapshotForDEDeals) == "function" then
+			local cfg = getConfig()
+			SE.ScanSnapshotForDEDeals(nil, {
+				deMinProfitCopper = cfg.deMinProfitCopper,
+				minProfitCopper = cfg.deMinProfitCopper,
+				deUseArcaneSalvager = cfg.deUseArcaneSalvager,
+				useArcaneSalvager = cfg.deUseArcaneSalvager,
+				deApplyAHCut = cfg.deApplyAHCut ~= false,
+				applyAHCut = cfg.deApplyAHCut ~= false,
+			})
+		end
+		UI.Refresh("de_snapshot_scan")
+	end)
+
+	browseBtn:SetScript("OnClick", function()
+		local SE = getSE()
+		if SE and type(SE.StartDEEquipmentBrowseScan) == "function" then
+			local okStart, errCode = SE.StartDEEquipmentBrowseScan(getConfig())
+			if okStart == false then
+				local engMsg = (type(SE.scan) == "table" and safeStr(SE.scan.statusText, "")) or ""
+				local _, fullMsg = describeBlockedReason(errCode, engMsg)
+				state.deStatusMsg = fullMsg
+			else
+				state.deStatusMsg = "Scanning all AH equipment..."
+			end
+			UI.Refresh("de_equipment_browse_scan")
+			return
+		end
+		triggerFullBrowseScan("deStatusMsg", getConfig(), "de")
+	end)
+
+	clearBtn:SetScript("OnClick", function()
+		state.deStatusMsg = nil
+		local SE = getSE()
+		if SE and type(SE.ClearDEDeals) == "function" then
+			SE.ClearDEDeals()
+		end
+		state.deRows = {}
+		if deTable then deTable:ResetScroll() end
+		UI.Refresh("de_clear")
+	end)
+
+	local function syncFilterInputs()
+		local cfg = getConfig()
+		if filters.minProfit.box and (not filters.minProfit.box.HasFocus or not filters.minProfit.box:HasFocus()) then
+			filters.minProfit.box:SetText(formatSilverGoldInput(cfg.deMinProfitCopper))
+		end
+		if filters.useAS.SetChecked then
+			filters.useAS:SetChecked(cfg.deUseArcaneSalvager == true)
+		end
+		if filters.applyAHCut and filters.applyAHCut.SetChecked then
+			filters.applyAHCut:SetChecked(cfg.deApplyAHCut ~= false)
+		end
+		if filters.qualBtn then
+			local qKey = normalizeDEQuality(cfg.deQualityFilter)
+			filters.qualBtn:SetText(DE_QUALITY_LABELS[qKey] or DE_QUALITY_LABELS.all)
+			if filters.qualBtn.SetVariant then
+				filters.qualBtn:SetVariant(qKey == "all" and "primary" or "secondary")
+			end
+		end
+		if filters.autoBrowse.SetChecked then
+			filters.autoBrowse:SetChecked(cfg.deAutoFromBrowse ~= false)
+		end
+	end
+
+	local function repaintRows()
+		local emptyMsg = hasSnapshotMode()
+			and "No disenchant snipes found yet. Click [Scan Snapshot] for an instant scan or [Scan All Equipment] at the Auction House."
+			or "No disenchant snipes found yet. Click [Scan All Equipment] at the Auction House."
+		local SE = getSE()
+		if #state.deRows == 0 and SE and type(SE.GetDEDeals) == "function" then
+			local ok, raw = pcall(SE.GetDEDeals)
+			if ok and type(raw) == "table" and #raw > 0 then
+				emptyMsg = format("%d disenchant snipe(s) hidden by current filters (Min Profit / Quality).", #raw)
+			end
+		end
+		deTable:Render(state.deRows, state.deSort, emptyMsg)
+	end
+
+	local function refreshDEView()
+		syncDESnapshotLayout()
+		syncFilterInputs()
+		state.deRows = collectDEDeals()
+
+		local cfg = getConfig()
+		local useAS = (cfg.deUseArcaneSalvager == true)
+		local applyAHCut = (cfg.deApplyAHCut ~= false)
+		local totalProfit = 0
+		local activeCount = 0
+		local totalUnits = 0
+		local ps = getActivePurchaseState()
+		for _, d in ipairs(state.deRows) do
+			local step = resolveDealStep(d, ps)
+			if step ~= "bought" and step ~= "gone" and step ~= "price_up" then
+				totalProfit = totalProfit + max(0, getDETotalProfit(d, useAS, applyAHCut))
+				totalUnits = totalUnits + getDEProfitableQty(d)
+				activeCount = activeCount + 1
+			end
+		end
+
+		local kpiText = activeCount > 0
+			and format("Est. DE Profit: %s (%d items, %d units)", formatMoney(totalProfit), activeCount, totalUnits)
+			or "Est. DE Profit: 0c"
+		kpiPill:SetVariant(totalProfit > 0 and "positive" or "neutral", kpiText)
+
+		local SE = getSE()
+		local deStats = (SE and type(SE.GetDEScanStats) == "function") and SE.GetDEScanStats() or nil
+		local matWarn = ""
+		if type(ns.GetDEMaterialPriceCoverage) == "function" then
+			local okCov, cov = pcall(ns.GetDEMaterialPriceCoverage)
+			if okCov and type(cov) == "table" and safeNum(cov.missing, 0) > 0 then
+				matWarn = format(" (%d/%d DE mats unpriced)", floor(safeNum(cov.missing, 0)), floor(safeNum(cov.total, 24)))
+			end
+		end
+		local statsText = nil
+		if deStats and (safeNum(deStats.equipScanned, 0) > 0 or safeNum(deStats.uncachedPending, 0) > 0 or safeNum(deStats.profitable, 0) > 0) then
+			statsText = format(
+				"Scanned %s equip | %d profitable | %d uncached%s",
+				formatInt(safeNum(deStats.equipScanned, 0)),
+				floor(safeNum(deStats.profitable, 0)),
+				floor(safeNum(deStats.uncachedPending, 0)),
+				matWarn
+			)
+		end
+
+		local ms = ns.MarketScan and ns.MarketScan.GetState and ns.MarketScan.GetState()
+		if ms and ms.active then
+			local liveProg
+			if deStats and safeNum(deStats.equipScanned, 0) > 0 then
+				liveProg = format(
+					"Page %d | Scanned %s equip | %d profitable | %d uncached%s",
+					safeNum(ms.page, 1),
+					formatInt(safeNum(deStats.equipScanned, 0)),
+					floor(safeNum(deStats.profitable, 0)),
+					floor(safeNum(deStats.uncachedPending, 0)),
+					matWarn
+				)
+			else
+				liveProg = format("Browse scanning page %d...%s", safeNum(ms.page, 1), matWarn)
+			end
+			statusFs:SetText(liveProg)
+		elseif state.deStatusMsg then
+			if statsText and (state.deStatusMsg == "Scanning all AH equipment..."
+				or state.deStatusMsg == "Scanning all AH equipment for disenchant deals..."
+				or state.deStatusMsg == "Scanning AH Browse..."
+				or state.deStatusMsg:find("^Disenchant snapshot scan:")) then
+				statusFs:SetText(statsText)
+			else
+				statusFs:SetText(state.deStatusMsg .. matWarn)
+			end
+		elseif statsText then
+			statusFs:SetText(statsText)
+		elseif not isAtAH() then
+			if hasSnapshotMode() then
+				statusFs:SetText("Snapshot preview mode (open AH to check and buy)" .. matWarn)
+			else
+				statusFs:SetText("Open the Auction House to run Scan All Equipment" .. matWarn)
+			end
+		else
+			statusFs:SetText(matWarn ~= "" and matWarn:gsub("^ ", "") or "")
+		end
+
+		deTable:Layout()
+		repaintRows()
+	end
+
+	return {
+		frame = view,
+		topCard = topCard,
+		filterCard = filterCard,
+		table = deTable,
+		snapBtn = snapBtn,
+		browseBtn = browseBtn,
+		clearBtn = clearBtn,
+		statusFs = statusFs,
+		kpiPill = kpiPill,
+		filters = filters,
+		syncControls = syncFilterInputs,
+		refresh = refreshDEView,
+		repaintRows = repaintRows,
+	}
+end
+
+---------------------------------------------------------------------------------------------------
 -- Engine Listener & Lazy Construction
 ---------------------------------------------------------------------------------------------------
 
@@ -3059,6 +3908,7 @@ local COALESCED_ENGINE_EVENTS = {
 	scan_progress = true,
 	browse_progress = true,
 	vendor_deals = true,
+	de_deals = true,
 	gap_deals = true,
 }
 
@@ -3114,7 +3964,9 @@ local function onEngineEvent(eventType, payload)
 	elseif type(payload) == "string" then
 		local msg = safeStr(payload, "")
 		if msg ~= "" and msg:lower() ~= "idle" then
-			if eventType == "vendor_status" or state.activeSubTab == "sniper_vendor" then
+			if eventType == "de_status" or state.activeSubTab == "sniper_de" then
+				state.deStatusMsg = msg
+			elseif eventType == "vendor_status" or state.activeSubTab == "sniper_vendor" then
 				state.vendorStatusMsg = msg
 			end
 			if eventType == "status" or eventType == "error" then
@@ -3133,7 +3985,9 @@ local function onEngineEvent(eventType, payload)
 	elseif type(payload) == "table" then
 		local msg = safeStr(payload.error or payload.message or payload.reason or payload.statusText, "")
 		if msg ~= "" then
-			if eventType == "vendor_status" or payload.scope == "vendor" then
+			if eventType == "de_status" or payload.scope == "de" then
+				state.deStatusMsg = msg
+			elseif eventType == "vendor_status" or payload.scope == "vendor" then
 				state.vendorStatusMsg = msg
 			elseif payload.error or eventType == "error" or eventType == "purchase_cancelled" or eventType == "purchase_failed" then
 				local shortMsg, fullMsg = describeBlockedReason(payload.code, msg)
@@ -3186,8 +4040,10 @@ local function ensureBuilt()
 
 	state.gapView = buildGapView(state.root)
 	state.vendorView = buildVendorView(state.root)
+	state.deView = buildDEView(state.root)
 	state.gapView.frame:Hide()
 	state.vendorView.frame:Hide()
+	state.deView.frame:Hide()
 
 	hookThemeEvents()
 	attachEngineListener()
@@ -3230,9 +4086,15 @@ function UI.Show(subTab)
 	state.root:Show()
 	if state.activeSubTab == "sniper_vendor" then
 		state.gapView.frame:Hide()
+		state.deView.frame:Hide()
 		state.vendorView.frame:Show()
+	elseif state.activeSubTab == "sniper_de" then
+		state.gapView.frame:Hide()
+		state.vendorView.frame:Hide()
+		state.deView.frame:Show()
 	else
 		state.vendorView.frame:Hide()
+		state.deView.frame:Hide()
 		state.gapView.frame:Show()
 	end
 	state.dirty = false
@@ -3246,6 +4108,7 @@ function UI.Hide()
 	end
 	if state.gapView and state.gapView.frame then state.gapView.frame:Hide() end
 	if state.vendorView and state.vendorView.frame then state.vendorView.frame:Hide() end
+	if state.deView and state.deView.frame then state.deView.frame:Hide() end
 end
 
 function UI.IsShown()
@@ -3261,6 +4124,9 @@ function UI.Layout()
 	if state.activeSubTab == "sniper_vendor" and state.vendorView then
 		state.vendorView.table:Layout()
 		state.vendorView.repaintRows()
+	elseif state.activeSubTab == "sniper_de" and state.deView then
+		state.deView.table:Layout()
+		state.deView.repaintRows()
 	elseif state.gapView then
 		state.gapView.anchorGapTable()
 		state.gapView.table:Layout()
@@ -3302,6 +4168,8 @@ function UI.Refresh(reason)
 	state.pendingRefreshReason = nil
 	if state.activeSubTab == "sniper_vendor" then
 		if state.vendorView then state.vendorView.refresh(reason) end
+	elseif state.activeSubTab == "sniper_de" then
+		if state.deView then state.deView.refresh(reason) end
 	else
 		if state.gapView then state.gapView.refresh(reason) end
 	end

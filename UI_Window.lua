@@ -199,9 +199,16 @@ function Window.Attach(panel, grip, heightGrip, opts)
     local function bind(handle, heightOnly)
         if not handle then return end
         local function stop(self)
+            local wasResizing = (self._resizing == true)
+            self._resizing = false
             self:SetScript('OnUpdate', nil)
             c.waiting = false
             c:Flush()
+            if wasResizing and opts.positionKey and Window.SavePosition and Window.HasSavedPosition then
+                if panel.userMoved or Window.HasSavedPosition(opts.positionKey) then
+                    Window.SavePosition(panel, opts.positionKey)
+                end
+            end
         end
         handle:SetScript('OnMouseDown', function(self, button)
             if c.compact then return end
@@ -212,6 +219,7 @@ function Window.Attach(panel, grip, heightGrip, opts)
             end
             if button ~= 'LeftButton' or not GetCursorPosition then return end
             c._zoomed = false; c._preZoom = nil
+            self._resizing = true
             local startX, startY = GetCursorPosition()
             local w, h = panel:GetWidth(), panel:GetHeight()
             local scale = number(panel:GetEffectiveScale(), 1)
@@ -403,4 +411,422 @@ function Window.LayoutAnalytics(analytics, width, height)
         end
     end
     if type(ui.Layout) == 'function' then ui.Layout(width, height) end
+end
+
+local fallbackPositions = {}
+local fallbackModes = {}
+Window.VALID_MODES = { snap = true, lock = true, free = true }
+
+local function positionsDB()
+    if type(MerchantMasterDB) == 'table' then
+        if type(MerchantMasterDB.windowPositions) ~= 'table' then
+            MerchantMasterDB.windowPositions = {}
+        end
+        return MerchantMasterDB.windowPositions
+    end
+    return fallbackPositions
+end
+
+local function modesDB()
+    if type(MerchantMasterDB) == 'table' then
+        if type(MerchantMasterDB.windowModes) ~= 'table' then
+            MerchantMasterDB.windowModes = {}
+        end
+        return MerchantMasterDB.windowModes
+    end
+    return fallbackModes
+end
+
+function Window.GetMode(key, defaultMode)
+    local def = (type(defaultMode) == 'string' and Window.VALID_MODES[defaultMode]) and defaultMode or 'snap'
+    if type(key) ~= 'string' or key == '' then return def end
+    local mode = modesDB()[key]
+    if type(mode) == 'string' and Window.VALID_MODES[mode] then
+        return mode
+    end
+    return def
+end
+
+function Window.SetMode(key, mode)
+    local norm = (type(mode) == 'string' and Window.VALID_MODES[mode]) and mode or 'snap'
+    if type(key) == 'string' and key ~= '' then
+        modesDB()[key] = norm
+    end
+    return norm
+end
+
+function Window.CycleMode(key, defaultMode)
+    local cur = Window.GetMode(key, defaultMode)
+    local nextMode = (cur == 'snap' and 'lock') or (cur == 'lock' and 'free') or 'snap'
+    return Window.SetMode(key, nextMode)
+end
+
+function Window.ClearMode(key)
+    if key == nil then
+        local mdb = modesDB()
+        for k in pairs(mdb) do mdb[k] = nil end
+        if type(MerchantMasterDB) == 'table' then
+            MerchantMasterDB.windowModes = {}
+        end
+        fallbackModes = {}
+        return true
+    end
+    if type(key) == 'string' and key ~= '' then
+        modesDB()[key] = nil
+        return true
+    end
+    return false
+end
+
+local function isFrameObject(f)
+    local t = type(f)
+    return t == 'table' or t == 'userdata'
+end
+
+local function isFrameShownSafe(f)
+    if not isFrameObject(f) or type(f.IsShown) ~= 'function' then return false end
+    local ok, v = pcall(f.IsShown, f)
+    if not ok or (issecretvalue and issecretvalue(v)) then return false end
+    return v == true
+end
+
+local function isCombatBlocked(frame)
+    if not (frame and frame._mmCombatSafeDrag) then return false end
+    if type(InCombatLockdown) == 'function' then
+        local ok, inCombat = pcall(InCombatLockdown)
+        if ok and not (issecretvalue and issecretvalue(inCombat)) and inCombat == true then
+            return true
+        end
+    end
+    return false
+end
+
+function Window.HasSavedPosition(key)
+    if type(key) ~= 'string' or key == '' then return false end
+    local rec = positionsDB()[key]
+    if type(rec) ~= 'table' then return false end
+    local x = number(rec.x, nil)
+    local y = number(rec.y, nil)
+    return x ~= nil and y ~= nil
+end
+
+function Window.ClearSavedPosition(key)
+    if key == nil then
+        local db = positionsDB()
+        for k in pairs(db) do db[k] = nil end
+        if type(MerchantMasterDB) == 'table' then
+            MerchantMasterDB.windowPositions = {}
+        end
+        fallbackPositions = {}
+        Window.ClearMode(nil)
+        return true
+    end
+    if type(key) == 'string' and key ~= '' then
+        positionsDB()[key] = nil
+        return true
+    end
+    return false
+end
+
+function Window.ClampToScreen(frame)
+    if not isFrameObject(frame) then return false end
+    if isCombatBlocked(frame) then return false end
+    local left = frame.GetLeft and number(frame:GetLeft(), nil) or nil
+    local top = frame.GetTop and number(frame:GetTop(), nil) or nil
+    if left == nil or top == nil then return false end
+    local sw, sh = screen()
+    local scale = frame.GetScale and number(frame:GetScale(), 1) or 1
+    if scale <= 0 then scale = 1 end
+    local fw = (frame.GetWidth and number(frame:GetWidth(), 0) or 0) * scale
+    local fh = (frame.GetHeight and number(frame:GetHeight(), 0) or 0) * scale
+    local uiX = left * scale
+    local uiY = top * scale
+    local clampedX = clamp(uiX, 0, math.max(0, sw - math.min(fw, sw)), uiX)
+    local minTop = math.min(math.max(40, fh), sh)
+    local clampedY = clamp(uiY, minTop, sh, uiY)
+    if math.abs(clampedX - uiX) > 0.5 or math.abs(clampedY - uiY) > 0.5 then
+        if frame.ClearAllPoints then frame:ClearAllPoints() end
+        if frame.SetPoint then
+            frame:SetPoint('TOPLEFT', UIParent, 'BOTTOMLEFT', clampedX / scale, clampedY / scale)
+        end
+    end
+    return true
+end
+
+function Window.SavePosition(frame, key)
+    if not isFrameObject(frame) or type(key) ~= 'string' or key == '' then return nil end
+    local scale = frame.GetScale and number(frame:GetScale(), 1) or 1
+    if scale <= 0 then scale = 1 end
+    local left = frame.GetLeft and number(frame:GetLeft(), nil) or nil
+    local top = frame.GetTop and number(frame:GetTop(), nil) or nil
+    local db = positionsDB()
+    if left ~= nil and top ~= nil then
+        local sw, sh = screen()
+        local fw = (frame.GetWidth and number(frame:GetWidth(), 0) or 0) * scale
+        local fh = (frame.GetHeight and number(frame:GetHeight(), 0) or 0) * scale
+        local uiX = clamp(left * scale, 0, math.max(0, sw - math.min(fw, sw)), left * scale)
+        local minTop = math.min(math.max(40, fh), sh)
+        local uiY = clamp(top * scale, minTop, sh, top * scale)
+        local rec = {
+            space = 'uiparent',
+            point = 'TOPLEFT',
+            relPoint = 'BOTTOMLEFT',
+            x = math.floor(uiX * 10 + 0.5) / 10,
+            y = math.floor(uiY * 10 + 0.5) / 10,
+        }
+        db[key] = rec
+        frame._mmHasSavedPos = true
+        return rec
+    end
+    if frame.GetPoint then
+        local pt, rel, relPt, x, y = frame:GetPoint(1)
+        local nx, ny = number(x, nil), number(y, nil)
+        if type(pt) == 'string' and (rel == nil or rel == UIParent) and nx ~= nil and ny ~= nil then
+            local rec = {
+                space = 'point',
+                point = pt,
+                relPoint = (type(relPt) == 'string' and relPt) or pt,
+                x = nx,
+                y = ny,
+            }
+            db[key] = rec
+            frame._mmHasSavedPos = true
+            return rec
+        end
+    end
+    return nil
+end
+
+function Window.RestorePosition(frame, key)
+    if not isFrameObject(frame) or type(key) ~= 'string' or key == '' then return false end
+    if isCombatBlocked(frame) then return false end
+    local rec = positionsDB()[key]
+    if type(rec) ~= 'table' then return false end
+    local rx = number(rec.x, nil)
+    local ry = number(rec.y, nil)
+    if rx == nil or ry == nil then return false end
+    if frame.SetDontSavePosition then frame:SetDontSavePosition(true) end
+    if frame.SetUserPlaced then frame:SetUserPlaced(false) end
+    if rec.space == 'uiparent' or (rec.point == 'TOPLEFT' and rec.relPoint == 'BOTTOMLEFT') then
+        local sw, sh = screen()
+        local scale = frame.GetScale and number(frame:GetScale(), 1) or 1
+        if scale <= 0 then scale = 1 end
+        local fw = (frame.GetWidth and number(frame:GetWidth(), 0) or 0) * scale
+        local fh = (frame.GetHeight and number(frame:GetHeight(), 0) or 0) * scale
+        local uiX = clamp(rx, 0, math.max(0, sw - math.min(fw, sw)), 0)
+        local minTop = math.min(math.max(40, fh), sh)
+        local uiY = clamp(ry, minTop, sh, sh)
+        if frame.ClearAllPoints then frame:ClearAllPoints() end
+        if frame.SetPoint then
+            frame:SetPoint('TOPLEFT', UIParent, 'BOTTOMLEFT', uiX / scale, uiY / scale)
+        end
+    else
+        local pt = (type(rec.point) == 'string' and rec.point) or 'CENTER'
+        local relPt = (type(rec.relPoint) == 'string' and rec.relPoint) or pt
+        if frame.ClearAllPoints then frame:ClearAllPoints() end
+        if frame.SetPoint then
+            frame:SetPoint(pt, UIParent, relPt, rx, ry)
+        end
+    end
+    frame._mmHasSavedPos = true
+    return true
+end
+
+function Window.PlaceBeside(frame, anchorFrame, fallbackPoint, fallbackX, fallbackY, gap)
+    if not isFrameObject(frame) then return false end
+    if isCombatBlocked(frame) then return false end
+    if frame.ClearAllPoints then frame:ClearAllPoints() end
+    if isFrameShownSafe(anchorFrame) then
+        local gapPx = number(gap, 12)
+        local sw = screen()
+        local scale = frame.GetScale and number(frame:GetScale(), 1) or 1
+        if scale <= 0 then scale = 1 end
+        local modalW = (frame.GetWidth and number(frame:GetWidth(), 400) or 400) * scale
+        local uiEffScale = number(UIParent and UIParent.GetEffectiveScale and UIParent:GetEffectiveScale(), 1)
+        if uiEffScale <= 0 then uiEffScale = 1 end
+        local anchorEff = anchorFrame.GetEffectiveScale and number(anchorFrame:GetEffectiveScale(), uiEffScale) or uiEffScale
+        local anchorScale = anchorEff / uiEffScale
+        if anchorScale <= 0 then anchorScale = 1 end
+        local rawRight = anchorFrame.GetRight and number(anchorFrame:GetRight(), nil) or nil
+        local rawLeft = anchorFrame.GetLeft and number(anchorFrame:GetLeft(), nil) or nil
+        local anchorRight = rawRight and (rawRight * anchorScale) or nil
+        local anchorLeft = rawLeft and (rawLeft * anchorScale) or nil
+        if anchorRight and (anchorRight + modalW + gapPx) > sw and (anchorLeft == nil or (anchorLeft - modalW - gapPx) >= 0) then
+            frame:SetPoint('TOPRIGHT', anchorFrame, 'TOPLEFT', -gapPx / scale, 0)
+        else
+            frame:SetPoint('TOPLEFT', anchorFrame, 'TOPRIGHT', gapPx / scale, 0)
+        end
+        return true
+    end
+    local fp = (type(fallbackPoint) == 'string' and fallbackPoint) or 'CENTER'
+    frame:SetPoint(fp, UIParent, fp, number(fallbackX, 0), number(fallbackY, 0))
+    return false
+end
+
+function Window.ApplyPosition(frame, key, defaultFn)
+    if Window.RestorePosition(frame, key) then
+        return 'saved'
+    end
+    if type(defaultFn) == 'function' then
+        defaultFn(frame)
+    end
+    return 'default'
+end
+
+function Window.DetachToUIParent(frame)
+    if not isFrameObject(frame) then return nil, nil end
+    if isCombatBlocked(frame) then return nil, nil end
+    local left = frame.GetLeft and number(frame:GetLeft(), nil) or nil
+    local top = frame.GetTop and number(frame:GetTop(), nil) or nil
+    if left ~= nil and top ~= nil then
+        if frame.SetDontSavePosition then frame:SetDontSavePosition(true) end
+        if frame.SetUserPlaced then frame:SetUserPlaced(false) end
+        if frame.ClearAllPoints then frame:ClearAllPoints() end
+        if frame.SetPoint then
+            frame:SetPoint('TOPLEFT', UIParent, 'BOTTOMLEFT', left, top)
+        end
+        return left, top
+    end
+    return nil, nil
+end
+
+function Window.IsDragging(frame)
+    return (isFrameObject(frame) and frame._mmDragging == true) and true or false
+end
+
+function Window.MakeDragHandle(handle, target, onStop, opts)
+    if not isFrameObject(handle) or not isFrameObject(target) then return false end
+    local effOpts = type(opts) == 'table' and opts or target._mmDragOpts
+    if handle.EnableMouse then handle:EnableMouse(true) end
+    if handle.RegisterForDrag then handle:RegisterForDrag('LeftButton') end
+
+    local function stopDrag(callOnStop)
+        local wasDragging = (target._mmDragging == true)
+        target._mmDragging = false
+        if target._mmDragDriver and target._mmDragDriver.SetScript then
+            target._mmDragDriver:SetScript('OnUpdate', nil)
+        end
+        if target._mmDragUsedNative then
+            target._mmDragUsedNative = false
+            if target.StopMovingOrSizing then target:StopMovingOrSizing() end
+        end
+        if not wasDragging then return end
+        if callOnStop ~= false then
+            local stopFn = (type(onStop) == 'function' and onStop) or (effOpts and effOpts.onStop)
+            if type(stopFn) == 'function' then stopFn(target) end
+        end
+    end
+
+    local function startDrag()
+        if isCombatBlocked(target) then return end
+        local canFn = (effOpts and effOpts.canDrag) or target._mmCanDrag
+        if type(canFn) == 'function' and canFn(target) == false then
+            return
+        end
+        local left0 = target.GetLeft and number(target:GetLeft(), nil) or nil
+        local top0 = target.GetTop and number(target:GetTop(), nil) or nil
+        local onStartFn = (effOpts and effOpts.onDragStart) or target._mmOnDragStart
+        if type(onStartFn) == 'function' then
+            onStartFn(target)
+        end
+
+        local curFn = _G and _G.GetCursorPosition
+        local cx0, cy0 = nil, nil
+        if type(curFn) == 'function' then
+            cx0, cy0 = curFn()
+            cx0 = number(cx0, nil)
+            cy0 = number(cy0, nil)
+        end
+
+        if cx0 ~= nil and cy0 ~= nil and left0 ~= nil and top0 ~= nil
+            and type(target.ClearAllPoints) == 'function' and type(target.SetPoint) == 'function' then
+            local effScale = target.GetEffectiveScale and number(target:GetEffectiveScale(), nil) or nil
+            if not effScale or effScale <= 0 then
+                effScale = target.GetScale and number(target:GetScale(), 1) or 1
+            end
+            if not effScale or effScale <= 0 then effScale = 1 end
+            local scale = target.GetScale and number(target:GetScale(), 1) or 1
+            if not scale or scale <= 0 then scale = 1 end
+
+            if target.SetDontSavePosition then target:SetDontSavePosition(true) end
+            if target.SetUserPlaced then target:SetUserPlaced(false) end
+            -- Pin exact current screen corner BEFORE moving so delta tracking starts at (0, 0).
+            target:ClearAllPoints()
+            target:SetPoint('TOPLEFT', UIParent, 'BOTTOMLEFT', left0, top0)
+
+            local isClamped = (not target.IsClampedToScreen) or (target:IsClampedToScreen() ~= false)
+            local sw, sh = screen()
+            local fw = (target.GetWidth and number(target:GetWidth(), 0) or 0) * scale
+            local minX = math.min(0, left0 * scale)
+            local maxX = math.max(math.max(0, sw - math.min(fw, sw)), left0 * scale)
+            local minY = math.min(math.min(40, sh), top0 * scale)
+            local maxY = math.max(sh, top0 * scale)
+
+            if not target._mmDragDriver and type(_G.CreateFrame) == 'function' then
+                target._mmDragDriver = _G.CreateFrame('Frame', nil, target)
+            end
+            target._mmDragging = true
+            target._mmDragUsedNative = false
+
+            if target._mmDragDriver and target._mmDragDriver.SetScript then
+                target._mmDragDriver:SetScript('OnUpdate', function()
+                    if not target._mmDragging or isCombatBlocked(target) then
+                        stopDrag(target._mmDragging)
+                        return
+                    end
+                    if target.IsShown and not target:IsShown() then
+                        stopDrag(false)
+                        return
+                    end
+                    if _G and type(_G.IsMouseButtonDown) == 'function' and not _G.IsMouseButtonDown('LeftButton') then
+                        stopDrag(true)
+                        return
+                    end
+                    local cur = _G and _G.GetCursorPosition
+                    if type(cur) ~= 'function' then return end
+                    local cx, cy = cur()
+                    cx, cy = number(cx, nil), number(cy, nil)
+                    if cx == nil or cy == nil then return end
+                    local rawL = left0 + (cx - cx0) / effScale
+                    local rawT = top0 + (cy - cy0) / effScale
+                    if isClamped then
+                        local curW = (target.GetWidth and number(target:GetWidth(), 0) or 0) * scale
+                        local curSw, curSh = screen()
+                        local hiX = math.max(maxX, math.max(0, curSw - math.min(curW, curSw)))
+                        local uiX = clamp(rawL * scale, minX, hiX, rawL * scale)
+                        local uiY = clamp(rawT * scale, minY, math.max(maxY, curSh), rawT * scale)
+                        rawL = uiX / scale
+                        rawT = uiY / scale
+                    end
+                    target:ClearAllPoints()
+                    target:SetPoint('TOPLEFT', UIParent, 'BOTTOMLEFT', rawL, rawT)
+                end)
+            end
+            return
+        end
+
+        target._mmDragging = true
+        target._mmDragUsedNative = true
+        if target.StartMoving then target:StartMoving() end
+    end
+
+    if handle.SetScript then
+        handle:SetScript('OnDragStart', startDrag)
+        handle:SetScript('OnDragStop', function()
+            stopDrag(true)
+        end)
+    end
+    if not handle._mmDragHideHooked and type(handle.HookScript) == 'function' then
+        handle._mmDragHideHooked = true
+        handle:HookScript('OnHide', function()
+            stopDrag(false)
+        end)
+    end
+    if target ~= handle and not target._mmDragHideHooked and type(target.HookScript) == 'function' then
+        target._mmDragHideHooked = true
+        target:HookScript('OnHide', function()
+            stopDrag(false)
+        end)
+    end
+    return true
 end

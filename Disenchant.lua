@@ -201,6 +201,13 @@ do
 		[249385] = true, -- Brilliant Wand
 	}
 
+	-- Merge WoW: Forever DB2 ItemSparse ITEM_FLAG_NO_DISENCHANT (0x8000) equipment IDs
+	if type(ns.DE_DB2_NON_DISENCHANTABLE) == "table" then
+		for id in pairs(ns.DE_DB2_NON_DISENCHANTABLE) do
+			ns.DE_NON_DISENCHANTABLE[id] = true
+		end
+	end
+
 	-- Excluded equipLocs: non-equippable, cosmetic shirts/tabards, trinkets, containers/ammo, thrown.
 	-- Eligible slots include armor pieces, cloaks, shields, rings, necks, relics, weapons, wands (except blacklisted crafted wands), and Held-in-Off-Hand (INVTYPE_HOLDABLE).
 	local DE_EXCLUDED_EQUIPLOCS = {
@@ -467,11 +474,13 @@ do
 
 	local deBreakdownMemo = {}
 	local deProfileMemo = {}
+	local deFastValMemo = {}
 	local deObsVersion = 0
 
 	function ns.ClearDECache()
 		deBreakdownMemo = {}
 		deProfileMemo = {}
+		deFastValMemo = {}
 	end
 
 	function ns.GetDEObservationVersion()
@@ -506,10 +515,65 @@ do
 		}
 	end
 
+	local INV_TO_EQUIPLOC = {
+		[0] = "",
+		[1] = "INVTYPE_HEAD",
+		[2] = "INVTYPE_NECK",
+		[3] = "INVTYPE_SHOULDER",
+		[4] = "INVTYPE_BODY",
+		[5] = "INVTYPE_CHEST",
+		[6] = "INVTYPE_WAIST",
+		[7] = "INVTYPE_LEGS",
+		[8] = "INVTYPE_FEET",
+		[9] = "INVTYPE_WRIST",
+		[10] = "INVTYPE_HAND",
+		[11] = "INVTYPE_FINGER",
+		[12] = "INVTYPE_TRINKET",
+		[13] = "INVTYPE_WEAPON",
+		[14] = "INVTYPE_SHIELD",
+		[15] = "INVTYPE_RANGED",
+		[16] = "INVTYPE_CLOAK",
+		[17] = "INVTYPE_2HWEAPON",
+		[18] = "INVTYPE_BAG",
+		[19] = "INVTYPE_TABARD",
+		[20] = "INVTYPE_ROBE",
+		[21] = "INVTYPE_WEAPONMAINHAND",
+		[22] = "INVTYPE_WEAPONOFFHAND",
+		[23] = "INVTYPE_HOLDABLE",
+		[24] = "INVTYPE_AMMO",
+		[25] = "INVTYPE_THROWN",
+		[26] = "INVTYPE_RANGEDRIGHT",
+		[27] = "INVTYPE_QUIVER",
+		[28] = "INVTYPE_RELIC",
+	}
+
+	local function unpackEquipMeta(packed)
+		if type(packed) ~= "number" or packed <= 0 then return nil end
+		local q = packed % 8
+		local ilvl = math.floor(packed / 8) % 512
+		local cBit = math.floor(packed / 4096) % 2
+		local sc = math.floor(packed / 8192) % 32
+		local inv = math.floor(packed / 262144) % 64
+		return {
+			q = q,
+			ilvl = ilvl,
+			c = (cBit == 0) and WEAPON or ARMOR,
+			sc = sc,
+			eq = INV_TO_EQUIPLOC[inv] or "",
+		}
+	end
+
 	local function lookupFallbackMeta(itemID)
 		local staticMeta = ns.DE_ITEM_META and ns.DE_ITEM_META[itemID]
 		if type(staticMeta) == "table" and isFiniteNumber(staticMeta.q) and isFiniteNumber(staticMeta.c) then
 			return staticMeta, "static"
+		end
+		local packed = ns.DE_EQUIP_PACKED and ns.DE_EQUIP_PACKED[itemID]
+		if type(packed) == "number" and packed > 0 then
+			local decoded = unpackEquipMeta(packed)
+			if decoded and isFiniteNumber(decoded.q) and isFiniteNumber(decoded.c) then
+				return decoded, "static_db2"
+			end
 		end
 		local db = _G.MerchantMasterDB
 		local mc = (type(db) == "table") and db.deItemMetaCache or nil
@@ -708,7 +772,7 @@ do
 		return (string.format("%.3f", v):gsub("0+$", ""):gsub("%.$", ""))
 	end
 
-	function ns.IsItemDisenchantable(itemID, itemLink)
+	function ns.IsItemDisenchantable(itemID, itemLink, hintMeta)
 		if not itemID or type(itemID) ~= "number" or itemID <= 0 then
 			return false, "invalid", nil
 		end
@@ -742,7 +806,7 @@ do
 			end
 		end
 
-		-- 2. Fallback to static ns.DE_ITEM_META then persistent MerchantMasterDB.deItemMetaCache
+		-- 2. Fallback to static ns.DE_ITEM_META, packed DB2 ns.DE_EQUIP_PACKED, then persistent MerchantMasterDB.deItemMetaCache
 		if not metaSource then
 			local fb, fbSrc = lookupFallbackMeta(itemID)
 			if fb then
@@ -755,10 +819,70 @@ do
 					or (ns.ITEMS and ns.ITEMS[itemID] and ns.ITEMS[itemID].name)
 					or ("Item #" .. tostring(itemID))
 				metaSource = fbSrc
-			else
-				if ns.RequestItemDataLoad then ns.RequestItemDataLoad(itemID) end
-				return nil, "uncached", nil
 			end
+		end
+
+		-- 3. Synthesize from GetItemInfoInstant + hintMeta when live & static/packed/DB fallbacks all miss
+		if not metaSource and type(hintMeta) == "table" then
+			local instClassID, instSubclassID, instEquipLoc
+			local getInstant = (C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant
+			if type(getInstant) == "function" then
+				local okI, _, _, _, iEquipLoc, _, iClassID, iSubclassID = pcall(getInstant, itemLink or itemID)
+				if okI then
+					if readable(iClassID) and isFiniteNumber(iClassID) then
+						instClassID = math.floor(iClassID)
+					end
+					if readable(iSubclassID) and isFiniteNumber(iSubclassID) then
+						instSubclassID = math.floor(iSubclassID)
+					end
+					if readable(iEquipLoc) and type(iEquipLoc) == "string" then
+						instEquipLoc = iEquipLoc
+					end
+				end
+			end
+
+			local hClassID = instClassID
+			if hClassID == nil and isFiniteNumber(hintMeta.classID) then
+				hClassID = math.floor(hintMeta.classID)
+			end
+			local hSubclassID = instSubclassID
+			if hSubclassID == nil then
+				hSubclassID = isFiniteNumber(hintMeta.subclassID) and math.floor(hintMeta.subclassID) or 0
+			end
+			local hEquipLoc = (instEquipLoc and instEquipLoc ~= "") and instEquipLoc
+				or (type(hintMeta.equipLoc) == "string" and hintMeta.equipLoc or "")
+			local hQuality = isFiniteNumber(hintMeta.quality) and math.floor(hintMeta.quality) or nil
+			local hIlvl = isFiniteNumber(hintMeta.ilvl) and math.floor(hintMeta.ilvl) or nil
+
+			if hClassID ~= nil and hClassID ~= ARMOR and hClassID ~= WEAPON then
+				return false, "ineligible", nil
+			end
+			if hQuality ~= nil and (hQuality < 2 or hQuality > 4) then
+				return false, "ineligible", nil
+			end
+			if hClassID ~= nil and hQuality ~= nil and hIlvl ~= nil and hIlvl > 0 and hEquipLoc ~= "" then
+				classID = hClassID
+				subclassID = hSubclassID
+				equipLoc = hEquipLoc
+				quality = hQuality
+				ilvl = hIlvl
+				name = (type(hintMeta.name) == "string" and hintMeta.name ~= "" and hintMeta.name)
+					or (ns.ITEM_NAMES_BY_ID and ns.ITEM_NAMES_BY_ID[itemID])
+					or (ns.ITEMS and ns.ITEMS[itemID] and ns.ITEMS[itemID].name)
+					or ("Item #" .. tostring(itemID))
+				metaSource = "browse_hint"
+			elseif hEquipLoc ~= "" and DE_EXCLUDED_EQUIPLOCS[hEquipLoc] then
+				return false, "ineligible", nil
+			elseif hClassID == WEAPON and (hSubclassID == 20 or hSubclassID == 16) then
+				return false, "ineligible", nil
+			elseif hClassID == ARMOR and hSubclassID == 5 then
+				return false, "ineligible", nil
+			end
+		end
+
+		if not metaSource then
+			if ns.RequestItemDataLoad then ns.RequestItemDataLoad(itemID) end
+			return nil, "uncached", nil
 		end
 
 		if (classID ~= ARMOR and classID ~= WEAPON) or quality < 2 or quality > 4 then
@@ -776,14 +900,20 @@ do
 		end
 
 		-- Preserve itemLink detailed item level override regardless of live vs static/cache metadata source
+		local appliedDetailedIlvl = false
 		if itemLink then
 			local getDetailed = (C_Item and C_Item.GetDetailedItemLevelInfo) or GetDetailedItemLevelInfo
 			if getDetailed then
 				local ok, detailed = pcall(getDetailed, itemLink)
 				if ok and readable(detailed) and type(detailed) == "number" and detailed > 0 then
 					ilvl = detailed
+					appliedDetailedIlvl = true
 				end
 			end
+		end
+		-- Apply scaled Browse hintMeta.ilvl override when no itemLink detailed ilvl was read
+		if not appliedDetailedIlvl and type(hintMeta) == "table" and isFiniteNumber(hintMeta.ilvl) and hintMeta.ilvl > 0 then
+			ilvl = math.floor(hintMeta.ilvl)
 		end
 		if not readable(ilvl) or type(ilvl) ~= "number" or ilvl <= 0 then
 			return false, "ineligible", nil
@@ -888,8 +1018,31 @@ do
 		return true, bucketKey
 	end
 
+	-- O(1) check returning true if live observations meet blending threshold for itemID or c:q:ilvl bucket.
+	function ns.HasDEObservations(itemID, classID, quality, ilvl)
+		local db = _G.MerchantMasterDB
+		local obs = (type(db) == "table") and db.deObservations or nil
+		if type(obs) ~= "table" then return false end
+		local minCasts = ns.DE_LEARN_MIN_CASTS or 3
+		if type(itemID) == "number" and itemID > 0 and type(obs.byItem) == "table" then
+			local ie = obs.byItem[itemID]
+			if type(ie) == "table" and isFiniteNumber(ie.casts) and math.floor(ie.casts) >= minCasts then
+				return true
+			end
+		end
+		if isFiniteNumber(classID) and isFiniteNumber(quality) and isFiniteNumber(ilvl)
+			and type(obs.byBucket) == "table" and next(obs.byBucket) ~= nil then
+			local bk = tostring(math.floor(classID)) .. ":" .. tostring(math.floor(quality)) .. ":" .. tostring(math.floor(ilvl))
+			local be = obs.byBucket[bk]
+			if type(be) == "table" and isFiniteNumber(be.casts) and math.floor(be.casts) >= minCasts then
+				return true
+			end
+		end
+		return false
+	end
+
 	-- Returns sanitized observation stats for an item (preferring its c:q:ilvl bucket unless byItem has more/newer casts), or nil.
-	function ns.GetDEObservationStats(itemID, itemLink)
+	function ns.GetDEObservationStats(itemID, itemLink, hintMeta)
 		if not itemID or type(itemID) ~= "number" or itemID <= 0 then
 			return nil
 		end
@@ -900,7 +1053,7 @@ do
 		end
 
 		local bucketKey = nil
-		local ok, _, meta = ns.IsItemDisenchantable(itemID, itemLink)
+		local ok, _, meta = ns.IsItemDisenchantable(itemID, itemLink, hintMeta)
 		if ok and meta and meta.classID and meta.quality and meta.ilvl then
 			bucketKey = tostring(meta.classID) .. ":" .. tostring(meta.quality) .. ":" .. tostring(meta.ilvl)
 		end
@@ -931,33 +1084,16 @@ do
 		}
 	end
 
-	-- Returns outcomes (array of rows), errOrNil, metaInfo
-	-- Each row supports both positional [1]=matID,[2]=matRate,[3]=minAmount,[4]=maxAmount,[5]=amountOfMats
-	-- and named keys (matID, matRate, minAmount, maxAmount, amountOfMats, chance, minQty, maxQty).
-	function ns.GetItemDEProfile(itemID, itemLink)
-		local ok, err, meta = ns.IsItemDisenchantable(itemID, itemLink)
-		if ok == nil then
-			return nil, err or "uncached", nil
-		end
-		if not ok or not meta then
-			return nil, err or "ineligible", nil
-		end
-		local profKey = tostring(meta.classID) .. ":" .. tostring(meta.quality) .. ":" .. tostring(meta.ilvl)
-		local cached = deProfileMemo[profKey]
-		if cached then
-			if cached.err then return nil, cached.err, meta end
-			return cached.rows, nil, meta
-		end
-
+	local function collectDEDataRows(classID, quality, effIlvl)
 		local out = {}
 		for _, matID in ipairs(DE_MAT_ORDER) do
 			local target = ns.DE_DATA[matID]
 			if target and target.sourceInfo then
 				for _, info in ipairs(target.sourceInfo) do
-					if info.class == meta.classID
-						and info.quality == meta.quality
-						and meta.ilvl >= info.minItemLevel
-						and meta.ilvl <= info.maxItemLevel then
+					if info.class == classID
+						and info.quality == quality
+						and effIlvl >= info.minItemLevel
+						and effIlvl <= info.maxItemLevel then
 						out[#out + 1] = {
 							matID, info.matRate, info.minAmount, info.maxAmount, info.amountOfMats,
 							matID = matID,
@@ -975,10 +1111,65 @@ do
 				end
 			end
 		end
+		return out
+	end
+
+	local function resolveDEBucketProfile(classID, quality, ilvl)
+		local profKey = tostring(classID) .. ":" .. tostring(quality) .. ":" .. tostring(ilvl)
+		local cached = deProfileMemo[profKey]
+		if cached then
+			if cached.err then return nil, cached.err, false, nil end
+			return cached.rows, nil, cached.isEstimated == true, cached.estimateReason
+		end
+
+		local out = collectDEDataRows(classID, quality, ilvl)
+		local isEstimated = false
+		local estimateReason = nil
+
+		if #out == 0 then
+			if ilvl > 99 then
+				out = collectDEDataRows(classID, quality, 99)
+				if #out > 0 then
+					isEstimated = true
+					estimateReason = "clamped_high_ilvl"
+				end
+			elseif quality == 4 and ilvl >= 20 and ilvl < 40 then
+				local shardID
+				if ilvl <= 25 then
+					shardID = 10978
+				elseif ilvl <= 30 then
+					shardID = 11084
+				elseif ilvl <= 35 then
+					shardID = 11138
+				else
+					shardID = 11139
+				end
+				out[1] = {
+					shardID, 1.0, 2, 4, 3.0,
+					matID = shardID,
+					chance = 1.0,
+					matRate = 1.0,
+					minQty = 2,
+					maxQty = 4,
+					minAmount = 2,
+					maxAmount = 4,
+					amountOfMats = 3.0,
+					requiredSkill = 1,
+				}
+				isEstimated = true
+				estimateReason = "estimated_low_epic"
+			elseif ilvl >= 1 and ilvl < 5 then
+				out = collectDEDataRows(classID, quality, 5)
+				if #out > 0 then
+					isEstimated = true
+					estimateReason = "clamped_low_ilvl"
+				end
+			end
+		end
 
 		if #out == 0 then
 			deProfileMemo[profKey] = { err = "out_of_band" }
-			return nil, "out_of_band", meta
+			return nil, "out_of_band", false, nil
 		end
 
 		table.sort(out, function(a, b)
@@ -986,27 +1177,140 @@ do
 			return a.matID < b.matID
 		end)
 
-		deProfileMemo[profKey] = { rows = out }
-		return out, nil, meta
+		deProfileMemo[profKey] = {
+			rows = out,
+			isEstimated = isEstimated,
+			estimateReason = estimateReason,
+		}
+		return out, nil, isEstimated, estimateReason
+	end
+
+	-- Returns outcomes (array of rows), errOrNil, metaInfo, isEstimated, estimateReason
+	-- Each row supports both positional [1]=matID,[2]=matRate,[3]=minAmount,[4]=maxAmount,[5]=amountOfMats
+	-- and named keys (matID, matRate, minAmount, maxAmount, amountOfMats, chance, minQty, maxQty).
+	function ns.GetItemDEProfile(itemID, itemLink, hintMeta)
+		local ok, err, meta = ns.IsItemDisenchantable(itemID, itemLink, hintMeta)
+		if ok == nil then
+			return nil, err or "uncached", nil, false, nil
+		end
+		if not ok or not meta then
+			return nil, err or "ineligible", nil, false, nil
+		end
+		local rows, profErr, isEstimated, estimateReason = resolveDEBucketProfile(meta.classID, meta.quality, meta.ilvl)
+		if profErr then
+			return nil, profErr, meta, false, nil
+		end
+		return rows, nil, meta, isEstimated, estimateReason
+	end
+
+	-- Fast O(1) memoized baseline DE expected value per (classID, quality, ilvl, applyAHCut) bucket.
+	-- Returns netCopper (or nil), isEstimated with zero per-item allocations on memo hit.
+	function ns.GetFastDEExpectedValue(classID, quality, ilvl, useAS, applyAHCut)
+		if (classID ~= ARMOR and classID ~= WEAPON)
+			or not isFiniteNumber(quality) or not isFiniteNumber(ilvl) then
+			return nil, false
+		end
+		local q = math.floor(quality)
+		local lv = math.floor(ilvl)
+		if q < 2 or q > 4 or lv <= 0 then
+			return nil, false
+		end
+		local applyCut = (applyAHCut ~= false)
+		local key = lv * 32 + q * 4 + (classID == ARMOR and 2 or 0) + (applyCut and 1 or 0)
+		local entry = deFastValMemo[key]
+		if not entry then
+			local rows, profErr, isEstimated = resolveDEBucketProfile(classID, q, lv)
+			if profErr or not rows then
+				entry = { net = nil, asNet = nil, isEst = false }
+			else
+				local gross = 0
+				local pricedCount = 0
+				for i = 1, #rows do
+					local row = rows[i]
+					local matID = row.matID
+					local price
+					if ns.GetItemMarketPrice then
+						price = ns.GetItemMarketPrice(matID)
+					end
+					if (not price or price <= 0) and ns.GetFallbackMarketPrice then
+						price = ns.GetFallbackMarketPrice(matID)
+					end
+					if type(price) == "number" and price > 0 then
+						pricedCount = pricedCount + 1
+						gross = gross + (row.amountOfMats * price)
+					end
+				end
+				local netCopper, asNetCopper
+				if pricedCount > 0 then
+					local grossCopper = math.floor(gross + 0.5)
+					netCopper = applyCut and math.floor(grossCopper * 0.95 + 0.5) or grossCopper
+					local asMult = 1 + (ns.DE_ARCANE_SALVAGER_BONUS or 0.20)
+					asNetCopper = math.floor(netCopper * asMult + 0.5)
+				end
+				entry = { net = netCopper, asNet = asNetCopper, isEst = isEstimated == true }
+			end
+			deFastValMemo[key] = entry
+		end
+		return (useAS and entry.asNet or entry.net), entry.isEst
+	end
+
+	-- Reports price coverage across all 24 enchanting materials in DE_MAT_ORDER.
+	function ns.GetDEMaterialPriceCoverage()
+		local total = #DE_MAT_ORDER
+		local priced = 0
+		local missing = 0
+		local missingNames = {}
+		for i = 1, total do
+			local matID = DE_MAT_ORDER[i]
+			local price
+			if ns.GetItemMarketPrice then
+				price = ns.GetItemMarketPrice(matID)
+			end
+			if (not price or price <= 0) and ns.GetFallbackMarketPrice then
+				price = ns.GetFallbackMarketPrice(matID)
+			end
+			if type(price) == "number" and price > 0 then
+				priced = priced + 1
+			else
+				missing = missing + 1
+				local info = ns.DE_MAT_INFO[matID]
+				missingNames[#missingNames + 1] = (info and info.name) or ("Item #" .. tostring(matID))
+			end
+		end
+		return {
+			total = total,
+			priced = priced,
+			missing = missing,
+			missingNames = missingNames,
+		}
 	end
 
 	-- Computes full DE breakdown priced via MerchantMaster tracked prices,
 	-- with Bayesian shrinkage blending from live observed DE casts once casts >= 3.
 	-- Returns breakdownTable (or nil), errOrNil.
-	function ns.GetItemDEBreakdown(itemID, itemLink, applyAHCut)
+	function ns.GetItemDEBreakdown(itemID, itemLink, applyAHCut, hintMeta)
 		if not itemID or type(itemID) ~= "number" or itemID <= 0 then
 			return nil, "invalid"
 		end
 		local applyCut = (applyAHCut ~= false)
 		local cutFlag = applyCut and "1" or "0"
-		local cacheKey = tostring(itemLink or itemID) .. ":" .. cutFlag
+		local hintSuffix = ""
+		if type(hintMeta) == "table" then
+			local hi = isFiniteNumber(hintMeta.ilvl) and math.floor(hintMeta.ilvl) or 0
+			local hq = isFiniteNumber(hintMeta.quality) and math.floor(hintMeta.quality) or 0
+			local hc = isFiniteNumber(hintMeta.classID) and math.floor(hintMeta.classID) or 0
+			if hi > 0 or hq > 0 or hc > 0 then
+				hintSuffix = ":h" .. tostring(hi) .. ":" .. tostring(hq) .. ":" .. tostring(hc)
+			end
+		end
+		local cacheKey = tostring(itemLink or itemID) .. ":" .. cutFlag .. hintSuffix
 		local hit = deBreakdownMemo[cacheKey]
 		if hit then
 			if hit.err then return nil, hit.err end
 			return hit.bd, nil
 		end
 
-		local mats, err, meta = ns.GetItemDEProfile(itemID, itemLink)
+		local mats, err, meta, isEstimated, estimateReason = ns.GetItemDEProfile(itemID, itemLink, hintMeta)
 		if err == "uncached" then
 			return nil, "uncached"
 		end
@@ -1015,7 +1319,7 @@ do
 			return nil, err or "ineligible"
 		end
 
-		local obs = ns.GetDEObservationStats(itemID, itemLink)
+		local obs = ns.GetDEObservationStats(itemID, itemLink, hintMeta)
 		local learnedCasts = (obs and obs.casts) or 0
 		local minCasts = ns.DE_LEARN_MIN_CASTS or 3
 		local priorW = ns.DE_LEARN_PRIOR_WEIGHT or 10
@@ -1196,16 +1500,19 @@ do
 			learnedCasts = learnedCasts,
 			learnedBlended = learnedBlended,
 			learnedWeight = shrinkW,
+			isEstimated = isEstimated == true,
+			estimateReason = estimateReason,
 			primarySummary = primarySummary,
 			outcomes = pricedOutcomes,
 		}
 		deBreakdownMemo[cacheKey] = { bd = bd }
 		return bd, nil
 	end
+	ns._defaultGetItemDEBreakdown = ns.GetItemDEBreakdown
 
 	-- Backward-compatible scalar EV helper: returns netCopper (or nil), grossCopper (or nil), errOrNil.
-	function ns.GetItemDEValue(itemID, itemLink, applyAHCut)
-		local bd, err = ns.GetItemDEBreakdown(itemID, itemLink, applyAHCut)
+	function ns.GetItemDEValue(itemID, itemLink, applyAHCut, hintMeta)
+		local bd, err = ns.GetItemDEBreakdown(itemID, itemLink, applyAHCut, hintMeta)
 		if not bd then
 			return nil, nil, err
 		end

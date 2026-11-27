@@ -49,4 +49,6 @@ MailHelper.lua
 ConsoleEngine.lua
 UI_Console.lua
 UI_DashboardBrief.lua
+DashboardBloombergModel.lua
+UI_DashboardBloomberg.lua
 UI_AHSellTab.lua

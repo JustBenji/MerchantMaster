@@ -141,4 +141,110 @@ do
     check(vtbl.columns[1].width>140,'zero scrollBox width does not collapse table width to 0')
     assertAligned(vtbl,vrow,'zero scrollBox guard')
 end
+do
+    _G.MerchantMasterDB = {}
+    UIParent.width = 1920; UIParent.height = 1080
+    local helper = F.widget(UIParent)
+    helper:SetSize(496, 584)
+    helper.scale = 1
+    helper.left = 312.5
+    helper.top = 740.25
+    local savedRec = ns.Window.SavePosition(helper, 'disenchant_helper')
+    check(savedRec ~= nil and ns.Window.HasSavedPosition('disenchant_helper'), 'SavePosition stores per-window position')
+    local f2 = F.widget(UIParent); f2:SetSize(496, 584); f2.scale = 1.2
+    check(ns.Window.RestorePosition(f2, 'disenchant_helper') == true, 'RestorePosition applies saved position cleanly')
+    check(math.abs((f2.left * f2.scale) - 312.5) < 1 and math.abs((f2.top * f2.scale) - 740.2) < 1, 'RestorePosition normalizes UIParent coords across UI scale')
+    UIParent.width = 1024; UIParent.height = 768
+    f2.left = 900; f2.top = 900; f2.scale = 1
+    ns.Window.ClampToScreen(f2)
+    check(f2.left <= (1024 - 496) and f2.top <= 768, 'ClampToScreen keeps resized/restored window inside viewport bounds')
+    UIParent.width = 1920; UIParent.height = 1080
+    local anchor = F.widget(UIParent); anchor:SetSize(600, 600); anchor:Show(); anchor.left = 200; anchor.top = 800
+    anchor.GetRight = function() return 800 end
+    anchor.GetLeft = function() return 200 end
+    local lastPts = nil
+    f2.ClearAllPoints = function() lastPts = nil end
+    f2.SetPoint = function(self, pt, rel, relPt, x, y) lastPts = { pt, rel, relPt, x, y } end
+    check(ns.Window.PlaceBeside(f2, anchor, 'CENTER', 0, 0, 12) == true and lastPts[1] == 'TOPLEFT' and lastPts[2] == anchor and lastPts[3] == 'TOPRIGHT',
+        'PlaceBeside anchors beside open Blizzard window on right when room fits')
+    anchor.GetRight = function() return 1700 end; anchor.GetLeft = function() return 1100 end
+    check(ns.Window.PlaceBeside(f2, anchor, 'CENTER', 0, 0, 12) == true and lastPts[1] == 'TOPRIGHT' and lastPts[2] == anchor and lastPts[3] == 'TOPLEFT',
+        'PlaceBeside flips to left of Blizzard window near right screen edge')
+    anchor:Hide()
+    check(ns.Window.PlaceBeside(f2, anchor, 'CENTER', 0, 20, 12) == false and lastPts[1] == 'CENTER' and lastPts[5] == 20,
+        'PlaceBeside falls back to CENTER when Blizzard window is hidden')
+    -- Zero-hop cursor-delta dragging when GetCursorPosition + GetLeft/GetTop are available
+    local fDrag = F.widget(UIParent)
+    fDrag:SetSize(400, 300)
+    local dragStopped = false
+    local hdr = F.widget(fDrag)
+    fDrag.left, fDrag.top = 150, 720
+    fDrag.scale = 1
+    UIParent.scale = 1
+    F.cursor(300, 700)
+    ns.Window.MakeDragHandle(hdr, fDrag, function(t)
+        dragStopped = true
+        ns.Window.SavePosition(t, 'drag_key')
+    end)
+    hdr:Fire('OnDragStart')
+    check(ns.Window.IsDragging(fDrag) and fDrag.left == 150 and fDrag.top == 720,
+        'MakeDragHandle starts cursor-delta drag with zero hop (left=150, top=720)')
+    F.cursor(420, 640)
+    fDrag._mmDragDriver:Fire('OnUpdate', 0.016)
+    check(math.abs(fDrag.left - 270) < 0.01 and math.abs(fDrag.top - 660) < 0.01,
+        'Cursor-delta drag moves target smoothly by exact cursor delta')
+    hdr:Fire('OnDragStop')
+    check(dragStopped and not ns.Window.IsDragging(fDrag) and ns.Window.HasSavedPosition('drag_key')
+        and math.abs(MerchantMasterDB.windowPositions.drag_key.x - 270) < 0.2,
+        'MakeDragHandle stops cleanly and saves final dragged coordinates')
+
+    -- OnHide mid-drag cleans up without firing onStop
+    dragStopped = false
+    F.cursor(100, 500)
+    hdr:Fire('OnDragStart')
+    check(ns.Window.IsDragging(fDrag), 'Second drag started')
+    fDrag:Hide()
+    check(not ns.Window.IsDragging(fDrag) and not dragStopped and not fDrag._mmDragDriver.scripts.OnUpdate,
+        'Hiding target mid-drag cancels OnUpdate cleanly')
+    fDrag:Show()
+
+    -- Per-window Snap / Lock / Free mode persistence & Lock drag blocking
+    check(ns.Window.GetMode('drag_key', 'snap') == 'snap', 'Default mode is snap')
+    check(ns.Window.CycleMode('drag_key') == 'lock', 'CycleMode snap -> lock')
+    local lockDragStopped = false
+    local hdrLock = F.widget(fDrag)
+    fDrag.left, fDrag.top = 200, 600
+    ns.Window.MakeDragHandle(hdrLock, fDrag, function() lockDragStopped = true end, {
+        canDrag = function() return ns.Window.GetMode('drag_key', 'snap') ~= 'lock' end,
+    })
+    F.cursor(200, 600)
+    hdrLock:Fire('OnDragStart')
+    check(not ns.Window.IsDragging(fDrag), 'Lock mode blocks drag start')
+    F.cursor(400, 400)
+    hdrLock:Fire('OnDragStop')
+    check(fDrag.left == 200 and fDrag.top == 600 and not lockDragStopped, 'Locked target stays at anchored coords')
+    check(ns.Window.CycleMode('drag_key') == 'free', 'CycleMode lock -> free')
+    check(ns.Window.CycleMode('drag_key') == 'snap', 'CycleMode free -> snap')
+
+    -- Native StartMoving fallback when GetCursorPosition is absent
+    local origCursorFn = _G.GetCursorPosition
+    _G.GetCursorPosition = nil
+    local nativeMoved, nativeStopped = false, false
+    local f3 = F.widget(UIParent)
+    local hdr3 = F.widget(f3)
+    f3.StartMoving = function() nativeMoved = true end
+    f3.StopMovingOrSizing = function() nativeStopped = true end
+    ns.Window.MakeDragHandle(hdr3, f3, function(t) ns.Window.SavePosition(t, 'drag_native') end)
+    hdr3:Fire('OnDragStart'); hdr3:Fire('OnDragStop')
+    check(nativeMoved and nativeStopped and ns.Window.HasSavedPosition('drag_native'),
+        'MakeDragHandle falls back to StartMoving when GetCursorPosition is unavailable')
+    _G.GetCursorPosition = origCursorFn
+
+    ns.Window.ClearSavedPosition(nil)
+    check(not ns.Window.HasSavedPosition('disenchant_helper')
+        and not ns.Window.HasSavedPosition('drag_key')
+        and ns.Window.GetMode('drag_key', 'snap') == 'snap',
+        'ClearSavedPosition(nil) resets saved positions and window modes back to snap')
+    _G.MerchantMasterDB = nil
+end
 print('WP5 window: '..F.count..' assertions, 0 failures')

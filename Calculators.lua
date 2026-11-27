@@ -3877,48 +3877,60 @@ function ns.BuildSupplyPool(opts)
 				and ns.Pricing.GetItemSnapshotDepth(itemID, econ.effectiveKey) or nil
 			local hasSnap = type(snapDepth) == "table" and #snapDepth > 0
 
-			local preferSnapDepth = false
-			if hasSnap and not hasSaved then
-				preferSnapDepth = true
-			elseif hasSnap and hasSaved then
-				local snapMeta = (type(ns.Pricing.GetSnapshotMeta) == "function")
-					and ns.Pricing.GetSnapshotMeta(econ.effectiveKey) or nil
-				local snapAt = (snapMeta and type(snapMeta.updatedAt) == "number" and snapMeta.updatedAt > 0)
-					and snapMeta.updatedAt or 0
-				local liveLotAt = (type(lotAt) == "number" and lotAt > 0) and lotAt or 0
-				if snapAt > liveLotAt then
-					preferSnapDepth = true
-				end
+			local snapMeta = (type(ns.Pricing) == "table" and type(ns.Pricing.GetSnapshotMeta) == "function")
+				and ns.Pricing.GetSnapshotMeta(econ.effectiveKey) or nil
+			local snapAt = (snapMeta and type(snapMeta.updatedAt) == "number" and snapMeta.updatedAt > 0)
+				and snapMeta.updatedAt or 0
+			local liveLotAt = (type(lotAt) == "number" and lotAt > 0) and lotAt or 0
+			local can = (type(ns.GetCanonicalItemPrice) == "function")
+				and ns.GetCanonicalItemPrice(itemID, econ.effectiveKey) or nil
+			local canKind = can and can.kind or nil
+			local canTs = (can and type(can.timestamp) == "number" and can.timestamp > 0) and can.timestamp or 0
+
+			if canKind == "absent" and canTs >= liveLotAt then
+				self.items[itemID] = lots
+				return lots
 			end
 
-			local function appendLots(srcList, srcTag)
-				local added = 0
-				for _, entry in ipairs(srcList) do
-					if entry.price and entry.price > 0 and entry.qty and entry.qty > 0 then
-						lots[#lots + 1] = { price = entry.price, qty = entry.qty, initialQty = entry.qty, source = srcTag }
-						added = added + 1
+			local spotOverridesLots = (canKind == "live" or canKind == "tsm")
+				and canTs > liveLotAt and canTs > snapAt
+
+			if not spotOverridesLots then
+				local preferSnapDepth = hasSnap and (
+					(not hasSaved)
+					or (snapAt > liveLotAt)
+					or (canKind == "snap" and canTs > liveLotAt)
+				)
+
+				local function appendLots(srcList, srcTag)
+					local added = 0
+					for _, entry in ipairs(srcList) do
+						if entry.price and entry.price > 0 and entry.qty and entry.qty > 0 then
+							lots[#lots + 1] = { price = entry.price, qty = entry.qty, initialQty = entry.qty, source = srcTag }
+							added = added + 1
+						end
 					end
+					return added
 				end
-				return added
-			end
 
-			if preferSnapDepth then
-				if appendLots(snapDepth, "Snapshot Depth") > 0 then
-					self.items[itemID] = lots
-					return lots
-				end
-				if hasSaved and appendLots(savedLots, "AH Lot") > 0 then
-					self.items[itemID] = lots
-					return lots
-				end
-			elseif hasSaved then
-				if appendLots(savedLots, "AH Lot") > 0 then
-					self.items[itemID] = lots
-					return lots
-				end
-				if hasSnap and appendLots(snapDepth, "Snapshot Depth") > 0 then
-					self.items[itemID] = lots
-					return lots
+				if preferSnapDepth then
+					if appendLots(snapDepth, "Snapshot Depth") > 0 then
+						self.items[itemID] = lots
+						return lots
+					end
+					if hasSaved and appendLots(savedLots, "AH Lot") > 0 then
+						self.items[itemID] = lots
+						return lots
+					end
+				elseif hasSaved then
+					if appendLots(savedLots, "AH Lot") > 0 then
+						self.items[itemID] = lots
+						return lots
+					end
+					if hasSnap and appendLots(snapDepth, "Snapshot Depth") > 0 then
+						self.items[itemID] = lots
+						return lots
+					end
 				end
 			end
 		end
@@ -6864,8 +6876,9 @@ function ns.GetItemCostBasis(itemID)
 	local econ = "default"
 	if type(ns.CurrentEconomyInfo) == "function" then
 		local okE, info = pcall(ns.CurrentEconomyInfo)
-		if okE and type(info) == "table" and type(info.key) == "string" and info.key ~= "" then
-			econ = info.key
+		local ek = (okE and type(info) == "table") and (info.effectiveKey or info.key) or nil
+		if type(ek) == "string" and ek ~= "" then
+			econ = ek
 		end
 	end
 	local store = (type(ns.Analytics) == "table" and type(ns.Analytics.Store) == "table" and ns.Analytics.Store)

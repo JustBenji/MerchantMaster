@@ -894,7 +894,7 @@ function MarketScan.Initialize(app, context)
 	local lotsPrice, lotsFor = context.lotsPrice, context.lotsFor
 	local ownedCounts, bagCrates, atAH = context.ownedCounts, context.bagCrates, context.atAH
 
-local marketScan = { economy = nil, partial = false, generation = 0, active = false, internal = false, hooked = false, matched = {}, matchedCount = 0, seenKeys = {}, itemKeys = {}, itemVariants = {}, incompleteItems = {}, page = 0, seen = 0, started = 0, timer = nil }
+local marketScan = { economy = nil, partial = false, equipmentOnly = false, generation = 0, active = false, internal = false, hooked = false, matched = {}, matchedCount = 0, seenKeys = {}, itemKeys = {}, itemVariants = {}, incompleteItems = {}, page = 0, seen = 0, started = 0, timer = nil }
 local bagScan = { queue = {} }
 local pendingSearchSeq = 0
 local wantedDispatch, bagBrowseDispatch
@@ -1112,16 +1112,84 @@ activeEconomyPrices = function()
 	return app.ahPrices, activeEcon
 end
 
+function MarketScan.RecordLiveItemPrice(itemID, price, qty, opts)
+	local id = safeNumber(itemID)
+	if not id or id <= 0 then return false end
+	id = math.floor(id)
+	local ahTbl, activeEcon = activeEconomyPrices()
+	if not ahTbl then return false end
+	opts = tableValue(opts)
+	local stamp = (opts and safeNumber(opts.stamp)) or time()
+	local rawQty = safeNumber(qty) or 0
+	local q = math.max(0, math.floor(rawQty))
+	local rawP = safeNumber(price)
+	local minP = (rawP and rawP > 0 and q > 0) and math.max(1, math.floor(rawP + 0.5)) or nil
+	local isAbsent = (minP == nil)
+	if q == 0 and minP ~= nil then minP = nil end
+	local prev = tableValue(ahTbl[id])
+	local prevLast, prevLastAt = lastPositiveQuote(prev)
+	local itemWide = (opts and opts.itemWide ~= nil) and (opts.itemWide == true)
+		or (prev and prev.itemWide == true) or false
+	local clearLots = not (opts and opts.clearLots == false)
+	if clearLots and MerchantMasterDB and MerchantMasterDB.ahLots and MerchantMasterDB.ahLots[activeEcon] then
+		local oldLots = tableValue(MerchantMasterDB.ahLots[activeEcon][id])
+		if oldLots and (not safeNumber(oldLots.at) or oldLots.at < stamp) then
+			MerchantMasterDB.ahLots[activeEcon][id] = nil
+		end
+	end
+	local changed = (type(prev) ~= "table"
+		or prev.price ~= minP
+		or prev.qty ~= q
+		or prev.absent ~= isAbsent
+		or not prev.at
+		or stamp - prev.at > 1800
+		or stamp < prev.at)
+	if not changed and ns.QueryLocalSnapshot then
+		local _, srec = ns.QueryLocalSnapshot(id, activeEcon)
+		local snapAt = srec and safeNumber(srec.updatedAt) or 0
+		if snapAt > 0 and prev and safeNumber(prev.at) and prev.at <= snapAt and stamp > snapAt then
+			changed = true
+		end
+	end
+	ahTbl[id] = {
+		price = minP,
+		lastPrice = minP or prevLast,
+		lastAt = minP and stamp or prevLastAt,
+		qty = q,
+		absent = isAbsent,
+		at = stamp,
+		itemWide = itemWide,
+	}
+	if opts and opts.recordHistory == true and itemWide == true then
+		recordHistorySnapshot(activeEcon, id, minP or 0, q, stamp)
+	end
+	if changed and not (opts and opts.deferInvalidate == true) then
+		local changedIDs = { [id] = true }
+		if ns.InvalidateItemPrices then ns.InvalidateItemPrices(changedIDs)
+		elseif ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+		if app.invalidateRecipeStats then app.invalidateRecipeStats("items", changedIDs) end
+	end
+	return changed
+end
+
 local function savePartialMarketMatches()
 	if marketScan.unknownItem then return end
 	local ahTbl = activeEconomyPrices()
+	if not ahTbl then return end
 	local stamp = time()
 	local changedIDs = {}
 	for id, entry in pairs(marketScan.matched) do
-		-- A partial page cannot supersede an existing item snapshot.
-		if not tableValue(ahTbl[id]) and not entry.incomplete and safeNumber(entry.qty) and entry.qty > 0 and entry.minPrice then
-			changedIDs[id] = true
-			ahTbl[id] = { price = entry.minPrice, qty = entry.qty, absent = false, at = stamp, itemWide = false }
+		local existing = tableValue(ahTbl[id])
+		if not entry.incomplete and safeNumber(entry.qty) and entry.qty > 0
+			and safeNumber(entry.minPrice) and entry.minPrice > 0
+			and (not existing or not existing.at or existing.at < stamp) then
+			if MarketScan.RecordLiveItemPrice(id, entry.minPrice, entry.qty, {
+				stamp = stamp,
+				itemWide = (existing and existing.itemWide == true) or false,
+				deferInvalidate = true,
+			}) then
+				changedIDs[id] = true
+			end
 		end
 	end
 	if next(changedIDs) then
@@ -1134,17 +1202,19 @@ end
 function app.cancelMarketScan(savePartial)
 	if not marketScan.active then return end
 	local econ = marketScan.economy
+	local isEquipmentOnly = (marketScan.equipmentOnly == true)
 	marketScan.partial = savePartial and true or false
-	if savePartial and ns.DetectActiveEconomy() == econ then
+	if savePartial and not isEquipmentOnly and ns.DetectActiveEconomy() == econ then
 		savePartialMarketMatches()
 		if ns.ConsoleEngine and ns.ConsoleEngine.RecordAHScan then
 			ns.ConsoleEngine.RecordAHScan("partial", { economy = econ, items = 0, at = time() })
 		end
 	end
-	if ns.SellerStats and (marketScan.unknownItem or next(marketScan.incompleteItems)) then
+	if not isEquipmentOnly and ns.SellerStats and (marketScan.unknownItem or next(marketScan.incompleteItems)) then
 		ns.SellerStats.RecordBrowse(econ, marketScan.itemKeys, false, marketScan.incompleteItems)
 	end
 	marketScan.active = false
+	marketScan.equipmentOnly = false
 	marketScan.onReady = nil
 	if marketScan.timer then
 		marketScan.timer:Cancel()
@@ -1607,106 +1677,129 @@ end
 local function finishMarketScan()
 	if not marketScan.active then return end
 	if ns.DetectActiveEconomy() ~= marketScan.economy then app.cancelMarketScan(false); return end
+	local isEquipmentOnly = (marketScan.equipmentOnly == true)
 	local ahTbl, activeEcon = activeEconomyPrices()
 	local elapsed = math.max(0.1, (GetTime and GetTime() or 1) - marketScan.started)
 	local stamp = time()
 	local updated = 0
-	if marketScan.coverageComplete then
-		local markers = variantMarkers(activeEcon)
-		if markers then
-			markers._unidentified = nil
-			for id in pairs(markers) do
-				if marketScan.itemVariants[id] == false then markers[id] = nil end
+	if not isEquipmentOnly then
+		if marketScan.coverageComplete then
+			local markers = variantMarkers(activeEcon)
+			if markers then
+				markers._unidentified = nil
+				for id in pairs(markers) do
+					if marketScan.itemVariants[id] == false then markers[id] = nil end
+				end
 			end
 		end
-	end
-	-- An unidentified row could belong to any item, including one with readable variants.
-	if not marketScan.unknownItem then
-		for id in pairs(ns.ALL_CATALOG_IDS) do
-			local entry = marketScan.matched[id]
-			if not entry or (not entry.incomplete and safeNumber(entry.qty)) then
-				local prevLast, prevLastAt = lastPositiveQuote(ahTbl[id])
-				local price, qty = entry and entry.minPrice, entry and entry.qty or 0
-				ahTbl[id] = { price = price, lastPrice = price or prevLast, lastAt = price and stamp or prevLastAt,
-					qty = qty, absent = qty == 0, at = stamp, itemWide = true }
-				recordHistorySnapshot(activeEcon, id, price or 0, qty, stamp)
-				if qty > 0 then updated = updated + 1 end
+		-- An unidentified row could belong to any item, including one with readable variants.
+		if not marketScan.unknownItem then
+			local handled = {}
+			local lotsRoot = MerchantMasterDB and MerchantMasterDB.ahLots and MerchantMasterDB.ahLots[activeEcon]
+			for id in pairs(ns.ALL_CATALOG_IDS) do
+				handled[id] = true
+				local entry = marketScan.matched[id]
+				if not entry or (not entry.incomplete and safeNumber(entry.qty)) then
+					local prevLast, prevLastAt = lastPositiveQuote(ahTbl[id])
+					local price, qty = entry and entry.minPrice, entry and entry.qty or 0
+					if lotsRoot then
+						local oldLots = tableValue(lotsRoot[id])
+						if oldLots and (not safeNumber(oldLots.at) or oldLots.at < stamp) then
+							lotsRoot[id] = nil
+						end
+					end
+					ahTbl[id] = { price = price, lastPrice = price or prevLast, lastAt = price and stamp or prevLastAt,
+						qty = qty, absent = qty == 0, at = stamp, itemWide = true }
+					recordHistorySnapshot(activeEcon, id, price or 0, qty, stamp)
+					if qty > 0 then updated = updated + 1 end
+				end
+			end
+			for id, entry in pairs(marketScan.matched) do
+				if not handled[id] and not entry.incomplete and safeNumber(entry.qty) and entry.qty > 0
+					and safeNumber(entry.minPrice) and entry.minPrice > 0 then
+					MarketScan.RecordLiveItemPrice(id, entry.minPrice, entry.qty, {
+						stamp = stamp,
+						itemWide = true,
+						recordHistory = true,
+						deferInvalidate = true,
+					})
+				end
 			end
 		end
-	end
-	local historyRoot = MerchantMasterDB and tableValue(MerchantMasterDB.ahHistory)
-	local history = historyRoot and tableValue(historyRoot[activeEcon])
-	local prunedAt = history and safeNumber(history._prunedAt)
-	local shouldPrune = not prunedAt or stamp-prunedAt >= 86400
-	if history and shouldPrune then
-		history._prunedAt = stamp
-		for id, rawRing in pairs(history) do
-			if safeNumber(id) and not ahTbl[id] then
-				local ring = MarketScan.ReadHistory(rawRing)
-				local last = ring and tableValue(ring[#ring])
-				local seenAt = last and safeNumber(last.t)
-				if not seenAt or seenAt < stamp-14*86400 then history[id] = nil end
-			end
-		end
-	end
-	if shouldPrune then
-		local root = MerchantMasterDB and tableValue(MerchantMasterDB.ahSnapshots)
-		local snapshots = root and tableValue(root[activeEcon])
-		if snapshots then
-			local cutoff = stamp - SNAPSHOT_MAX_AGE
-			for id, rawSnap in pairs(snapshots) do
+		local historyRoot = MerchantMasterDB and tableValue(MerchantMasterDB.ahHistory)
+		local history = historyRoot and tableValue(historyRoot[activeEcon])
+		local prunedAt = history and safeNumber(history._prunedAt)
+		local shouldPrune = not prunedAt or stamp-prunedAt >= 86400
+		if history and shouldPrune then
+			history._prunedAt = stamp
+			for id, rawRing in pairs(history) do
 				if safeNumber(id) and not ahTbl[id] then
-					local snap = tableValue(rawSnap)
-					if snap then
-						if pruneSnapshots(snap, cutoff) == 0 then snapshots[id] = nil end
-					else
-						local arr = MarketScan.ReadSnapshots(rawSnap)
-						if not arr or #arr < 3 then
-							snapshots[id] = nil
-						elseif (safeNumber(arr[1]) or 0) < cutoff then
-							local copy = decodeSnapshotsFresh(rawSnap)
-							if not copy or pruneSnapshots(copy, cutoff) == 0 then
+					local ring = MarketScan.ReadHistory(rawRing)
+					local last = ring and tableValue(ring[#ring])
+					local seenAt = last and safeNumber(last.t)
+					if not seenAt or seenAt < stamp-14*86400 then history[id] = nil end
+				end
+			end
+		end
+		if shouldPrune then
+			local root = MerchantMasterDB and tableValue(MerchantMasterDB.ahSnapshots)
+			local snapshots = root and tableValue(root[activeEcon])
+			if snapshots then
+				local cutoff = stamp - SNAPSHOT_MAX_AGE
+				for id, rawSnap in pairs(snapshots) do
+					if safeNumber(id) and not ahTbl[id] then
+						local snap = tableValue(rawSnap)
+						if snap then
+							if pruneSnapshots(snap, cutoff) == 0 then snapshots[id] = nil end
+						else
+							local arr = MarketScan.ReadSnapshots(rawSnap)
+							if not arr or #arr < 3 then
 								snapshots[id] = nil
-							else
-								snapshots[id] = MarketScan.PackSnapshots(copy)
+							elseif (safeNumber(arr[1]) or 0) < cutoff then
+								local copy = decodeSnapshotsFresh(rawSnap)
+								if not copy or pruneSnapshots(copy, cutoff) == 0 then
+									snapshots[id] = nil
+								else
+									snapshots[id] = MarketScan.PackSnapshots(copy)
+								end
 							end
 						end
 					end
 				end
 			end
 		end
-	end
-	local dailyRoot = MerchantMasterDB and tableValue(MerchantMasterDB.ahDaily)
-	local daily = dailyRoot and tableValue(dailyRoot[activeEcon])
-	if daily then
-		local curDay = math.floor(stamp / 86400)
-		local dayCutoff = curDay - 14
-		for id, rawBuckets in pairs(daily) do
-			if safeNumber(id) and not ns.ALL_CATALOG_IDS[id] then
-				local buckets = tableValue(rawBuckets)
-				if buckets then
-					pruneDaily(buckets, curDay)
-					if #buckets == 0 then daily[id] = nil end
-				else
-					local arr = MarketScan.ReadDaily(rawBuckets)
-					if not arr or #arr == 0 then
-						daily[id] = nil
+		local dailyRoot = MerchantMasterDB and tableValue(MerchantMasterDB.ahDaily)
+		local daily = dailyRoot and tableValue(dailyRoot[activeEcon])
+		if daily then
+			local curDay = math.floor(stamp / 86400)
+			local dayCutoff = curDay - 14
+			for id, rawBuckets in pairs(daily) do
+				if safeNumber(id) and not ns.ALL_CATALOG_IDS[id] then
+					local buckets = tableValue(rawBuckets)
+					if buckets then
+						pruneDaily(buckets, curDay)
+						if #buckets == 0 then daily[id] = nil end
 					else
-						local hasStale = false
-						for i = 1, #arr do
-							local d = tableValue(arr[i]) and safeNumber(arr[i].d)
-							if not d or d < dayCutoff then
-								hasStale = true
-								break
+						local arr = MarketScan.ReadDaily(rawBuckets)
+						if not arr or #arr == 0 then
+							daily[id] = nil
+						else
+							local hasStale = false
+							for i = 1, #arr do
+								local d = tableValue(arr[i]) and safeNumber(arr[i].d)
+								if not d or d < dayCutoff then
+									hasStale = true
+									break
+								end
 							end
-						end
-						if hasStale then
-							local copy = decodeDailyFresh(rawBuckets)
-							if not copy then
-								daily[id] = nil
-							else
-								pruneDaily(copy, curDay)
-								daily[id] = (#copy > 0) and MarketScan.PackDailyBuckets(copy) or nil
+							if hasStale then
+								local copy = decodeDailyFresh(rawBuckets)
+								if not copy then
+									daily[id] = nil
+								else
+									pruneDaily(copy, curDay)
+									daily[id] = (#copy > 0) and MarketScan.PackDailyBuckets(copy) or nil
+								end
 							end
 						end
 					end
@@ -1715,22 +1808,26 @@ local function finishMarketScan()
 		end
 	end
 	marketScan.partial = not marketScan.coverageComplete or marketScan.quoteIncomplete
-	if not marketScan.partial then
-		ahTbl._scannedAt = stamp
-		if MerchantMasterDB then MerchantMasterDB.lastRefreshAt = stamp end
+	if not isEquipmentOnly then
+		if not marketScan.partial then
+			ahTbl._scannedAt = stamp
+			if MerchantMasterDB then MerchantMasterDB.lastRefreshAt = stamp end
+		end
+		if ns.ConsoleEngine and ns.ConsoleEngine.RecordAHScan then
+			ns.ConsoleEngine.RecordAHScan(marketScan.partial and "partial" or "full", {
+				economy = activeEcon,
+				items = updated,
+				elapsed = elapsed,
+				at = stamp,
+			})
+		end
+		if ns.SellerStats then
+			ns.SellerStats.RecordBrowse(activeEcon, marketScan.itemKeys, marketScan.coverageComplete, marketScan.incompleteItems)
+		end
 	end
-	if ns.ConsoleEngine and ns.ConsoleEngine.RecordAHScan then
-		ns.ConsoleEngine.RecordAHScan(marketScan.partial and "partial" or "full", {
-			economy = activeEcon,
-			items = updated,
-			elapsed = elapsed,
-			at = stamp,
-		})
-	end
-	if ns.SellerStats then
-		ns.SellerStats.RecordBrowse(activeEcon, marketScan.itemKeys, marketScan.coverageComplete, marketScan.incompleteItems)
-	end
+	local seenCount = marketScan.seen or 0
 	marketScan.active = false
+	marketScan.equipmentOnly = false
 	marketScan.onReady = nil
 	if marketScan.timer then
 		marketScan.timer:Cancel()
@@ -1739,20 +1836,53 @@ local function finishMarketScan()
 	if ns.AHChannel and ns.AHChannel.Release then
 		ns.AHChannel.Release("market_scan")
 	end
-	if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
-	if ns.MP and ns.MP.app then ns.MP.app.lastPathResult = nil end
-	local summary = marketScan.partial
-		and "Live AH scan (%s) partial: %d catalog items updated in %.1fs (incomplete results)."
-		or "Live AH scan (%s) complete: %d catalog items updated in %.1fs."
-	say(string.format(summary, activeEcon, updated, elapsed))
+	if not isEquipmentOnly then
+		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+		if ns.MP and ns.MP.app then ns.MP.app.lastPathResult = nil end
+		local summary = marketScan.partial
+			and "Live AH scan (%s) partial: %d catalog items updated in %.1fs (incomplete results)."
+			or "Live AH scan (%s) complete: %d catalog items updated in %.1fs."
+		say(string.format(summary, activeEcon, updated, elapsed))
+	else
+		local equipChanged = {}
+		if not marketScan.unknownItem then
+			for id, entry in pairs(marketScan.matched) do
+				if not entry.incomplete and safeNumber(entry.qty) and entry.qty > 0
+					and safeNumber(entry.minPrice) and entry.minPrice > 0 then
+					if MarketScan.RecordLiveItemPrice(id, entry.minPrice, entry.qty, {
+						stamp = stamp,
+						itemWide = false,
+						deferInvalidate = true,
+					}) then
+						equipChanged[id] = true
+					end
+				end
+			end
+		end
+		if next(equipChanged) then
+			if ns.InvalidateItemPrices then ns.InvalidateItemPrices(equipChanged)
+			elseif ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+			if app.invalidateRecipeStats then app.invalidateRecipeStats("items", equipChanged) end
+		end
+		local summary = marketScan.partial
+			and "Equipment AH scan (%s) partial: %d items scanned in %.1fs (incomplete results)."
+			or "Equipment AH scan (%s) complete: %d items scanned in %.1fs."
+		say(string.format(summary, activeEcon, seenCount, elapsed))
+	end
 	if app.refresh then app.refresh() end
 	notifyScanProgress()
-	if marketScan.partial then
+	if isEquipmentOnly then
+		if marketScan.partial then
+			scanToast(string.format("Equipment AH Scan Partial - %d items scanned", seenCount), "warning", 3.2)
+		else
+			scanToast(string.format("Equipment AH Scan Complete - %d items scanned", seenCount), "success", 3.2)
+		end
+	elseif marketScan.partial then
 		scanToast(string.format("AH Scan Partial · %d items updated", updated), "warning", 3.2)
 	else
 		scanToast(string.format("AH Scan Complete · %d items updated", updated), "success", 3.2)
 	end
-	if app.warmSuperListCache and not (app.panel and app.panel:IsShown() and app.activeTab == "recipes") then
+	if not isEquipmentOnly and app.warmSuperListCache and not (app.panel and app.panel:IsShown() and app.activeTab == "recipes") then
 		app.warmSuperListCache(0.05)
 	end
 	if ns.SniperEngine and type(ns.SniperEngine.OnBrowseScanComplete) == "function" then
@@ -1781,12 +1911,34 @@ local function handleMarketBrowseResults(addedBatch)
 			if not quoteValid then marketScan.quoteIncomplete = true end
 			if id and id > 0 and qty and qty > 0 and minP and minP > 0 then
 				local rowLink = readable(entry.itemLink) and type(entry.itemLink) == "string" and entry.itemLink or nil
+				local rowQuality, rowIsCommodity
+				if readable(C_AuctionHouse) and type(C_AuctionHouse) == "table"
+					and readable(C_AuctionHouse.GetItemKeyInfo) and type(C_AuctionHouse.GetItemKeyInfo) == "function" then
+					local okInfo, rawInfo = pcall(C_AuctionHouse.GetItemKeyInfo, copy, true)
+					local keyInfo = okInfo and tableValue(rawInfo) or nil
+					if keyInfo then
+						if readable(keyInfo.quality) and type(keyInfo.quality) == "number" then
+							rowQuality = keyInfo.quality
+						end
+						if readable(keyInfo.isCommodity) and type(keyInfo.isCommodity) == "boolean" then
+							rowIsCommodity = keyInfo.isCommodity
+						end
+					end
+				end
+				if rowQuality == nil and readable(entry.quality) and type(entry.quality) == "number" then
+					rowQuality = entry.quality
+				end
+				if rowIsCommodity == nil and readable(entry.isCommodity) and type(entry.isCommodity) == "boolean" then
+					rowIsCommodity = entry.isCommodity
+				end
 				batchRows[#batchRows + 1] = {
 					itemID = id,
 					itemKey = copy,
 					minPrice = minP,
 					totalQuantity = qty,
 					itemLink = rowLink,
+					quality = rowQuality,
+					isCommodity = rowIsCommodity,
 				}
 			end
 		else
@@ -1799,13 +1951,15 @@ local function handleMarketBrowseResults(addedBatch)
 				if markers then markers._unidentified = true end
 			end
 			marketScan.unknownItem = true
-		elseif ns.ALL_CATALOG_IDS[id] then
+		else
 			if sig then marketScan.itemKeys[sig] = copy end
 			if not quoteValid or not marketScan.seenKeys[sig] then
 				if sig then marketScan.seenKeys[sig] = true end
 				local rec = marketScan.matched[id]
 				if not rec then
-					marketScan.matchedCount = (marketScan.matchedCount or 0) + 1
+					if ns.ALL_CATALOG_IDS and ns.ALL_CATALOG_IDS[id] then
+						marketScan.matchedCount = (marketScan.matchedCount or 0) + 1
+					end
 					rec = { qty = 0 }
 					marketScan.matched[id] = rec
 				end
@@ -1837,12 +1991,8 @@ local function handleMarketBrowseResults(addedBatch)
 	end
 end
 
-function app.refreshAllMarketValues()
+local function startMarketBrowseScan(equipmentOnly)
 	invalidatePendingSearch()
-	if marketScan.active then
-		app.cancelMarketScan(true)
-		return true
-	end
 	local ahFrame = readable(AuctionHouseFrame) and AuctionHouseFrame or nil
 	local ahFrameType = type(ahFrame)
 	local ahOpen = false
@@ -1853,9 +2003,12 @@ function app.refreshAllMarketValues()
 	end
 	local sendBrowse = readable(C_AuctionHouse) and type(C_AuctionHouse) == "table"
 		and readable(C_AuctionHouse.SendBrowseQuery) and type(C_AuctionHouse.SendBrowseQuery) == "function"
-	if not ahOpen or not sendBrowse then return false end
+	if not ahOpen or not sendBrowse then return false, "ah_closed" end
 	if ns.AHChannel and ns.AHChannel.IsBusy and ns.AHChannel.IsBusy("market_scan") then
-		return false
+		return false, "busy"
+	end
+	if marketScan.active then
+		app.cancelMarketScan(false)
 	end
 	if app.cancelOrderBookScan then app.cancelOrderBookScan() end
 	if ns.AHChannel and ns.AHChannel.TryAcquire then
@@ -1865,6 +2018,7 @@ function app.refreshAllMarketValues()
 	-- Ensure manual Live AH scan feeds into active economy
 	ensureMarketScanHooks()
 	marketScan.active = true
+	marketScan.equipmentOnly = (equipmentOnly == true)
 	marketScan.querySent = false
 	marketScan.economy = ns.DetectActiveEconomy()
 	marketScan.generation = marketScan.generation + 1
@@ -1883,17 +2037,56 @@ function app.refreshAllMarketValues()
 	marketScan.started = GetTime and GetTime() or 0
 	if app.refresh then app.refresh() end
 	notifyScanProgress()
-	scanToast("Scanning Live Auction House...", "info", 2.2)
-	sendWhenAHReady(function()
-		marketScan.querySent = true
-		C_AuctionHouse.SendBrowseQuery({
-			searchString = "",
-			sorts = {},
-			filters = {},
-			itemClassFilters = {},
-		})
-	end)
-	return true
+	if marketScan.equipmentOnly then
+		scanToast("Scanning All Equipment on AH...", "info", 2.2)
+		local eqFilters = {}
+		if Enum and Enum.AuctionHouseFilter then
+			for _, key in ipairs({ "UncommonQuality", "RareQuality", "EpicQuality" }) do
+				local val = Enum.AuctionHouseFilter[key]
+				if val ~= nil then
+					eqFilters[#eqFilters + 1] = val
+				end
+			end
+		end
+		sendWhenAHReady(function()
+			marketScan.querySent = true
+			C_AuctionHouse.SendBrowseQuery({
+				searchString = "",
+				sorts = {},
+				filters = eqFilters,
+				itemClassFilters = { { classID = 2 }, { classID = 4 } },
+			})
+		end)
+	else
+		scanToast("Scanning Live Auction House...", "info", 2.2)
+		sendWhenAHReady(function()
+			marketScan.querySent = true
+			C_AuctionHouse.SendBrowseQuery({
+				searchString = "",
+				sorts = {},
+				filters = {},
+				itemClassFilters = {},
+			})
+		end)
+	end
+	return true, "started"
+end
+
+function app.refreshAllMarketValues()
+	invalidatePendingSearch()
+	if marketScan.active then
+		app.cancelMarketScan(true)
+		return true
+	end
+	local ok = startMarketBrowseScan(false)
+	return ok
+end
+
+function MarketScan.StartEquipmentBrowseScan()
+	if marketScan.active and marketScan.equipmentOnly then
+		return true, "already_active"
+	end
+	return startMarketBrowseScan(true)
 end
 
 function MarketScan.EnsureBrowseRunning()
@@ -2011,22 +2204,32 @@ local function recordOrderBookLots(itemID, lots, whole, economy, complete, marke
 		local prev = tableValue(ahTbl[itemID])
 		local prevLast, prevLastAt = lastPositiveQuote(prev)
 		local newPrice = merged[1] and merged[1].price or nil
+		local writePrice = newPrice
+		local writeQty = totalQty
+		local writeAbsent = (totalQty == 0)
 		local itemWide = complete == true and not MarketScan.HasKnownVariants(itemID, activeEcon)
-        changed=type(prev)~="table" or prev.price~=newPrice or prev.qty~=totalQty or prev.absent~=(totalQty==0)
+        changed=type(prev)~="table" or prev.price~=writePrice or prev.qty~=writeQty or prev.absent~=writeAbsent
             or prev.itemWide~=itemWide or not prev.at or stamp-prev.at>1800 or stamp<prev.at
+		if not changed and ns.QueryLocalSnapshot then
+			local _, srec = ns.QueryLocalSnapshot(itemID, activeEcon)
+			local snapAt = srec and safeNumber(srec.updatedAt) or 0
+			if snapAt > 0 and prev and safeNumber(prev.at) and prev.at <= snapAt and stamp > snapAt then
+				changed = true
+			end
+		end
 		ahTbl[itemID] = {
-			price = newPrice,
-			lastPrice = newPrice or prevLast,
-			lastAt = newPrice and stamp or prevLastAt,
-			qty = totalQty,
-			absent = (totalQty == 0),
+			price = writePrice,
+			lastPrice = writePrice or prevLast,
+			lastAt = writePrice and stamp or prevLastAt,
+			qty = writeQty,
+			absent = writeAbsent,
 			at = stamp,
 			itemWide = itemWide,
 		}
 		-- A truncated result set cannot establish that supply disappeared.
 		-- A base-key search cannot measure the supply of other known item variants.
 		if itemWide then
-			if marketQty == nil then marketQty, marketMinPrice = totalQty, newPrice end
+			if marketQty == nil then marketQty, marketMinPrice = writeQty, writePrice end
 			recordHistorySnapshot(activeEcon, itemID, marketMinPrice or 0, marketQty, stamp)
 		end
 		local front = merged[1]
@@ -2085,7 +2288,7 @@ end
 local function recordCompletedSearch(value, commodity, itemID)
 	if marketScan.active or not C_AuctionHouse then return end
 	local ah = C_AuctionHouse
-	if not itemID or not ns.ALL_CATALOG_IDS[itemID] then return end
+	if not itemID or itemID <= 0 then return end
 	if not commodity and not isBaseItemKey(value) then
 		local _, key = itemKeySignature(value)
 		if not key or not ah.GetNumItemSearchResults or not ah.GetItemSearchResultInfo then return end
@@ -2111,9 +2314,25 @@ local function recordCompletedSearch(value, commodity, itemID)
 	end
 	if not hasFull or not getNum or not getInfo then return end
 	local full = hasFull(value)
-	if not readable(full) or full ~= true then return end
 	local count = safeNumber(getNum(value))
 	if not count or count % 1 ~= 0 then return end
+	if not readable(full) or full ~= true then
+		local p1Qty, p1Min = 0, nil
+		for i = 1, count do
+			local _, valid, qty, price = readSearchLot(getInfo(value, i), commodity)
+			if valid then
+				p1Qty, p1Min = addMarketLot(p1Qty, p1Min, qty, price, commodity)
+			end
+		end
+		if p1Min and p1Min > 0 and p1Qty > 0 then
+			MarketScan.RecordLiveItemPrice(itemID, p1Min, p1Qty, { itemWide = false })
+			if ns.ConsoleEngine and ns.ConsoleEngine.RecordAHScan then
+				ns.ConsoleEngine.RecordAHScan("single", { itemID = itemID })
+			end
+			if app.scheduleRecipeRefresh then app.scheduleRecipeRefresh() end
+		end
+		return
+	end
 	local lots, marketQty, marketMinPrice = {}, 0, nil
 	for i = 1, count do
 		local lot, valid, qty, price = readSearchLot(getInfo(value, i), commodity)
@@ -2143,10 +2362,14 @@ local function finishBagJob(lots, whole, failed, complete, marketMinPrice, marke
 	end
 	if job.isSniper then
 		if job.itemID and not failed then
+			if complete and isBaseItemKey(job.itemKey) then
+				recordOrderBookLots(job.itemID, lots or {}, whole, job.economy, true, marketMinPrice, marketQty, job.itemKey)
+			elseif safeNumber(marketMinPrice) and marketMinPrice > 0 and job.economy == ns.DetectActiveEconomy() then
+				MarketScan.RecordLiveItemPrice(job.itemID, marketMinPrice, marketQty or 1, { itemWide = false })
+			end
 			bagScan.recordedItemID, bagScan.recordedAt = job.itemID, GetTime()
 		end
-	elseif job.itemID and not failed and not job.sellerOnly and isBaseItemKey(job.itemKey)
-		and ns.ALL_CATALOG_IDS and ns.ALL_CATALOG_IDS[job.itemID] then
+	elseif job.itemID and not failed and not job.sellerOnly and isBaseItemKey(job.itemKey) then
 		recordOrderBookLots(job.itemID, lots or {}, whole, job.economy, complete, marketMinPrice, marketQty, job.itemKey)
 		if complete then bagScan.recordedItemID, bagScan.recordedAt = job.itemID, GetTime() end
 	end
@@ -3409,16 +3632,26 @@ do
 		local ci = _G.C_Item
 		local ah = _G.C_AuctionHouse
 		local total = 0
+		local hasCInfo = (C_Container and type(C_Container.GetContainerItemInfo) == "function")
 		for _, bag in ipairs(getBagContainerList()) do
 			local slots = getContainerNumSlotsSafe(bag)
 			for slot = 1, slots do
-				local sid, cnt, locked = getContainerSlotInfoSafe(bag, slot)
-				if sid == itemID and not locked and cnt and cnt > 0 then
-					local info = nil
-					if C_Container and C_Container.GetContainerItemInfo then
-						local okI, rawInfo = pcall(C_Container.GetContainerItemInfo, bag, slot)
-						if okI and tableValue(rawInfo) then info = rawInfo end
+				local sid, cnt, locked, info = nil, 0, false, nil
+				if hasCInfo then
+					local okI, rawInfo = pcall(C_Container.GetContainerItemInfo, bag, slot)
+					if okI and tableValue(rawInfo) then
+						info = rawInfo
+						sid = safeNumber(rawInfo.itemID)
+						if (not sid or sid <= 0) and readable(rawInfo.hyperlink) and type(rawInfo.hyperlink) == "string" then
+							sid = tonumber(rawInfo.hyperlink:match("item:(%d+)"))
+						end
+						cnt = safeNumber(rawInfo.stackCount) or 1
+						locked = (readable(rawInfo.isLocked) and rawInfo.isLocked == true)
 					end
+				else
+					sid, cnt, locked = getContainerSlotInfoSafe(bag, slot)
+				end
+				if sid == itemID and not locked and cnt and cnt > 0 then
 					local slotLink = (info and readable(info.hyperlink) and type(info.hyperlink) == "string") and info.hyperlink or nil
 					local linkOk = (not expectedLink) or expectedLink == "" or (slotLink == nil) or (slotLink == expectedLink)
 					if linkOk then
@@ -3886,7 +4119,7 @@ do
 		if not (name and name ~= "") then return nil end
 		local targetUnit = safeNumber(t.unitPrice)
 		if not targetUnit or targetUnit <= 0 then
-			targetUnit = (id and id > 0 and ns.GetItemPrice and safeNumber(ns.GetItemPrice(id))) or 0
+			targetUnit = (id and id > 0 and ns.GetItemMarketPrice and safeNumber(ns.GetItemMarketPrice(id))) or 0
 		end
 		local prov = {}
 		if type(t.provenance) == "table" and #t.provenance > 0 then
@@ -5459,10 +5692,6 @@ do
 			if ns.GetItemMarketPrice and itemID and itemID > 0 then
 				local okM, mp = pcall(ns.GetItemMarketPrice, itemID)
 				if okM and safeNumber(mp) and mp > 0 then marketRef = math.floor(mp + 0.5) end
-			end
-			if marketRef <= 0 and ns.GetItemPrice and itemID and itemID > 0 then
-				local okP, p = pcall(ns.GetItemPrice, itemID)
-				if okP and safeNumber(p) and p > 0 then marketRef = math.floor(p + 0.5) end
 			end
 			local cut = (type(ns.GetDynamicAHCut) == "function" and ns.GetDynamicAHCut()) or 0.05
 			if cut <= 0 or cut >= 0.99 then cut = 0.05 end
@@ -7134,7 +7363,30 @@ do
 			OrderFlow.ScanOpenMailbox()
 			atts = item.itemID and orderFlow.liveMailSlots[item.itemID] or nil
 		end
-		local att = atts and atts[1] or nil
+		if not atts or #atts == 0 then
+			orderFlow.notice = tostring(item.name) .. " was not found in Mailbox."
+			orderFlow.noticeKind = "warning"
+			notifyOrderFlow()
+			return false, "not_in_mail"
+		end
+		local remNeed = math.max(1, math.floor(tonumber(item.remaining) or 1))
+		local att = nil
+		local bestFitCount, bestSmallOverCount = -1, math.huge
+		for _, cand in ipairs(atts) do
+			local cnt = tonumber(cand and cand.count) or 0
+			if cnt > 0 and cnt <= remNeed then
+				if cnt > bestFitCount then
+					bestFitCount = cnt
+					att = cand
+				end
+			elseif cnt > remNeed and bestFitCount < 0 then
+				if cnt < bestSmallOverCount then
+					bestSmallOverCount = cnt
+					att = cand
+				end
+			end
+		end
+		if not att then att = atts[1] end
 		if not att then
 			orderFlow.notice = tostring(item.name) .. " was not found in Mailbox."
 			orderFlow.noticeKind = "warning"
@@ -7175,6 +7427,68 @@ do
 		return (cSt and cSt.collectAll and cSt.collectAll.active == true) and true or false
 	end
 
+	function OrderFlow.GetCollectAllMode()
+		local cSt = orderFlow.stages.collect
+		local ca = cSt and cSt.collectAll
+		if ca and ca.active == true then
+			return ca.mode or "all"
+		end
+		return nil
+	end
+
+	function OrderFlow.GetCollectAllSummary()
+		syncLiveEnvironmentInternal()
+		local cSt = orderFlow.stages.collect
+		local activeMode = OrderFlow.GetCollectAllMode()
+		local atBank = (orderFlow.env.atBank == true)
+		local atMail = (orderFlow.env.atMail == true)
+		local src = nil
+		if atBank and atMail then
+			local cur = cSt and cSt.items and cSt.items[cSt.activeIndex]
+			if cur and (cur.source == "bank" or cur.source == "mail") and hasCollectableForSource(cur.source) then
+				src = cur.source
+			elseif hasCollectableForSource("bank") then
+				src = "bank"
+			elseif hasCollectableForSource("mail") then
+				src = "mail"
+			elseif cur and (cur.source == "bank" or cur.source == "mail") then
+				src = cur.source
+			else
+				src = "bank"
+			end
+		elseif atBank then
+			src = "bank"
+		elseif atMail then
+			src = "mail"
+		end
+		local itemCount, unitCount = 0, 0
+		if src and cSt then
+			for _, it in ipairs(cSt.items or {}) do
+				if it and it.source == src and (it.remaining or 0) > 0
+					and it.status ~= "done" and it.status ~= "skipped" then
+					local hasSlot = false
+					if src == "bank" then
+						local slots = it.itemID and orderFlow.liveBankSlots[it.itemID] or nil
+						hasSlot = ((it.availableHere or 0) > 0) or (slots ~= nil and #slots > 0)
+					else
+						local atts = it.itemID and orderFlow.liveMailSlots[it.itemID] or nil
+						hasSlot = ((it.availableHere or 0) > 0) or (atts ~= nil and #atts > 0)
+					end
+					if hasSlot then
+						itemCount = itemCount + 1
+						unitCount = unitCount + (it.remaining or 0)
+					end
+				end
+			end
+		end
+		return {
+			source = src,
+			itemCount = itemCount,
+			unitCount = unitCount,
+			activeMode = activeMode,
+		}
+	end
+
 	function OrderFlow.HasCollectableAtCurrentSource()
 		syncLiveEnvironmentInternal()
 		if orderFlow.env.atBank and hasCollectableForSource("bank") then
@@ -7190,6 +7504,9 @@ do
 		local cSt = orderFlow.stages.collect
 		local ca = cSt and cSt.collectAll
 		local wasActive = (ca and ca.active == true) and true or false
+		local mode = (ca and ca.mode) or "all"
+		local targetItem = ca and ca.targetItem or nil
+		local targetName = ca and (ca.targetName or (targetItem and targetItem.name)) or "item"
 		local src = ca and ca.source or nil
 		local count = ca and (ca.collectedCount or 0) or 0
 		if ca then
@@ -7205,7 +7522,19 @@ do
 		end
 		local srcLabel = (src == "bank") and "Bank" or ((src == "mail") and "Mailbox" or "container")
 		if reason == "done" then
-			if count > 0 then
+			if mode == "item" then
+				if targetItem and (targetItem.remaining or 0) <= 0 then
+					orderFlow.notice = string.format("Collected all needed %s from %s!", tostring(targetName), srcLabel)
+					orderFlow.noticeKind = "positive"
+				elseif count > 0 then
+					orderFlow.notice = string.format("Collected available %s (%d/%d) from %s.",
+						tostring(targetName), (targetItem and targetItem.collected) or count, (targetItem and targetItem.needed) or count, srcLabel)
+					orderFlow.noticeKind = "info"
+				else
+					orderFlow.notice = string.format("No matching %s found at %s.", tostring(targetName), srcLabel)
+					orderFlow.noticeKind = "warning"
+				end
+			elseif count > 0 then
 				orderFlow.notice = "Collected all needed items from " .. srcLabel .. "!"
 				orderFlow.noticeKind = "positive"
 			else
@@ -7213,7 +7542,9 @@ do
 				orderFlow.noticeKind = "warning"
 			end
 		elseif reason == "user_stop" then
-			orderFlow.notice = "Stopped Collect All."
+			orderFlow.notice = (mode == "item")
+				and ("Stopped collecting " .. tostring(targetName) .. ".")
+				or "Stopped Collect All."
 			orderFlow.noticeKind = "info"
 		elseif reason == "bank_closed" then
 			orderFlow.notice = "Stopped Collect All - Bank closed."
@@ -7230,6 +7561,9 @@ do
 		elseif reason == "mail_helper_active" then
 			orderFlow.notice = "Mail Helper is currently looting - wait or click Stop first."
 			orderFlow.noticeKind = "info"
+		elseif reason == "not_in_bank" or reason == "not_in_mail" then
+			orderFlow.notice = tostring(targetName) .. " was not found in " .. srcLabel .. "."
+			orderFlow.noticeKind = "warning"
 		elseif reason == "bags_full" then
 			if not orderFlow.notice or orderFlow.notice == "" then
 				orderFlow.notice = "Bags full - free 1 slot before collecting."
@@ -7320,6 +7654,45 @@ do
 			return false, "pending"
 		end
 
+		if ca.mode == "item" and ca.targetItem then
+			local targetIdx = nil
+			for idx, it in ipairs(cSt.items or {}) do
+				if it == ca.targetItem then
+					targetIdx = idx
+					break
+				end
+			end
+			if not targetIdx or (ca.targetItem.remaining or 0) <= 0
+				or ca.targetItem.status == "done" or ca.targetItem.status == "skipped" then
+				local finishedCount = ca.collectedCount or 0
+				OrderFlow.StopCollectAll("done")
+				return finishedCount > 0, finishedCount > 0 and "done" or "already_done"
+			end
+			cSt.activeIndex = targetIdx
+			local ok, err
+			if src == "bank" then
+				ok, err = OrderFlow.WithdrawFromBank(targetIdx)
+			else
+				ok, err = OrderFlow.CollectFromMail(targetIdx)
+			end
+			if ok then
+				if cSt.pendingTake ~= nil then
+					armCollectAllWatchdog(serial, cSt.pendingTake)
+				end
+				return true
+			elseif err == "not_in_bank" or err == "not_in_mail" then
+				if (ca.collectedCount or 0) > 0 then
+					OrderFlow.StopCollectAll("done")
+					return true, "done"
+				end
+				OrderFlow.StopCollectAll(err)
+				return false, err
+			else
+				OrderFlow.StopCollectAll(err or "failed")
+				return false, err or "failed"
+			end
+		end
+
 		local maxSteps = math.max(1, #(cSt.items or {})) + 2
 		for _ = 1, maxSteps do
 			if not (cSt.collectAll == ca and ca.active and ca.serial == serial) then
@@ -7366,6 +7739,67 @@ do
 		local finishedCount = ca.collectedCount or 0
 		OrderFlow.StopCollectAll("done")
 		return finishedCount > 0, "done"
+	end
+
+	function OrderFlow.CollectAllForItem(index)
+		local cSt = orderFlow.stages.collect
+		local idx = index or (cSt and cSt.activeIndex)
+		local item = cSt and cSt.items and cSt.items[idx]
+		if not item then return false, "no_item" end
+		if item.source ~= "bank" and item.source ~= "mail" then
+			return false, "not_collectable_source"
+		end
+		syncLiveEnvironmentInternal()
+		if item.source == "bank" and not orderFlow.env.atBank then
+			orderFlow.notice = "Please open Bank to start."
+			orderFlow.noticeKind = "warning"
+			notifyOrderFlow()
+			return false, "bank_closed"
+		elseif item.source == "mail" and not orderFlow.env.atMail then
+			orderFlow.notice = "Please open Mailbox to start."
+			orderFlow.noticeKind = "warning"
+			notifyOrderFlow()
+			return false, "mail_closed"
+		end
+		if item.source == "mail" and ns.MailHelper and type(ns.MailHelper.IsActive) == "function" and ns.MailHelper.IsActive() then
+			orderFlow.notice = "Mail Helper is currently looting - wait or click Stop first."
+			orderFlow.noticeKind = "info"
+			notifyOrderFlow()
+			return false, "mail_helper_active"
+		end
+		if (item.remaining or 0) <= 0 or item.status == "done" then
+			return false, "already_done"
+		end
+
+		if item.source == "bank" then
+			OrderFlow.ScanOpenBank()
+		else
+			OrderFlow.ScanOpenMailbox()
+		end
+		sortCollectItems()
+		for i, it in ipairs(cSt.items or {}) do
+			if it == item then
+				cSt.activeIndex = i
+				break
+			end
+		end
+
+		collectAllSerial = collectAllSerial + 1
+		local serial = collectAllSerial
+		cSt.collectAll = {
+			active = true,
+			mode = "item",
+			targetItem = item,
+			targetItemID = item.itemID,
+			targetName = item.name,
+			source = item.source,
+			serial = serial,
+			skippedIdx = {},
+			skippedItems = {},
+			collectedCount = 0,
+			stepScheduled = false,
+		}
+		return stepCollectAllInternal(serial)
 	end
 
 	function OrderFlow.CollectAllAtCurrentSource()
@@ -7425,6 +7859,8 @@ do
 		local serial = collectAllSerial
 		cSt.collectAll = {
 			active = true,
+			mode = "all",
+			targetItem = nil,
 			source = src,
 			serial = serial,
 			skippedIdx = {},
@@ -8392,6 +8828,7 @@ do
 		-- 2. Reconcile Stage 3 (Collect Owned: Bank / Mail) bag deltas
 		local cSt = orderFlow.stages.collect
 		local nextCollectAllSerial = nil
+		local stopItemCollectAllDone = false
 		if orderFlow.env.atBank or orderFlow.env.atMail or cSt.pendingTake ~= nil then
 			local activeSrc = (cSt.pendingTake and cSt.pendingTake.source)
 				or (orderFlow.env.atBank and "bank")
@@ -8460,7 +8897,12 @@ do
 				local ca = cSt.collectAll
 				if activeSrc == nil or ca.source == activeSrc then
 					ca.collectedCount = (ca.collectedCount or 0) + 1
-					nextCollectAllSerial = ca.serial
+					if ca.mode == "item" and ca.targetItem
+						and ((ca.targetItem.remaining or 0) <= 0 or ca.targetItem.status == "done") then
+						stopItemCollectAllDone = true
+					else
+						nextCollectAllSerial = ca.serial
+					end
 				end
 			end
 		end
@@ -8507,7 +8949,11 @@ do
 			end
 		end
 
-		notifyOrderFlow()
+		if stopItemCollectAllDone then
+			OrderFlow.StopCollectAll("done")
+		else
+			notifyOrderFlow()
+		end
 		if nextCollectAllSerial then
 			scheduleNextCollectAllStep(nextCollectAllSerial)
 		end
@@ -8826,16 +9272,26 @@ do
 		local ah = _G.C_AuctionHouse
 		local bestLoc, bestBag, bestSlot, bestCount, bestComm, bestLink, bestMaxStack, totalAvail = nil, nil, nil, 0, nil, nil, 1, 0
 		local bestMeta = nil
+		local hasCInfo = (C_Container and type(C_Container.GetContainerItemInfo) == "function")
 		for _, bag in ipairs(getBagContainerList()) do
 			local slots = getContainerNumSlotsSafe(bag)
 			for slot = 1, slots do
-				local sid, cnt, locked = getContainerSlotInfoSafe(bag, slot)
-				if sid == itemID and not locked and cnt and cnt > 0 then
-					local info = nil
-					if C_Container and C_Container.GetContainerItemInfo then
-						local okI, rawInfo = pcall(C_Container.GetContainerItemInfo, bag, slot)
-						if okI and tableValue(rawInfo) then info = rawInfo end
+				local sid, cnt, locked, info = nil, 0, false, nil
+				if hasCInfo then
+					local okI, rawInfo = pcall(C_Container.GetContainerItemInfo, bag, slot)
+					if okI and tableValue(rawInfo) then
+						info = rawInfo
+						sid = safeNumber(rawInfo.itemID)
+						if (not sid or sid <= 0) and readable(rawInfo.hyperlink) and type(rawInfo.hyperlink) == "string" then
+							sid = tonumber(rawInfo.hyperlink:match("item:(%d+)"))
+						end
+						cnt = safeNumber(rawInfo.stackCount) or 1
+						locked = (readable(rawInfo.isLocked) and rawInfo.isLocked == true)
 					end
+				else
+					sid, cnt, locked = getContainerSlotInfoSafe(bag, slot)
+				end
+				if sid == itemID and not locked and cnt and cnt > 0 then
 					local slotLink = (info and readable(info.hyperlink) and type(info.hyperlink) == "string") and info.hyperlink or nil
 					local loc = createSellBagLocation(bag, slot)
 					local exists = true
@@ -9244,6 +9700,13 @@ do
 			end
 			return applySellUndercut(live, sl.undercutMode or "match", sl.undercutPct or 1), "live_ah", bid
 		end
+		local can = (item.itemID and ns.GetCanonicalItemPrice) and ns.GetCanonicalItemPrice(item.itemID) or nil
+		if can and safeNumber(can.price) and can.price > 0 then
+			local cp = math.floor(can.price + 0.5)
+			item.marketRef = cp
+			item.marketRefSource = can.kind or "snap"
+			return cp, "market_db", bid
+		end
 		local mref = math.floor(safeNumber(item.marketRef) or 0)
 		if mref > 0 then
 			return mref, "market_db", bid
@@ -9357,8 +9820,14 @@ do
 		if qty <= 0 or effectiveUnitPrice <= 0 then return nil, nil end
 
 		local isVend, vendorPrice = OrderFlow.IsSellItemVendorable(it)
-		if isVend and (vendorPrice * qty) > math.floor(effectiveUnitPrice * qty * 0.95) then
-			return "below_vendor", "Price is below vendor value (after 5% AH cut). Click Confirm Low Price to post anyway."
+		local netUnit = math.floor(effectiveUnitPrice * 0.95)
+		if isVend and vendorPrice > 0
+			and ((vendorPrice * qty) > math.floor(effectiveUnitPrice * qty * 0.95) or vendorPrice > netUnit) then
+			return "below_vendor", string.format(
+				"Below vendor value! After 5%% AH cut you receive %s/ea, while a vendor pays %s/ea. Confirm to post anyway.",
+				ns.FormatMoneyCompact(netUnit),
+				ns.FormatMoneyCompact(vendorPrice)
+			)
 		end
 		if it.priceThreshold ~= nil and it.priceThreshold > 0 and effectiveUnitPrice <= it.priceThreshold then
 			return "low_price", string.format("Price %s is far below market. Click Confirm Low Price to post anyway.",
@@ -9540,12 +10009,30 @@ do
 		return true
 	end
 
+	local SELL_CATEGORY_META = {
+		[2]  = { name = "Weapon",        order = 1 },
+		[4]  = { name = "Armor",         order = 2 },
+		[0]  = { name = "Consumable",    order = 3 },
+		[7]  = { name = "Trade Goods",   order = 4 },
+		[5]  = { name = "Reagent",       order = 5 },
+		[3]  = { name = "Gem",           order = 6 },
+		[9]  = { name = "Recipe",        order = 7 },
+		[1]  = { name = "Container",     order = 8 },
+		[17] = { name = "Battle Pets",   order = 9 },
+		[15] = { name = "Miscellaneous", order = 10 },
+	}
+
 	function OrderFlow.ScanSellableBags()
 		local sl = orderFlow.stages.sell
 		local inQueueByKey = {}
 		for _, it in ipairs((sl and sl.items) or {}) do
 			if it.itemID and it.status ~= "done" and it.status ~= "skipped" then
-				local itComm = OrderFlow.IsSellItemCommodity(it)
+				local itComm
+				if it.isCommodity ~= nil then
+					itComm = (it.isCommodity == true)
+				else
+					itComm = OrderFlow.IsSellItemCommodity(it)
+				end
 				if (not itComm) and it.itemLink and it.itemLink ~= "" then
 					inQueueByKey[it.itemLink] = true
 				else
@@ -9555,106 +10042,116 @@ do
 		end
 		local ci = _G.C_Item
 		local ah = _G.C_AuctionHouse
+		local hasCInfo = (C_Container and type(C_Container.GetContainerItemInfo) == "function")
+		local enumComm = _G.Enum and _G.Enum.ItemCommodityStatus
+		local commVal = (enumComm and safeNumber(enumComm.Commodity)) or 2
+		local itemVal = (enumComm and safeNumber(enumComm.Item)) or 1
 		local byKey = {}
 		local out = {}
 		for _, bag in ipairs(getBagContainerList()) do
 			local slots = getContainerNumSlotsSafe(bag)
 			for slot = 1, slots do
-				local sid, cnt, locked = getContainerSlotInfoSafe(bag, slot)
-				if sid and sid > 0 and not locked and cnt and cnt > 0 then
-					local rawInfo, iconTex, quality, link = nil, nil, nil, nil
-					if C_Container and C_Container.GetContainerItemInfo then
-						local okI, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
-						if okI and tableValue(info) then
-							rawInfo = info
-							if readable(info.iconFileID) then iconTex = info.iconFileID end
-							if readable(info.quality) then quality = safeNumber(info.quality) end
-							if readable(info.hyperlink) and type(info.hyperlink) == "string" then link = info.hyperlink end
-						end
-					end
-					local loc = createSellBagLocation(bag, slot)
-					local exists = true
-					if ci and type(ci.DoesItemExist) == "function" then
-						local okE, ex = pcall(ci.DoesItemExist, loc)
-						exists = (okE and readable(ex) and ex == true)
-					end
-					if exists and not isSellSlotBound(loc, rawInfo) then
-						local ahValid = true
-						if ah and type(ah.IsSellItemValid) == "function" then
-							local okV, v = pcall(ah.IsSellItemValid, loc, false)
-							if okV and readable(v) and v == false then ahValid = false end
-						end
-						local vendorSell = 0
-						if ns.GetVendorSellPrice then
-							local okVS, vs = pcall(ns.GetVendorSellPrice, sid)
-							if okVS and safeNumber(vs) and vs > 0 then vendorSell = math.floor(vs) end
-						end
-						local meta = resolveSellItemInfoSafe(sid, link)
-						local itemName = meta.name
-						local classID = meta.classID
-						local maxStack = meta.maxStack or 1
-						if quality == nil then quality = meta.quality end
-						if not iconTex then iconTex = meta.icon end
-						if vendorSell <= 0 and (meta.vendorSell or 0) > 0 then vendorSell = meta.vendorSell end
-						-- Match Auctionator: hide Poor (grey) non-equipment from AH posting
-						if quality == 0 and classID ~= 2 and classID ~= 4 then
-							ahValid = false
-						end
-						if ahValid or vendorSell > 0 then
-							local isComm = nil
-							if ah and type(ah.GetItemCommodityStatus) == "function" then
-								local okS, st = pcall(ah.GetItemCommodityStatus, loc)
-								local stNum = okS and safeNumber(st) or nil
-								local enum = _G.Enum and _G.Enum.ItemCommodityStatus
-								local commVal = (enum and safeNumber(enum.Commodity)) or 2
-								local itemVal = (enum and safeNumber(enum.Item)) or 1
-								if stNum == commVal then isComm = true
-								elseif stNum == itemVal then isComm = false end
+				local sid, cnt, locked = nil, 0, false
+				local rawInfo, iconTex, quality, link = nil, nil, nil, nil
+				if hasCInfo then
+					local okI, info = pcall(C_Container.GetContainerItemInfo, bag, slot)
+					if okI and tableValue(info) then
+						rawInfo = info
+						sid = safeNumber(info.itemID)
+						if readable(info.hyperlink) and type(info.hyperlink) == "string" then
+							link = info.hyperlink
+							if not sid or sid <= 0 then
+								sid = tonumber(link:match("item:(%d+)"))
 							end
-							if isComm == nil then isComm = (maxStack > 1) end
-							local recKey = ((not isComm) and link and link ~= "") and link or sid
-							local rec = byKey[recKey]
-							if rec then
-								rec.totalCount = rec.totalCount + cnt
-								if ahValid then rec.ahValid = true end
-							else
-								local SELL_CATEGORY_META = {
-									[2]  = { name = "Weapon",        order = 1 },
-									[4]  = { name = "Armor",         order = 2 },
-									[0]  = { name = "Consumable",    order = 3 },
-									[7]  = { name = "Trade Goods",   order = 4 },
-									[5]  = { name = "Reagent",       order = 5 },
-									[3]  = { name = "Gem",           order = 6 },
-									[9]  = { name = "Recipe",        order = 7 },
-									[1]  = { name = "Container",     order = 8 },
-									[17] = { name = "Battle Pets",   order = 9 },
-									[15] = { name = "Miscellaneous", order = 10 },
-								}
-								local catMeta = classID and SELL_CATEGORY_META[classID] or nil
-								local catName = (catMeta and catMeta.name)
-									or ((meta.className and meta.className ~= "" and meta.className ~= "Misc") and meta.className)
-									or "Miscellaneous"
-								local catOrder = (catMeta and catMeta.order) or 10
-								local inQ = (inQueueByKey[recKey] == true)
-									or ((not isComm) and (not link or link == "") and inQueueByKey[sid] == true)
-								rec = {
-									itemID = sid,
-									itemLink = link,
-									name = itemName or itemSearchName(sid) or ("Item #" .. tostring(sid)),
-									icon = iconTex,
-									quality = quality or 1,
-									itemLevel = meta.itemLevel or 0,
-									classID = classID,
-									className = catName,
-									catOrder = catOrder,
-									totalCount = cnt,
-									vendorSell = vendorSell,
-									ahValid = ahValid,
-									isCommodity = isComm == true,
-									inQueue = inQ,
-								}
-								byKey[recKey] = rec
-								out[#out + 1] = rec
+						end
+						cnt = safeNumber(info.stackCount) or 1
+						locked = (readable(info.isLocked) and info.isLocked == true)
+						if readable(info.iconFileID) then iconTex = info.iconFileID end
+						if readable(info.quality) then quality = safeNumber(info.quality) end
+					end
+				else
+					sid, cnt, locked = getContainerSlotInfoSafe(bag, slot)
+				end
+				if sid and sid > 0 and not locked and cnt and cnt > 0 then
+					-- Fast-path duplicate commodity stacks without repeating item/AH API calls
+					local existing = byKey[sid]
+					if existing and existing.isCommodity then
+						local boundKnown = (rawInfo ~= nil and readable(rawInfo.isBound) and type(rawInfo.isBound) == "boolean")
+						local isBnd = boundKnown and (rawInfo.isBound == true)
+							or ((not boundKnown) and isSellSlotBound(createSellBagLocation(bag, slot), rawInfo))
+						if not isBnd then
+							existing.totalCount = existing.totalCount + cnt
+						end
+					else
+						local loc = createSellBagLocation(bag, slot)
+						local exists = true
+						if ci and type(ci.DoesItemExist) == "function" then
+							local okE, ex = pcall(ci.DoesItemExist, loc)
+							exists = (okE and readable(ex) and ex == true)
+						end
+						if exists and not isSellSlotBound(loc, rawInfo) then
+							local ahValid = true
+							if ah and type(ah.IsSellItemValid) == "function" then
+								local okV, v = pcall(ah.IsSellItemValid, loc, false)
+								if okV and readable(v) and v == false then ahValid = false end
+							end
+							local vendorSell = 0
+							if ns.GetVendorSellPrice then
+								local okVS, vs = pcall(ns.GetVendorSellPrice, sid)
+								if okVS and safeNumber(vs) and vs > 0 then vendorSell = math.floor(vs) end
+							end
+							local meta = resolveSellItemInfoSafe(sid, link)
+							local itemName = meta.name
+							local classID = meta.classID
+							local maxStack = meta.maxStack or 1
+							if quality == nil then quality = meta.quality end
+							if not iconTex then iconTex = meta.icon end
+							if vendorSell <= 0 and (meta.vendorSell or 0) > 0 then vendorSell = meta.vendorSell end
+							-- Match Auctionator: hide Poor (grey) non-equipment from AH posting
+							if quality == 0 and classID ~= 2 and classID ~= 4 then
+								ahValid = false
+							end
+							if ahValid or vendorSell > 0 then
+								local isComm = nil
+								if ah and type(ah.GetItemCommodityStatus) == "function" then
+									local okS, st = pcall(ah.GetItemCommodityStatus, loc)
+									local stNum = okS and safeNumber(st) or nil
+									if stNum == commVal then isComm = true
+									elseif stNum == itemVal then isComm = false end
+								end
+								if isComm == nil then isComm = (maxStack > 1) end
+								local recKey = ((not isComm) and link and link ~= "") and link or sid
+								local rec = byKey[recKey]
+								if rec then
+									rec.totalCount = rec.totalCount + cnt
+									if ahValid then rec.ahValid = true end
+								else
+									local catMeta = classID and SELL_CATEGORY_META[classID] or nil
+									local catName = (catMeta and catMeta.name)
+										or ((meta.className and meta.className ~= "" and meta.className ~= "Misc") and meta.className)
+										or "Miscellaneous"
+									local catOrder = (catMeta and catMeta.order) or 10
+									local inQ = (inQueueByKey[recKey] == true)
+										or ((not isComm) and (not link or link == "") and inQueueByKey[sid] == true)
+									rec = {
+										itemID = sid,
+										itemLink = link,
+										name = itemName or itemSearchName(sid) or ("Item #" .. tostring(sid)),
+										icon = iconTex,
+										quality = quality or 1,
+										itemLevel = meta.itemLevel or 0,
+										classID = classID,
+										className = catName,
+										catOrder = catOrder,
+										totalCount = cnt,
+										vendorSell = vendorSell,
+										ahValid = ahValid,
+										isCommodity = isComm == true,
+										inQueue = inQ,
+									}
+									byKey[recKey] = rec
+									out[#out + 1] = rec
+								end
 							end
 						end
 					end
@@ -9750,10 +10247,6 @@ do
 		if ns.GetItemMarketPrice then
 			local okM, mp = pcall(ns.GetItemMarketPrice, itemID)
 			if okM and safeNumber(mp) and mp > 0 then marketRef = math.floor(mp + 0.5) end
-		end
-		if marketRef <= 0 and ns.GetItemPrice then
-			local okP, p = pcall(ns.GetItemPrice, itemID)
-			if okP and safeNumber(p) and p > 0 then marketRef = math.floor(p + 0.5) end
 		end
 
 		local dispName = (type(opts.name) == "string" and opts.name ~= "" and opts.name)
@@ -9987,18 +10480,42 @@ do
 		})
 	end
 
-	local function scheduleSellScanRetry(targetInfo, itemIndex)
+	local dispatchSellScanInternal
+
+	local function scheduleSellScanRetry(targetInfo, itemIndex, reason, attempt)
 		local sl = orderFlow.stages and orderFlow.stages.sell
 		if not (sl and targetInfo and targetInfo.itemID and targetInfo.itemID > 0) then return end
-		if not (C_Timer and type(C_Timer.After) == "function") then return end
+		local nextAttempt = (tonumber(attempt) or 0) + 1
+		local isPostRefresh = (reason == "post_refresh" or reason == "post_complete_refresh")
+		local maxAttempts = isPostRefresh and 4 or 2
+		if nextAttempt > maxAttempts then return end
 		sl.scanRetrySerial = (sl.scanRetrySerial or 0) + 1
 		local retrySerial = sl.scanRetrySerial
 		local baseSearchSerial = sl.searchSerial or 0
 		local targetItemID = targetInfo.itemID
+		sl.pendingRetryScan = {
+			targetInfo = targetInfo,
+			itemIndex = itemIndex,
+			reason = reason or "retry",
+			attempt = nextAttempt,
+			retrySerial = retrySerial,
+			baseSearchSerial = baseSearchSerial,
+			targetItemID = targetItemID,
+		}
+		if not (C_Timer and type(C_Timer.After) == "function") then return end
 		C_Timer.After(0.45, function()
 			local s = orderFlow.stages and orderFlow.stages.sell
 			if not (s and s.scanRetrySerial == retrySerial and (s.searchSerial or 0) == baseSearchSerial) then return end
+			s.pendingRetryScan = nil
 			if not atAH() or s.pendingPost ~= nil or s.pendingSearch ~= nil then return end
+			if isPostRefresh then
+				local cur = (itemIndex ~= nil) and s.items and s.items[itemIndex] or nil
+				local matchesCur = (cur ~= nil and cur.itemID == targetItemID)
+				local matchesLast = (s.lastItemInfo ~= nil and s.lastItemInfo.itemID == targetItemID)
+				if not (matchesCur or matchesLast) then return end
+				dispatchSellScanInternal(targetInfo, itemIndex, reason, nextAttempt)
+				return
+			end
 			if itemIndex ~= nil then
 				local cur = s.items and s.items[s.activeIndex]
 				if s.activeIndex ~= itemIndex or not cur or cur.channel ~= "ah"
@@ -10011,19 +10528,20 @@ do
 					return
 				end
 			end
-			OrderFlow.RefreshSellSearch("retry")
+			dispatchSellScanInternal(targetInfo, itemIndex, "retry", nextAttempt)
 		end)
 	end
 
-	local function dispatchSellScanInternal(targetInfo, itemIndex, reason)
+	dispatchSellScanInternal = function(targetInfo, itemIndex, reason, attempt)
 		local sl = orderFlow.stages.sell
 		if not targetInfo or not targetInfo.itemID or targetInfo.itemID <= 0 then return false, "no_item" end
 		if isSellLegacyAH() then return false, "legacy_ah" end
 		if not atAH() then return false, "ah_closed" end
 		if sl.pendingPost ~= nil then return false, "post_in_flight" end
+		local curAttempt = tonumber(attempt) or 0
 		if not isSellThrottledReady() then
-			if reason ~= "retry" then
-				scheduleSellScanRetry(targetInfo, itemIndex)
+			if reason ~= "retry" or curAttempt > 0 then
+				scheduleSellScanRetry(targetInfo, itemIndex, reason, curAttempt)
 			end
 			return false, "throttled"
 		end
@@ -10039,12 +10557,13 @@ do
 		if ns.AHChannel and ns.AHChannel.TryAcquire then
 			local okCh = ns.AHChannel.TryAcquire("orderflow_sell", { preemptScan = true })
 			if not okCh then
-				if reason ~= "retry" then
-					scheduleSellScanRetry(targetInfo, itemIndex)
+				if reason ~= "retry" or curAttempt > 0 then
+					scheduleSellScanRetry(targetInfo, itemIndex, reason, curAttempt)
 				end
 				return false, "channel_busy"
 			end
 		end
+		sl.pendingRetryScan = nil
 		sl.scanRetrySerial = (sl.scanRetrySerial or 0) + 1
 
 		local bagInfo = findSellableBagSlot(targetInfo.itemID, 1, targetInfo.itemLink)
@@ -10223,8 +10742,15 @@ do
 		local priceThreshold = nil
 		local chosenPrice = nil
 		local chosenIsOwn = false
+		local sellObservedQty = 0
+		local sellBuyoutMin = nil
+		local sellHasFull = false
 
 		if isCommodity and ah and ah.GetNumCommoditySearchResults and ah.GetCommoditySearchResultInfo then
+			if type(ah.HasFullCommoditySearchResults) == "function" then
+				local okFC, fc = pcall(ah.HasFullCommoditySearchResults, ps.itemID)
+				if okFC and readable(fc) and fc == true then sellHasFull = true end
+			end
 			local n = math.floor(safeNumber(ah.GetNumCommoditySearchResults(ps.itemID)) or 0)
 			local sumQty = 0
 			for i = 1, n do
@@ -10256,9 +10782,18 @@ do
 					end
 				end
 			end
+			local totalQty = sumQty
+			if type(ah.GetCommoditySearchResultsQuantity) == "function" then
+				local okTQ, tq = pcall(ah.GetCommoditySearchResultsQuantity, ps.itemID)
+				if okTQ and safeNumber(tq) and tq > 0 then
+					totalQty = math.floor(tq)
+				end
+			end
+			sellObservedQty = totalQty
 			if #listings > 0 then
 				local r1 = listings[1]
 				chosenPrice = r1.price
+				sellBuyoutMin = r1.price
 				-- Auctionator SaleItem.lua:524 self-match check
 				if r1.containsOwnerItem and ((type(r1.owners) == "table" and r1.owners[1] == "player")
 					or ((r1.numOwnerItems or 0) >= (r1.quantity or 1))) then
@@ -10267,13 +10802,6 @@ do
 					chosenIsOwn = false
 				end
 				-- Auctionator SaleItem.lua:477-492 GetCommodityThreshold
-				local totalQty = sumQty
-				if type(ah.GetCommoditySearchResultsQuantity) == "function" then
-					local okTQ, tq = pcall(ah.GetCommoditySearchResultsQuantity, ps.itemID)
-					if okTQ and safeNumber(tq) and tq > 0 then
-						totalQty = math.floor(tq)
-					end
-				end
 				local target = math.min(5000, math.floor(totalQty * 0.2))
 				local accum = 0
 				for _, row in ipairs(listings) do
@@ -10286,9 +10814,14 @@ do
 			end
 		elseif (not isCommodity) and ah and ah.GetNumItemSearchResults and ah.GetItemSearchResultInfo then
 			local qKey = tableValue(itemIDOrKey) or ps.itemKey
+			if type(ah.HasFullItemSearchResults) == "function" then
+				local okFI, fi = pcall(ah.HasFullItemSearchResults, qKey)
+				if okFI and readable(fi) and fi == true then sellHasFull = true end
+			end
 			local n = math.floor(safeNumber(ah.GetNumItemSearchResults(qKey)) or 0)
 			local firstBuyoutRow = nil
 			local firstBidOnlyRow = nil
+			local groupedByKey = {}
 			for i = 1, n do
 				local okR, info = pcall(ah.GetItemSearchResultInfo, qKey, i)
 				if okR and tableValue(info) then
@@ -10299,30 +10832,46 @@ do
 						local isOwn = (readable(info.containsOwnerItem) and info.containsOwnerItem == true)
 						local owners = type(info.owners) == "table" and info.owners or {}
 						local totalOwners = math.max(#owners, math.floor(safeNumber(info.totalNumberOfOwners) or #owners))
-						local rowLvl = (tableValue(info.itemKey) and safeNumber(info.itemKey.itemLevel)) or safeNumber(info.itemLevel) or 0
+						local rowLvl = math.floor((tableValue(info.itemKey) and safeNumber(info.itemKey.itemLevel)) or safeNumber(info.itemLevel) or 0)
 						local boInt = (bo and bo > 0) and math.floor(bo) or nil
 						local bidInt = (bid and bid > 0) and math.floor(bid) or nil
 						if boInt or bidInt then
-							local row = {
-								price = boInt,
-								bidPrice = bidInt,
-								quantity = qty,
-								itemLevel = math.floor(rowLvl),
-								containsOwnerItem = isOwn,
-								owners = owners,
-								totalNumberOfOwners = totalOwners,
-								timeLeft = safeNumber(info.timeLeft),
-								timeLeftSeconds = safeNumber(info.timeLeftSeconds),
-								auctionID = safeNumber(info.auctionID),
-								itemLink = (readable(info.itemLink) and type(info.itemLink) == "string") and info.itemLink or ps.itemLink,
-								isCommodity = false,
-								itemID = ps.itemID,
-							}
-							listings[#listings + 1] = row
-							if boInt and not firstBuyoutRow then
-								firstBuyoutRow = row
-							elseif (not boInt) and bidInt and not firstBidOnlyRow then
-								firstBidOnlyRow = row
+							sellObservedQty = sellObservedQty + qty
+							if boInt then
+								local boUnit = math.max(1, math.floor(boInt / qty + 0.5))
+								sellBuyoutMin = sellBuyoutMin and math.min(sellBuyoutMin, boUnit) or boUnit
+							end
+							local gKey = tostring(boInt or 0) .. ":" .. tostring(bidInt or 0) .. ":" .. tostring(rowLvl) .. ":" .. (isOwn and "1" or "0")
+							local existingRow = groupedByKey[gKey]
+							if existingRow then
+								existingRow.quantity = (existingRow.quantity or 0) + qty
+								if isOwn then
+									existingRow.numOwnerItems = (existingRow.numOwnerItems or 0) + qty
+								end
+							else
+								local row = {
+									price = boInt,
+									bidPrice = bidInt,
+									quantity = qty,
+									numOwnerItems = isOwn and qty or 0,
+									itemLevel = rowLvl,
+									containsOwnerItem = isOwn,
+									owners = owners,
+									totalNumberOfOwners = totalOwners,
+									timeLeft = safeNumber(info.timeLeft),
+									timeLeftSeconds = safeNumber(info.timeLeftSeconds),
+									auctionID = safeNumber(info.auctionID),
+									itemLink = (readable(info.itemLink) and type(info.itemLink) == "string") and info.itemLink or ps.itemLink,
+									isCommodity = false,
+									itemID = ps.itemID,
+								}
+								groupedByKey[gKey] = row
+								listings[#listings + 1] = row
+								if boInt and not firstBuyoutRow then
+									firstBuyoutRow = row
+								elseif (not boInt) and bidInt and not firstBidOnlyRow then
+									firstBidOnlyRow = row
+								end
 							end
 						end
 					end
@@ -10332,6 +10881,16 @@ do
 			if pick then
 				chosenPrice = pick.price or pick.bidPrice
 				chosenIsOwn = (pick.containsOwnerItem == true)
+			end
+		end
+
+		if ps.itemID and ps.itemID > 0 and (isCommodity or isBaseItemKey(ps.itemKey)) then
+			if sellBuyoutMin and sellBuyoutMin > 0 and sellObservedQty > 0 then
+				MarketScan.RecordLiveItemPrice(ps.itemID, sellBuyoutMin, sellObservedQty, {
+					itemWide = (isCommodity == true and sellHasFull == true) or isBaseItemKey(ps.itemKey),
+				})
+			elseif sellHasFull and sellObservedQty == 0 then
+				MarketScan.RecordLiveItemPrice(ps.itemID, nil, 0, { itemWide = true })
 			end
 		end
 
@@ -11013,6 +11572,9 @@ do
 			end
 		end
 
+		if ns.AHSellTab and type(ns.AHSellTab.MarkBagsDirty) == "function" then
+			ns.AHSellTab.MarkBagsDirty()
+		end
 		orderFlow.notice = OrderFlow.FormatAuctionPostedMessage({
 			name = p.name,
 			itemLink = p.name,
@@ -11997,21 +12559,36 @@ do
 				if cur and cur.itemID and (id == cur.itemID or id == nil) and cur.remaining > 0 then
 					local count = C_AuctionHouse.GetNumCommoditySearchResults(cur.itemID) or 0
 					local qtyLeft, total, filled = cur.remaining, 0, 0
+					local mktFirstUnit, mktTotalQty = nil, 0
 					for i = 1, count do
-						if qtyLeft <= 0 then break end
 						local info = C_AuctionHouse.GetCommoditySearchResultInfo(cur.itemID, i)
 						if tableValue(info) then
 							local u = safeNumber(info.unitPrice)
 							local q = safeNumber(info.quantity)
-							local ownQ = math.max(0, math.floor(safeNumber(info.numOwnerItems) or 0))
-							local buyableQ = (q and q > 0) and math.max(0, math.floor(q) - ownQ) or 0
-							if u and u > 0 and buyableQ > 0 then
-								local take = math.min(qtyLeft, buyableQ)
-								total = total + take * u
-								filled = filled + take
-								qtyLeft = qtyLeft - take
+							if u and u > 0 and q and q > 0 then
+								mktFirstUnit = mktFirstUnit and math.min(mktFirstUnit, u) or u
+								mktTotalQty = mktTotalQty + math.floor(q)
+							end
+							if qtyLeft > 0 then
+								local ownQ = math.max(0, math.floor(safeNumber(info.numOwnerItems) or 0))
+								local buyableQ = (q and q > 0) and math.max(0, math.floor(q) - ownQ) or 0
+								if u and u > 0 and buyableQ > 0 then
+									local take = math.min(qtyLeft, buyableQ)
+									total = total + take * u
+									filled = filled + take
+									qtyLeft = qtyLeft - take
+								end
 							end
 						end
+					end
+					if type(C_AuctionHouse.GetCommoditySearchResultsQuantity) == "function" then
+						local okTQ, tq = pcall(C_AuctionHouse.GetCommoditySearchResultsQuantity, cur.itemID)
+						if okTQ and safeNumber(tq) and tq > 0 then
+							mktTotalQty = math.max(mktTotalQty, math.floor(tq))
+						end
+					end
+					if mktFirstUnit and mktFirstUnit > 0 and mktTotalQty > 0 then
+						MarketScan.RecordLiveItemPrice(cur.itemID, mktFirstUnit, mktTotalQty, { itemWide = false })
 					end
 					if filled > 0 then
 						local liveUnit = math.ceil(total / filled)
@@ -12078,22 +12655,35 @@ do
 				if cur and key and safeNumber(key.itemID) == cur.itemID and cur.remaining > 0 then
 					local count = C_AuctionHouse.GetNumItemSearchResults(key) or 0
 					local bestUnit, bestBuyout, bestQty, bestAuctionID = nil, nil, nil, nil
+					local mktMinUnit, mktTotalQty = nil, 0
 					for i = 1, count do
 						local info = C_AuctionHouse.GetItemSearchResultInfo(key, i)
-						if tableValue(info) and not info.containsOwnerItem and not info.containsAccountItem
-							and (safeNumber(info.numOwnerItems) or 0) <= 0 then
-							local buyout = safeNumber(info.buyoutAmount)
-							if buyout and buyout > 0 then
-								local qty = math.max(1, math.floor(safeNumber(info.quantity) or 1))
-								local unitBuyout = buyout / qty
-								if not bestUnit or unitBuyout < bestUnit or (unitBuyout == bestUnit and buyout < bestBuyout) then
-									bestUnit = unitBuyout
-									bestBuyout = math.floor(buyout)
-									bestQty = qty
-									bestAuctionID = safeNumber(info.auctionID)
+						if tableValue(info) then
+							local buyoutAll = safeNumber(info.buyoutAmount)
+							local qtyAll = math.max(1, math.floor(safeNumber(info.quantity) or 1))
+							if buyoutAll and buyoutAll > 0 then
+								local uAll = buyoutAll / qtyAll
+								mktTotalQty = mktTotalQty + qtyAll
+								mktMinUnit = mktMinUnit and math.min(mktMinUnit, uAll) or uAll
+							end
+							if not info.containsOwnerItem and not info.containsAccountItem
+								and (safeNumber(info.numOwnerItems) or 0) <= 0 then
+								local buyout = buyoutAll
+								if buyout and buyout > 0 then
+									local qty = qtyAll
+									local unitBuyout = buyout / qty
+									if not bestUnit or unitBuyout < bestUnit or (unitBuyout == bestUnit and buyout < bestBuyout) then
+										bestUnit = unitBuyout
+										bestBuyout = math.floor(buyout)
+										bestQty = qty
+										bestAuctionID = safeNumber(info.auctionID)
+									end
 								end
 							end
 						end
+					end
+					if mktMinUnit and mktMinUnit > 0 and mktTotalQty > 0 and isBaseItemKey(key) then
+						MarketScan.RecordLiveItemPrice(cur.itemID, mktMinUnit, mktTotalQty, { itemWide = false })
 					end
 					if bestUnit and bestBuyout and bestBuyout > 0 then
 						local liveUnit = math.ceil(bestUnit)
@@ -12313,6 +12903,12 @@ do
 					or not (C_AuctionHouse and type(C_AuctionHouse.IsThrottledMessageSystemReady) == "function")
 					or C_AuctionHouse.IsThrottledMessageSystemReady() ~= false then
 					sl.throttleBlockedAt = nil
+					local prs = sl.pendingRetryScan
+					if prs and atAH() and sl.pendingPost == nil and sl.pendingSearch == nil then
+						sl.pendingRetryScan = nil
+						sl.scanRetrySerial = (sl.scanRetrySerial or 0) + 1
+						dispatchSellScanInternal(prs.targetInfo, prs.itemIndex, prs.reason, prs.attempt)
+					end
 				end
 			end
 			if (orderFlow.active and orderFlow.activeStage == "sell") or (ns.AHSellTab and ns.AHSellTab.IsShown and ns.AHSellTab.IsShown()) then

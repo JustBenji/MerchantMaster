@@ -165,6 +165,147 @@ do
 end
 
 do
+    local captured = {}
+    local tooltip = {
+        GetItem = function() return "Rich Item", "|Hitem:54321::::::::|h[Rich Item]|h" end,
+        GetTooltipData = function() return { stackCount = 1 } end,
+        AddDoubleLine = function(_, l, r, rL, gL, bL, rR, gR, bR)
+            captured[#captured + 1] = { l, r, rL, gL, bL, rR, gR, bR }
+        end,
+        ClearLines = function() captured = {} end,
+        NumLines = function() return #captured end,
+        HookScript = function(self, ev, fn)
+            self._hooks = self._hooks or {}
+            self._hooks[ev] = fn
+        end,
+    }
+    local function resetTip()
+        tooltip:ClearLines()
+        if tooltip._hooks and tooltip._hooks.OnTooltipCleared then
+            tooltip._hooks.OnTooltipCleared(tooltip)
+        end
+    end
+    local function nearRGB(a, b)
+        return type(a) == "number" and type(b) == "number" and math.abs(a - b) < 0.02
+    end
+    local function findRow(prefix)
+        for _, row in ipairs(captured) do
+            if type(row[1]) == "string" and row[1]:find(prefix, 1, true) then
+                return row
+            end
+        end
+        return nil
+    end
+
+    local oldTimer = _G.C_Timer
+    local oldDB = _G.MerchantMasterDB
+    local oldShift = _G.IsShiftKeyDown
+    local oldAlt = _G.IsAltKeyDown
+    local oldModel = ns.Model
+    local oldInv = ns.Inventory
+    local oldFormat = hostNS.FormatMoneyCompact
+
+    _G.C_Timer = { After = function(_, fn) fn() end }
+    _G.IsShiftKeyDown = function() return false end
+    _G.IsAltKeyDown = function() return false end
+    hostNS.FormatMoneyCompact = function(v) return tostring(v) end
+
+    local mockPrices = { AvgSell = 25000, AvgBuy = 12000, CurBasis = 0, AvgProfit = 10000, SaleRate = nil, NumExpires = 0 }
+    ns.Model = {
+        GetPriceSource = function(key) return mockPrices[key] end,
+        GetItemStats = function() return { minSell = 20000, maxSell = 30000, lastSoldUnit = 24000 } end,
+        GetSaleHint = function() return nil end,
+    }
+    ns.Inventory = {
+        GetItemBreakdown = function()
+            return {
+                total = 8,
+                byChar = {
+                    { char = "Main-Realm", shortName = "Main", bags = 7, bank = 1, mail = 0, inTransit = 0, ah = 0, updatedAt = time() - 5, stale = false },
+                    { char = "ZeroAlt-Realm", shortName = "ZeroAlt", bags = 0, bank = 0, mail = 0, inTransit = 0, ah = 0, updatedAt = time() - 5, stale = false },
+                },
+            }
+        end,
+    }
+
+    -- 1. Default prefs: RGB colors, ttInvHideZero=true, ttHideEmpty=true, ttInvCompact=true
+    _G.MerchantMasterDB = { anTooltips = true, anTooltipInventory = true }
+    ns.Tooltips.Invalidate()
+    resetTip()
+    check(ns.Tooltips.OnTooltipItem(tooltip, 54321, 1) == true, "tooltip renders with default TooltipPrefs")
+
+    local hdr = captured[1]
+    check(hdr and hdr[1] == "MerchantMaster Accounting"
+        and nearRGB(hdr[3], 1.00) and nearRGB(hdr[4], 0.82) and nearRGB(hdr[5], 0.00),
+        "accounting tooltip line 1 uses Gold header 'MerchantMaster Accounting'")
+
+    local avgSellRow = findRow("  Avg Sell")
+    check(avgSellRow ~= nil
+        and nearRGB(avgSellRow[3], 0.90) and nearRGB(avgSellRow[4], 0.92) and nearRGB(avgSellRow[5], 0.95)
+        and nearRGB(avgSellRow[6], 0.96) and nearRGB(avgSellRow[7], 0.97) and nearRGB(avgSellRow[8], 0.99),
+        "2-space indented accounting label uses off-white RGB")
+
+    local mainAltRow = findRow("    Main")
+    check(mainAltRow ~= nil
+        and nearRGB(mainAltRow[3], 0.86) and nearRGB(mainAltRow[4], 0.72) and nearRGB(mainAltRow[5], 0.54)
+        and mainAltRow[2] == "8 (7 bags, 1 bank, 0 mail, 0 AH)",
+        "4-space indented alt row uses warm tan RGB and compact format '8 (7 bags, 1 bank, 0 mail, 0 AH)'")
+
+    check(findRow("ZeroAlt") == nil, "ttInvHideZero=true hides 0-count characters by default")
+    check(findRow("Current Basis") == nil and findRow("Sale Rate / Expires") == nil,
+        "ttHideEmpty=true hides CurBasis=0 and nil SaleRate with 0 expires")
+
+    -- 2. ttInvHideZero=false, ttHideEmpty=false, ttInvCompact=false
+    _G.MerchantMasterDB.ttInvHideZero = false
+    _G.MerchantMasterDB.ttHideEmpty = false
+    _G.MerchantMasterDB.ttInvCompact = false
+    resetTip()
+    check(ns.Tooltips.OnTooltipItem(tooltip, 54321, 1) == true, "tooltip renders with verbose/non-hidden options")
+    local zeroAltRow = findRow("    ZeroAlt")
+    local mainVerbose = findRow("    Main")
+    local basisRow = findRow("  Current Basis")
+    local rateRow = findRow("  Sale Rate / Expires")
+    check(zeroAltRow ~= nil, "ttInvHideZero=false shows 0-count alt rows")
+    check(mainVerbose and mainVerbose[2] == "Bags 7, Bank 1, Mail 0, In-Transit 0, AH 0",
+        "ttInvCompact=false uses verbose inventory format")
+    check(basisRow ~= nil and rateRow ~= nil and rateRow[2] == "- / 0",
+        "ttHideEmpty=false shows Current Basis=0 and Sale Rate / Expires='- / 0'")
+
+    -- 3. ttPriceFormat = "icons" uses coin icon texture markup
+    _G.MerchantMasterDB.ttPriceFormat = "icons"
+    resetTip()
+    ns.Tooltips.OnTooltipItem(tooltip, 54321, 1)
+    local iconSellRow = findRow("  Avg Sell")
+    check(iconSellRow ~= nil and iconSellRow[2]:find("|TInterface\\MoneyFrame\\UI-", 1, true) ~= nil,
+        "ttPriceFormat='icons' renders WoW coin icon texture markup")
+
+    -- 4. ttModifier = "alt" suppresses when Alt is not held and shows when Alt is held
+    _G.MerchantMasterDB.ttModifier = "alt"
+    _G.IsAltKeyDown = function() return false end
+    resetTip()
+    check(ns.Tooltips.OnTooltipItem(tooltip, 54321, 1) == false and #captured == 0,
+        "ttModifier='alt' suppresses tooltip when Alt is not held")
+    _G.IsAltKeyDown = function() return true end
+    resetTip()
+    check(ns.Tooltips.OnTooltipItem(tooltip, 54321, 1) == true and #captured > 0,
+        "ttModifier='alt' displays tooltip when Alt is held")
+
+    -- 5. ttEnabled = false disables all lines
+    _G.MerchantMasterDB.ttEnabled = false
+    resetTip()
+    check(ns.Tooltips.OnTooltipItem(tooltip, 54321, 1) == false and #captured == 0,
+        "ttEnabled=false disables all tooltip lines")
+
+    ns.Model, ns.Inventory = oldModel, oldInv
+    _G.C_Timer = oldTimer
+    hostNS.FormatMoneyCompact = oldFormat
+    _G.MerchantMasterDB = oldDB
+    _G.IsShiftKeyDown = oldShift
+    _G.IsAltKeyDown = oldAlt
+    ns.Tooltips.Invalidate()
+end
+
+do
     local source = assert(io.open(root .. "Analytics/Chart.lua", "rb")):read("*a")
     check(not source:match('SetScript%s*%(%s*["\']On' .. "Update[" .. "']"), "Chart.lua contains no OnUpdate script")
     check(not source:find("C_Timer." .. "NewTicker", 1, true), "Chart.lua contains no repeating ticker")

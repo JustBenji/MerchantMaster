@@ -35,11 +35,19 @@ SE.MAX_COMMODITY_PAGES = 1            -- Page 1 already holds cheapest 50-100 ti
 SE.BROWSE_FRESH_TTL = 60              -- Skip Stage 1 browse sweep if swept < 60s ago
 SE.DRILL_CACHE_TTL = 120              -- Skip re-drilling unchanged (minPrice, totalQty) within 120s
 SE.MAX_VENDOR_LOAD_PRICE = 500000     -- 50g ceiling above any Classic vendor sell price (skip load flood)
+SE.MAX_DE_LOAD_PRICE = 5000000        -- 500g ceiling for uncached gear load requests
 
 local VALID_GAP_SCOPES = {
 	all = true,
 	commodities = true,
 	items = true,
+}
+
+local VALID_DE_QUALITIES = {
+	all = true,
+	green = true,
+	blue = true,
+	epic = true,
 }
 
 -- Neutral (Blackwater / Goblin) Auction House uiMapIDs (Classic + Modern IDs).
@@ -78,6 +86,13 @@ local DEFAULTS = {
 	vendorAutoFromBrowse = true,
 	vendorMaxSpendCopper = 0,         -- 0 = character available gold
 	vendorMaxQty = 0,                 -- 0 = all profitable units
+	-- Disenchant Sniper
+	deMinProfitCopper = 1000,         -- 10s default min expected DE profit per unit
+	deAutoFromBrowse = true,
+	deUseArcaneSalvager = false,      -- +20% Arcane Salvager yield toggle
+	deApplyAHCut = true,              -- Deduct 5% AH cut from DE material value in profit math
+	deQualityFilter = "all",          -- "all" | "green" | "blue" | "epic"
+	deMaxSpendCopper = 0,             -- 0 = character available gold
 }
 
 -------------------------------------------------------------------------------
@@ -92,8 +107,20 @@ SE.gapDealsByKey = {}     -- [idKey] = deal
 SE.vendorDeals = {}       -- array of vendor deal tables
 SE.vendorDealsByKey = {}  -- [idKey] = deal
 SE.unresolvedVendor = {}  -- [cacheKey] = pending row awaiting GET_ITEM_INFO_RECEIVED
+SE.deDeals = {}           -- array of disenchant deal tables
+SE.deDealsByKey = {}      -- [idKey] = deal
+SE.unresolvedDE = {}      -- [cacheKey] = pending DE row awaiting GET_ITEM_INFO_RECEIVED
+SE.deScanStats = {
+	source = nil,
+	totalSeen = 0,
+	equipScanned = 0,
+	estimated = 0,
+	uncachedPending = 0,
+	profitable = 0,
+	lastAt = nil,
+}
 SE.purchase = nil         -- active protected purchase state machine
-SE.pendingCheck = nil     -- active live Check search (vendor or snapshot gap item)
+SE.pendingCheck = nil     -- active live Check search (vendor, de, or snapshot gap item)
 SE.scan = {
 	active = false,
 	phase = "idle",         -- "idle" | "browse" | "drill"
@@ -124,6 +151,7 @@ SE.session = {
 	estProfit = 0,
 	gapDealsFound = 0,
 	vendorDealsFound = 0,
+	deDealsFound = 0,
 }
 
 local neutralCache = nil
@@ -135,6 +163,8 @@ local checkSeq = 0
 local scanSeq = 0
 local unresolvedVendorByID = {}
 local vendorDealsDirty = false
+local unresolvedDEByID = {}
+local deDealsDirty = false
 
 -------------------------------------------------------------------------------
 -- Secret-Value Safety & Utility Helpers
@@ -573,6 +603,9 @@ function SE.GetSettings()
 	if not VALID_GAP_SCOPES[safeString(tbl.gapScope) or ""] then
 		tbl.gapScope = "all"
 	end
+	if not VALID_DE_QUALITIES[safeString(tbl.deQualityFilter) or ""] then
+		tbl.deQualityFilter = "all"
+	end
 	return tbl
 end
 
@@ -585,6 +618,9 @@ function SE.SetOption(key, value)
 		local s = safeString(value)
 		if not s then return false end
 		if key == "gapScope" and not VALID_GAP_SCOPES[s] then
+			return false
+		end
+		if key == "deQualityFilter" and not VALID_DE_QUALITIES[s] then
 			return false
 		end
 		settings[key] = s
@@ -680,6 +716,9 @@ ns.GetDynamicAuctionCut = SE.GetDynamicAuctionCut
 
 local function hydrateSnapshotItems(econOverride)
 	local econ = activeEconomy(econOverride)
+	if type(ns.IsLocalSnapshotSuppressed) == "function" and ns.IsLocalSnapshotSuppressed() then
+		return nil, econ, nil
+	end
 	if type(ns.QueryLocalSnapshot) == "function" then
 		-- Trigger Pricing.lua lazy chunk parse into ns.snapshotParsed[resolvedKey]
 		pcall(ns.QueryLocalSnapshot, 2447, econ)
@@ -981,7 +1020,16 @@ function SE.GetReferencePrice(itemID, econOverride, opts)
 	end
 
 	if not rawAnchor or rawAnchor <= 0 then
-		rawAnchor, rawSource = computeLiveHistoryReference(id, econ, opts)
+		if type(ns.GetItemMarketValue7d) == "function" then
+			local v7 = ns.GetItemMarketValue7d(id, econ)
+			if safeNumber(v7) and v7 > 0 then
+				rawAnchor = math.floor(v7)
+				rawSource = "market_value_7d"
+			end
+		end
+		if not rawAnchor or rawAnchor <= 0 then
+			rawAnchor, rawSource = computeLiveHistoryReference(id, econ, opts)
+		end
 	end
 
 	if not rawAnchor or rawAnchor <= 0 then
@@ -1119,8 +1167,39 @@ function SE.BuildGapShortlist(opts)
 							itemID = sig,
 							minPrice = math.floor(minP),
 							totalQuantity = snapQty,
+							updatedAt = safeNumber(rt.updatedAt) or 0,
 							source = "Snapshot",
 						}
+					end
+				end
+			end
+		end
+		local db = safeTable(_G.MerchantMasterDB)
+		local ahRoot = db and safeTable(db.ahPrices)
+		local ahEcon = ahRoot and safeTable(ahRoot[econ])
+		if ahEcon then
+			for idKey, rawRec in pairs(ahEcon) do
+				local id = type(idKey) == "number" and safeNumber(idKey) or nil
+				local ahRec = id and id > 0 and safeTable(rawRec) or nil
+				if ahRec then
+					local ahAt = safeNumber(ahRec.at) or 0
+					local cur = merged[id]
+					local snapAt = cur and (cur.updatedAt or 0) or 0
+					if cur == nil or ahAt > snapAt then
+						if ahRec.absent == true or not safeNumber(ahRec.price) or ahRec.price <= 0 or (safeNumber(ahRec.qty) or 0) <= 0 then
+							if cur ~= nil and ahAt > snapAt then
+								merged[id] = nil
+							end
+						else
+							merged[id] = {
+								sig = id,
+								itemID = id,
+								minPrice = math.floor(ahRec.price),
+								totalQuantity = safeNumber(ahRec.qty) or 1,
+								updatedAt = ahAt,
+								source = "Live AH",
+							}
+						end
 					end
 				end
 			end
@@ -2215,39 +2294,93 @@ function SE.ScanSnapshotForGapDeals(econOverride, opts)
 end
 
 -------------------------------------------------------------------------------
--- Vendor Sniper Evaluator (Browse Batch Ingestion & Full Snapshot Scan)
+-- Vendor & Disenchant Sniper Evaluators (Browse Ingestion & Snapshot Scan)
 -------------------------------------------------------------------------------
 
-local function sortVendorDeals()
-	table.sort(SE.vendorDeals, function(a, b)
+local function sortProfitUnitDeals(list)
+	table.sort(list, function(a, b)
 		if a.profitPerUnit ~= b.profitPerUnit then return a.profitPerUnit > b.profitPerUnit end
 		if a.totalProfit ~= b.totalProfit then return a.totalProfit > b.totalProfit end
 		return a.itemID < b.itemID
 	end)
 end
 
-local function makeVendorDealKey(itemID, itemKey)
+local function sortVendorDeals()
+	sortProfitUnitDeals(SE.vendorDeals)
+end
+
+local function sortDEDeals()
+	table.sort(SE.deDeals, function(a, b)
+		local tpA = safeNumber(a.totalProfit) or 0
+		local tpB = safeNumber(b.totalProfit) or 0
+		if tpA ~= tpB then return tpA > tpB end
+		if (a.profitPerUnit or 0) ~= (b.profitPerUnit or 0) then return (a.profitPerUnit or 0) > (b.profitPerUnit or 0) end
+		return (a.itemID or 0) < (b.itemID or 0)
+	end)
+end
+
+local function makeTypedDealKey(prefix, itemID, itemKey)
 	local kt = safeTable(itemKey)
 	if kt then
 		local ilvl = math.floor(safeNumber(kt.itemLevel) or 0)
 		local suf = math.floor(safeNumber(kt.itemSuffix) or 0)
 		local pet = math.floor(safeNumber(kt.battlePetSpeciesID) or 0)
 		if ilvl ~= 0 or suf ~= 0 or pet ~= 0 then
-			return string.format("vendor:%d:%d:%d:%d", itemID, ilvl, suf, pet)
+			return string.format("%s:%d:%d:%d:%d", prefix, itemID, ilvl, suf, pet)
 		end
 	end
-	return "vendor:" .. tostring(itemID)
+	return prefix .. ":" .. tostring(itemID)
+end
+
+local function makeVendorDealKey(itemID, itemKey)
+	return makeTypedDealKey("vendor", itemID, itemKey)
+end
+
+local function makeDEDealKey(itemID, itemKey)
+	return makeTypedDealKey("de", itemID, itemKey)
+end
+
+local function queueUnresolvedEntry(mapTbl, byID, cacheKey, itemID, entry)
+	local id = math.floor(itemID)
+	mapTbl[cacheKey] = entry
+	local bucket = byID[id]
+	if not bucket then
+		bucket = {}
+		byID[id] = bucket
+	end
+	bucket[cacheKey] = true
 end
 
 local function queueUnresolvedVendor(cacheKey, itemID, entry)
-	local id = math.floor(itemID)
-	SE.unresolvedVendor[cacheKey] = entry
-	local bucket = unresolvedVendorByID[id]
-	if not bucket then
-		bucket = {}
-		unresolvedVendorByID[id] = bucket
+	queueUnresolvedEntry(SE.unresolvedVendor, unresolvedVendorByID, cacheKey, itemID, entry)
+end
+
+local function queueUnresolvedDE(cacheKey, itemID, entry)
+	queueUnresolvedEntry(SE.unresolvedDE, unresolvedDEByID, cacheKey, itemID, entry)
+end
+
+local function countPendingDE()
+	local n = 0
+	for _ in pairs(SE.unresolvedDE) do
+		n = n + 1
 	end
-	bucket[cacheKey] = true
+	return n
+end
+
+local function resetDEScanStats(source, setTimestamp)
+	SE.deScanStats.source = source
+	SE.deScanStats.totalSeen = 0
+	SE.deScanStats.equipScanned = 0
+	SE.deScanStats.estimated = 0
+	SE.deScanStats.uncachedPending = 0
+	SE.deScanStats.profitable = 0
+	SE.deScanStats.lastAt = setTimestamp and nowMono() or nil
+end
+
+function SE.GetDEScanStats()
+	SE.deScanStats.uncachedPending = countPendingDE()
+	SE.deScanStats.profitable = #SE.deDeals
+	return SE.deScanStats
 end
 
 function SE.PruneBrowseCache(econOverride, olderThanMono)
@@ -2275,27 +2408,36 @@ local function flushDeferredVendorDeals()
 	end
 end
 
-local function removeVendorDealByKey(idKey)
-	local old = idKey and SE.vendorDealsByKey[idKey] or nil
+local function flushDeferredDEDeals()
+	if deDealsDirty then
+		deDealsDirty = false
+		sortDEDeals()
+		notify("de_deals", SE.deDeals)
+	end
+end
+
+local function removeModeDealByKey(list, byKey, idKey)
+	local old = idKey and byKey[idKey] or nil
 	if not old then return end
 	if (SE.purchase and SE.purchase.deal == old)
 		or (SE.pendingCheck and SE.pendingCheck.deal == old) then
 		return
 	end
-	SE.vendorDealsByKey[idKey] = nil
-	for i = #SE.vendorDeals, 1, -1 do
-		if SE.vendorDeals[i] == old then
-			table.remove(SE.vendorDeals, i)
+	byKey[idKey] = nil
+	for i = #list, 1, -1 do
+		if list[i] == old then
+			table.remove(list, i)
 			break
 		end
 	end
 end
 
-local function clearStaleVendorDeals()
+local function clearStaleModeDeals(modeKey)
+	local isDE = (modeKey == "de")
 	local kept = {}
 	local keptByKey = {}
-	local activePurchase = (SE.purchase and SE.purchase.mode == "vendor") and SE.purchase.deal or nil
-	local activeCheck = (SE.pendingCheck and SE.pendingCheck.mode == "vendor") and SE.pendingCheck.deal or nil
+	local activePurchase = (SE.purchase and SE.purchase.mode == modeKey) and SE.purchase.deal or nil
+	local activeCheck = (SE.pendingCheck and SE.pendingCheck.mode == modeKey) and SE.pendingCheck.deal or nil
 	if activePurchase and activePurchase.idKey then
 		kept[#kept + 1] = activePurchase
 		keptByKey[activePurchase.idKey] = activePurchase
@@ -2304,43 +2446,69 @@ local function clearStaleVendorDeals()
 		kept[#kept + 1] = activeCheck
 		keptByKey[activeCheck.idKey] = activeCheck
 	end
-	SE.vendorDeals = kept
-	SE.vendorDealsByKey = keptByKey
-	SE.unresolvedVendor = {}
-	unresolvedVendorByID = {}
-	vendorDealsDirty = false
-	notify("vendor_deals", SE.vendorDeals)
+	if isDE then
+		SE.deDeals = kept
+		SE.deDealsByKey = keptByKey
+		SE.unresolvedDE = {}
+		unresolvedDEByID = {}
+		deDealsDirty = false
+		resetDEScanStats(nil, false)
+		SE.deScanStats.profitable = #SE.deDeals
+		notify("de_deals", SE.deDeals)
+	else
+		SE.vendorDeals = kept
+		SE.vendorDealsByKey = keptByKey
+		SE.unresolvedVendor = {}
+		unresolvedVendorByID = {}
+		vendorDealsDirty = false
+		notify("vendor_deals", SE.vendorDeals)
+	end
 end
 
-local function upsertVendorDeal(deal)
+local function clearStaleVendorDeals()
+	clearStaleModeDeals("vendor")
+end
+
+local function clearStaleDEDeals()
+	clearStaleModeDeals("de")
+end
+
+local function upsertModeDeal(list, byKey, prefix, counterKey, deal)
 	if deal and deal.itemID and deal.idKey then
-		local baseKey = "vendor:" .. tostring(deal.itemID)
+		local baseKey = prefix .. ":" .. tostring(deal.itemID)
 		if deal.idKey ~= baseKey then
-			local baseOld = SE.vendorDealsByKey[baseKey]
+			local baseOld = byKey[baseKey]
 			if baseOld and baseOld.source == "Snapshot" then
-				removeVendorDealByKey(baseKey)
+				removeModeDealByKey(list, byKey, baseKey)
 			end
 		end
 	end
-	local existing = SE.vendorDealsByKey[deal.idKey]
+	local existing = byKey[deal.idKey]
 	if existing then
-		-- Keep active purchase or active live check intact
 		if (SE.purchase and SE.purchase.deal == existing)
 			or (SE.pendingCheck and SE.pendingCheck.deal == existing) then
 			return false
 		end
-		for i = 1, #SE.vendorDeals do
-			if SE.vendorDeals[i] == existing then
-				SE.vendorDeals[i] = deal
+		for i = 1, #list do
+			if list[i] == existing then
+				list[i] = deal
 				break
 			end
 		end
 	else
-		SE.vendorDeals[#SE.vendorDeals + 1] = deal
-		SE.session.vendorDealsFound = SE.session.vendorDealsFound + 1
+		list[#list + 1] = deal
+		SE.session[counterKey] = (SE.session[counterKey] or 0) + 1
 	end
-	SE.vendorDealsByKey[deal.idKey] = deal
+	byKey[deal.idKey] = deal
 	return true
+end
+
+local function upsertVendorDeal(deal)
+	return upsertModeDeal(SE.vendorDeals, SE.vendorDealsByKey, "vendor", "vendorDealsFound", deal)
+end
+
+local function upsertDEDeal(deal)
+	return upsertModeDeal(SE.deDeals, SE.deDealsByKey, "de", "deDealsFound", deal)
 end
 
 local function evaluateVendorCandidate(itemID, minPrice, qty, source, extra)
@@ -2416,6 +2584,509 @@ local function evaluateVendorCandidate(itemID, minPrice, qty, source, extra)
 	}, false
 end
 
+local DE_EXCLUDED_LOCS = {
+	INVTYPE_NON_EQUIP = true,
+	INVTYPE_NON_EQUIP_IGNORE = true,
+	INVTYPE_BAG = true,
+	INVTYPE_TRINKET = true,
+	INVTYPE_BODY = true,
+	INVTYPE_TABARD = true,
+	INVTYPE_THROWN = true,
+	INVTYPE_AMMO = true,
+	INVTYPE_QUIVER = true,
+}
+
+local function normalizeLadderEntries(rawList, wholePrice)
+	if not safeTable(rawList) then return nil end
+	local sorted = {}
+	for i = 1, #rawList do
+		local t = safeTable(rawList[i])
+		if t then
+			local rawP = safeNumber(t.price) or safeNumber(t.unitPrice)
+			local q = safeNumber(t.qty) or safeNumber(t.quantity) or safeNumber(t.n)
+			if rawP and rawP > 0 and q and q > 0 then
+				local qi = math.floor(q)
+				if qi > 0 then
+					local unitP = wholePrice and math.max(1, math.floor(rawP / qi + 0.5)) or math.floor(rawP)
+					if unitP > 0 then
+						sorted[#sorted + 1] = { price = unitP, qty = qi }
+					end
+				end
+			end
+		end
+	end
+	if #sorted == 0 then return nil end
+	table.sort(sorted, function(a, b) return a.price < b.price end)
+	local merged = {}
+	for i = 1, #sorted do
+		local cur = sorted[i]
+		local last = merged[#merged]
+		if last and last.price == cur.price then
+			last.qty = last.qty + cur.qty
+		else
+			merged[#merged + 1] = { price = cur.price, qty = cur.qty }
+		end
+	end
+	return merged
+end
+
+local function getItemPriceLadder(itemID, econ)
+	local id = safeNumber(itemID)
+	if not id or id <= 0 then return nil, nil end
+	local effEcon = activeEconomy(econ)
+
+	local db = safeTable(_G.MerchantMasterDB)
+	local ahRoot = db and safeTable(db.ahLots)
+	local econLots = ahRoot and safeTable(ahRoot[effEcon])
+	local lotsRec = econLots and safeTable(econLots[id])
+	local lotsAt = (lotsRec and safeNumber(lotsRec.at)) or 0
+	local lotsLadder = (lotsRec and lotsRec.lots) and normalizeLadderEntries(lotsRec.lots, false) or nil
+
+	local pricing = safeTable(ns.Pricing)
+	local depthLadder, depthAt = nil, 0
+	if pricing and type(pricing.GetItemSnapshotDepth) == "function" then
+		local okD, rawD = pcall(pricing.GetItemSnapshotDepth, id, effEcon)
+		if okD and safeTable(rawD) then
+			depthLadder = normalizeLadderEntries(rawD, false)
+			if depthLadder and type(pricing.GetSnapshotMeta) == "function" then
+				local okM, meta = pcall(pricing.GetSnapshotMeta, effEcon)
+				if okM and safeTable(meta) then
+					depthAt = safeNumber(meta.updatedAt) or 0
+				end
+			end
+		end
+	end
+
+	if lotsLadder and depthLadder then
+		if lotsAt >= depthAt then
+			return lotsLadder, "Browse"
+		end
+		return depthLadder, "Snapshot"
+	elseif lotsLadder then
+		return lotsLadder, "Browse"
+	elseif depthLadder then
+		return depthLadder, "Snapshot"
+	end
+	return nil, nil
+end
+
+local function computeDEMoatFromLadder(ladder, deValue, minProfitPerUnit)
+	if not safeTable(ladder) or not deValue or deValue <= 0 then return nil end
+	local minP = math.max(0, safeNumber(minProfitPerUnit) or 0)
+	local profitableQty, listedQty, totalCost = 0, 0, 0
+	local moatTiers = {}
+	local wallPrice = nil
+	for i = 1, #ladder do
+		local t = ladder[i]
+		if t and t.price and t.price > 0 and t.qty and t.qty > 0 then
+			listedQty = listedQty + t.qty
+			local unitProfit = deValue - t.price
+			if unitProfit > 0 and unitProfit >= minP then
+				profitableQty = profitableQty + t.qty
+				totalCost = totalCost + (t.price * t.qty)
+				if #moatTiers < 5 then
+					moatTiers[#moatTiers + 1] = {
+						price = t.price,
+						qty = t.qty,
+						profitPerUnit = unitProfit,
+					}
+				end
+			elseif not wallPrice then
+				wallPrice = t.price
+			end
+		end
+	end
+	if profitableQty <= 0 then
+		return nil, listedQty, wallPrice
+	end
+	local totalRevenue = deValue * profitableQty
+	local totalProfit = totalRevenue - totalCost
+	local avgBuyPrice = totalCost / profitableQty
+	return {
+		profitableQty = profitableQty,
+		listedQty = listedQty,
+		totalCost = totalCost,
+		totalRevenue = totalRevenue,
+		totalProfit = totalProfit,
+		avgBuyPrice = avgBuyPrice,
+		roiPct = totalCost > 0 and ((totalProfit / totalCost) * 100) or 0,
+		moatTiers = moatTiers,
+		wallPrice = wallPrice,
+	}, listedQty, wallPrice
+end
+
+local function applyDEMoatFields(deal, moat, fallbackMinPrice, fallbackQty, deValue, profitPerUnit)
+	if moat then
+		deal.profitableQty = moat.profitableQty
+		deal.listedQty = math.max(moat.listedQty or 0, safeNumber(fallbackQty) or 0, moat.profitableQty)
+		deal.quantity = moat.profitableQty
+		deal.buyQty = moat.profitableQty
+		deal.totalCost = moat.totalCost
+		deal.totalRevenue = moat.totalRevenue
+		deal.totalProfit = moat.totalProfit
+		deal.avgBuyPrice = moat.avgBuyPrice
+		deal.roiPct = moat.roiPct
+		deal.depthVerified = true
+		deal.moatTiers = moat.moatTiers
+		deal.wallPrice = moat.wallPrice
+		return
+	end
+	local count = math.max(1, math.floor(safeNumber(fallbackQty) or 1))
+	local minP = math.max(0, math.floor(safeNumber(fallbackMinPrice) or 0))
+	local rev = math.floor((safeNumber(deValue) or 0) * count + 0.5)
+	local cost = minP * count
+	deal.listedQty = count
+	deal.profitableQty = count
+	deal.quantity = count
+	deal.buyQty = count
+	deal.totalCost = cost
+	deal.totalRevenue = rev
+	deal.totalProfit = (safeNumber(profitPerUnit) or 0) * count
+	deal.avgBuyPrice = minP
+	deal.roiPct = (minP > 0) and (((safeNumber(profitPerUnit) or 0) / minP) * 100) or 0
+	deal.depthVerified = (count <= 1)
+	deal.moatTiers = nil
+	deal.wallPrice = nil
+end
+
+local function resolveDEEffectiveValues(rawNet, rawAsNet, rawGross, rawAsGross, useAS, applyAHCut)
+	local asMult = 1 + (ns.DE_ARCANE_SALVAGER_BONUS or 0.20)
+	local deNet = safeNumber(rawNet)
+	local deGross = safeNumber(rawGross)
+	if deNet == nil and deGross ~= nil then
+		deNet = math.floor(deGross * 0.95 + 0.5)
+	end
+	if deNet == nil then return nil end
+	deNet = math.floor(deNet)
+	if deGross == nil then
+		deGross = math.floor((deNet / 0.95) + 0.5)
+	else
+		deGross = math.floor(deGross + 0.5)
+	end
+	local deAsNet = safeNumber(rawAsNet)
+	if deAsNet ~= nil then
+		deAsNet = math.floor(deAsNet)
+	else
+		deAsNet = math.floor(deNet * asMult + 0.5)
+	end
+	local deAsGross = safeNumber(rawAsGross)
+	if deAsGross ~= nil then
+		deAsGross = math.floor(deAsGross + 0.5)
+	else
+		deAsGross = math.floor(deGross * asMult + 0.5)
+	end
+	local cutOn = (applyAHCut ~= false)
+	local deDisplayValue = useAS and deAsGross or deGross
+	local deValue
+	if cutOn then
+		deValue = useAS and deAsNet or deNet
+	else
+		deValue = deDisplayValue
+	end
+	return deValue, deDisplayValue, deNet, deAsNet, deGross, deAsGross
+end
+
+local function recalcDEDealMoatFromQueue(deal, useAS, minProfit, applyAHCut)
+	local queue = safeTable(deal.buyQueue)
+	if not queue then return 0 end
+	local minP = math.max(0, safeNumber(minProfit) or 0)
+	local cutOn
+	if applyAHCut ~= nil then
+		cutOn = (applyAHCut == true)
+	else
+		cutOn = (SE.GetSettings().deApplyAHCut ~= false)
+	end
+	local kept = {}
+	for i = 1, #queue do
+		local e = safeTable(queue[i])
+		if e then
+			local eHasOwnNet = (safeNumber(e.deNet) ~= nil)
+			local eBd = safeTable(e.deBreakdown)
+			local rawNet = eHasOwnNet and e.deNet or deal.deNet
+			local rawAsNet = e.deAsNet ~= nil and e.deAsNet or ((not eHasOwnNet) and deal.deAsNet or nil)
+			local rawGross = (eBd and eBd.grossCopper) or e.deGross or ((not eHasOwnNet) and ((safeTable(deal.deBreakdown) and deal.deBreakdown.grossCopper) or deal.deGross) or nil)
+			local rawAsGross = (eBd and eBd.asGrossCopper) or e.deAsGross or ((not eHasOwnNet) and ((safeTable(deal.deBreakdown) and deal.deBreakdown.asGrossCopper) or deal.deAsGross) or nil)
+			local eDeVal, eDispVal, eNet, eAsNet, eGross, eAsGross = resolveDEEffectiveValues(rawNet, rawAsNet, rawGross, rawAsGross, useAS, cutOn)
+			if eDeVal then
+				e.deNet = eNet
+				e.deAsNet = eAsNet
+				e.deGross = eGross
+				e.deAsGross = eAsGross
+				e.deDisplayValue = eDispVal
+				e.deValue = eDeVal
+				e.profitPerUnit = math.floor(eDeVal - e.unitBuyout + 0.5)
+				e.totalProfit = math.floor(eDeVal * e.quantity + 0.5) - e.buyoutAmount
+				if e.totalProfit > 0 and e.profitPerUnit >= minP then
+					kept[#kept + 1] = e
+				end
+			end
+		end
+	end
+	deal.buyQueue = kept
+	deal.listingCount = #kept
+	deal.remainingListings = #kept
+	if #kept <= 0 then
+		return 0
+	end
+	local profQty, totCost, totRev = 0, 0, 0
+	local tierMap, tiersOrder = {}, {}
+	for i = 1, #kept do
+		local e = kept[i]
+		profQty = profQty + e.quantity
+		totCost = totCost + e.buyoutAmount
+		totRev = totRev + math.floor((e.deValue or 0) * e.quantity + 0.5)
+		local pKey = e.unitBuyout
+		local tm = tierMap[pKey]
+		if not tm and #tiersOrder < 5 then
+			tm = { price = pKey, qty = 0, profitPerUnit = e.profitPerUnit or 0 }
+			tierMap[pKey] = tm
+			tiersOrder[#tiersOrder + 1] = tm
+		end
+		if tm then
+			tm.qty = tm.qty + e.quantity
+		end
+	end
+	local first = kept[1]
+	deal.auctionID = first.auctionID
+	deal.buyoutAmount = first.buyoutAmount
+	deal.nextBuyQty = first.quantity
+	deal.ahPrice = first.unitBuyout
+	deal.buyUnit = first.unitBuyout
+	deal.itemLink = first.itemLink or deal.itemLink
+	deal.quality = first.quality or deal.quality
+	deal.ilvl = first.ilvl or deal.ilvl
+	deal.deValue = first.deValue
+	deal.deDisplayValue = first.deDisplayValue or deal.deDisplayValue
+	deal.deNet = first.deNet or deal.deNet
+	deal.deAsNet = first.deAsNet or deal.deAsNet
+	deal.deGross = first.deGross or deal.deGross
+	deal.deAsGross = first.deAsGross or deal.deAsGross
+	deal.deMinNet = first.deMinNet or deal.deMinNet
+	deal.deMaxNet = first.deMaxNet or deal.deMaxNet
+	deal.dePrimarySummary = first.dePrimarySummary or deal.dePrimarySummary
+	deal.deBreakdown = first.deBreakdown or deal.deBreakdown
+	if first.isEstimated ~= nil then
+		deal.isEstimated = (first.isEstimated == true)
+		deal.estimateReason = first.estimateReason
+	end
+	deal.usedArcaneSalvager = useAS
+	deal.usedAHCut = cutOn
+	deal.linkVerified = (first.itemLink ~= nil)
+	deal.profitPerUnit = first.profitPerUnit
+	deal.profitableQty = profQty
+	deal.quantity = profQty
+	deal.buyQty = profQty
+	deal.listedQty = math.max(safeNumber(deal.listedQty) or 0, profQty)
+	deal.totalCost = totCost
+	deal.totalRevenue = totRev
+	deal.totalProfit = totRev - totCost
+	deal.avgBuyPrice = profQty > 0 and (totCost / profQty) or first.unitBuyout
+	deal.roiPct = totCost > 0 and (((totRev - totCost) / totCost) * 100) or 0
+	deal.depthVerified = true
+	deal.moatTiers = tiersOrder
+	return #kept
+end
+
+local function evaluateDECandidate(itemID, minPrice, qty, source, extra)
+	if minPrice <= 0 then return nil, false end
+	if type(ns.GetItemDEBreakdown) ~= "function" then return nil, false end
+	if extra and extra.isCommodity == true then return nil, false end
+	if type(ns.DE_NON_DISENCHANTABLE) == "table" and ns.DE_NON_DISENCHANTABLE[itemID] then
+		return nil, false
+	end
+	local preQual = extra and safeNumber(extra.quality) or nil
+	if preQual ~= nil and (preQual < 2 or preQual > 4) then
+		return nil, false
+	end
+
+	local itemLink = extra and safeString(extra.itemLink) or nil
+	local cItem = safeTable(_G.C_Item)
+	local instantFn = (cItem and cItem.GetItemInfoInstant) or _G.GetItemInfoInstant
+	if type(instantFn) == "function" then
+		local okInst, _, _, _, equipLoc, _, classID, subclassID = pcall(instantFn, itemLink or itemID)
+		if okInst then
+			local cid = safeNumber(classID)
+			local eloc = safeString(equipLoc)
+			local sid = safeNumber(subclassID)
+			if cid ~= nil and cid ~= 2 and cid ~= 4 then
+				return nil, false
+			end
+			if eloc and DE_EXCLUDED_LOCS[eloc] then
+				return nil, false
+			end
+			if cid == 2 and (sid == 20 or sid == 16) then return nil, false end
+			if cid == 4 and sid == 5 then return nil, false end
+		end
+	end
+
+	local itemKey = extra and safeTable(extra.itemKey) or nil
+	local hintIlvl = itemKey and safeNumber(itemKey.itemLevel) or nil
+	if hintIlvl and hintIlvl <= 0 then hintIlvl = nil end
+	local hintMeta = nil
+	if extra and safeTable(extra.hintMeta) then
+		hintMeta = extra.hintMeta
+	elseif preQual ~= nil or hintIlvl ~= nil then
+		local scratch = extra and safeTable(extra._hintScratch)
+		if scratch then
+			scratch.quality = preQual
+			scratch.ilvl = hintIlvl
+			hintMeta = scratch
+		else
+			hintMeta = { quality = preQual, ilvl = hintIlvl }
+		end
+	end
+
+	if minPrice > SE.MAX_DE_LOAD_PRICE then
+		local hasPacked = type(ns.DE_EQUIP_PACKED) == "table" and ns.DE_EQUIP_PACKED[itemID] ~= nil
+		local hasHintFull = hintMeta ~= nil
+			and safeNumber(hintMeta.quality) ~= nil
+			and safeNumber(hintMeta.ilvl) ~= nil
+			and hintMeta.ilvl > 0
+		if not hasPacked and not hasHintFull then
+			local hasStatic = type(ns.DE_ITEM_META) == "table" and ns.DE_ITEM_META[itemID] ~= nil
+			local db = safeTable(_G.MerchantMasterDB)
+			local mc = db and safeTable(db.deItemMetaCache)
+			local hasDbMeta = mc and mc[itemID] ~= nil
+			if not hasStatic and not hasDbMeta then
+				local hasCachedInfo = (itemLink and readItemInfoSafe(itemLink) ~= nil) or (readItemInfoSafe(itemID) ~= nil)
+				if not hasCachedInfo then
+					return nil, false
+				end
+			end
+		end
+	end
+
+	local settings = (extra and extra.settings) or SE.GetSettings()
+	local minProfit = (extra and safeNumber(extra.minProfitCopper))
+	if minProfit == nil then minProfit = settings.deMinProfitCopper or 0 end
+	local useAS
+	if extra and extra.useArcaneSalvager ~= nil then
+		useAS = (extra.useArcaneSalvager == true)
+	else
+		useAS = (settings.deUseArcaneSalvager == true)
+	end
+	local applyAHCut
+	if extra and extra.applyAHCut ~= nil then
+		applyAHCut = (extra.applyAHCut == true)
+	else
+		applyAHCut = (settings.deApplyAHCut ~= false)
+	end
+	local statsBucket = extra and safeTable(extra.statsBucket) or nil
+
+	-- Stage 1 (Ultra-Light Check): O(1) fast bucket EV pre-filter (zero breakdown/moat work on unprofitable gear)
+	local usedStage1 = false
+	local countedEstimated = false
+	if ns.GetItemDEBreakdown == ns._defaultGetItemDEBreakdown
+		and type(ns.GetFastDEExpectedValue) == "function"
+		and type(ns.IsItemDisenchantable) == "function" then
+		local okDE, errDE, meta = ns.IsItemDisenchantable(itemID, itemLink, hintMeta)
+		if errDE == "uncached" then
+			return nil, true
+		end
+		if not okDE or not safeTable(meta) then
+			return nil, false
+		end
+		usedStage1 = true
+		if statsBucket then
+			statsBucket.equipScanned = (statsBucket.equipScanned or 0) + 1
+		end
+		local hasObs = (type(ns.HasDEObservations) == "function")
+			and (ns.HasDEObservations(itemID, meta.classID, meta.quality, meta.ilvl) == true)
+		if not hasObs then
+			local fastVal, fastEst = ns.GetFastDEExpectedValue(meta.classID, meta.quality, meta.ilvl, useAS, applyAHCut)
+			local fv = safeNumber(fastVal)
+			if fv == nil then
+				return nil, false
+			end
+			if fastEst == true and statsBucket then
+				statsBucket.estimated = (statsBucket.estimated or 0) + 1
+				countedEstimated = true
+			end
+			if fv <= minPrice or (fv - minPrice) < minProfit then
+				return nil, false
+			end
+		end
+	end
+
+	-- Stage 2 (Full Breakdown + Display Meta + Buy Moat): profitable hits or mocked/fallback breakdown path
+	local bd, err = ns.GetItemDEBreakdown(itemID, itemLink, true, hintMeta)
+	if err == "uncached" then
+		return nil, true
+	end
+	if not bd or bd.netCopper == nil then
+		return nil, false
+	end
+
+	if not usedStage1 and statsBucket then
+		statsBucket.equipScanned = (statsBucket.equipScanned or 0) + 1
+	end
+	if bd.isEstimated == true and not countedEstimated and statsBucket then
+		statsBucket.estimated = (statsBucket.estimated or 0) + 1
+	end
+
+	local deValue, deDisplayValue, deNet, deAsNet, deGross, deAsGross = resolveDEEffectiveValues(
+		bd.netCopper, bd.asNetCopper, bd.grossCopper, bd.asGrossCopper, useAS, applyAHCut
+	)
+	if not deValue or deValue <= minPrice then
+		return nil, false
+	end
+	local profitPerUnit = deValue - minPrice
+	if profitPerUnit < minProfit then
+		return nil, false
+	end
+
+	local count = math.max(1, math.floor(safeNumber(qty) or 1))
+	local itemName, itemIcon, itemQuality, resolvedLink = getItemDisplayMeta(itemID, itemLink)
+	local idKey = makeDEDealKey(itemID, itemKey)
+	local econ = activeEconomy(extra and extra.econ)
+	local isScaledVariant = itemKey ~= nil and ((safeNumber(itemKey.itemLevel) or 0) ~= 0 or (safeNumber(itemKey.itemSuffix) or 0) ~= 0)
+	local moat = nil
+	if not isScaledVariant then
+		local ladder = getItemPriceLadder(itemID, econ)
+		if ladder and (not ladder[1] or ladder[1].price >= minPrice) then
+			moat = computeDEMoatFromLadder(ladder, deValue, minProfit)
+		end
+	end
+
+	local deal = {
+		idKey = idKey,
+		kind = "item",
+		mode = "de",
+		itemID = itemID,
+		itemKey = itemKey,
+		itemName = itemName,
+		icon = itemIcon,
+		quality = itemQuality or bd.quality or preQual,
+		ilvl = bd.ilvl,
+		className = bd.className,
+		itemLink = itemLink or resolvedLink,
+		isCommodity = false,
+		ahPrice = minPrice,
+		buyUnit = minPrice,
+		deValue = deValue,
+		deDisplayValue = deDisplayValue,
+		deNet = deNet,
+		deAsNet = deAsNet,
+		deGross = deGross,
+		deAsGross = deAsGross,
+		deMinNet = bd.minNetCopper,
+		deMaxNet = bd.maxNetCopper,
+		dePrimarySummary = bd.primarySummary or "",
+		deBreakdown = bd,
+		isEstimated = (bd.isEstimated == true),
+		estimateReason = bd.estimateReason,
+		usedArcaneSalvager = useAS,
+		usedAHCut = applyAHCut,
+		linkVerified = (itemLink ~= nil),
+		profitPerUnit = profitPerUnit,
+		source = source or "Snapshot",
+		status = "unverified",
+		foundAt = nowMono(),
+	}
+	applyDEMoatFields(deal, moat, minPrice, count, deValue, profitPerUnit)
+	return deal, false
+end
+
 function SE.IngestBrowseBatch(rows, econOverride, opts)
 	local list = safeTable(rows)
 	if not list then return 0 end
@@ -2428,6 +3099,10 @@ function SE.IngestBrowseBatch(rows, econOverride, opts)
 	local autoVendor = settings.vendorAutoFromBrowse ~= false
 	if optsTbl and optsTbl.autoVendor ~= nil then
 		autoVendor = (optsTbl.autoVendor == true)
+	end
+	local autoDE = settings.deAutoFromBrowse ~= false
+	if optsTbl and optsTbl.autoDE ~= nil then
+		autoDE = (optsTbl.autoDE == true)
 	end
 	local minProfit = (optsTbl and safeNumber(optsTbl.minProfitCopper)) or settings.vendorMinProfitCopper or 0
 	local includeComm = settings.vendorIncludeCommodities ~= false
@@ -2442,8 +3117,37 @@ function SE.IngestBrowseBatch(rows, econOverride, opts)
 		itemLink = nil,
 		isCommodity = nil,
 	}
+	local deUseAS = (settings.deUseArcaneSalvager == true)
+	if optsTbl and optsTbl.deUseArcaneSalvager ~= nil then
+		deUseAS = (optsTbl.deUseArcaneSalvager == true)
+	elseif optsTbl and optsTbl.useArcaneSalvager ~= nil then
+		deUseAS = (optsTbl.useArcaneSalvager == true)
+	end
+	local deApplyCut = (settings.deApplyAHCut ~= false)
+	if optsTbl and optsTbl.deApplyAHCut ~= nil then
+		deApplyCut = (optsTbl.deApplyAHCut == true)
+	elseif optsTbl and optsTbl.applyAHCut ~= nil then
+		deApplyCut = (optsTbl.applyAHCut == true)
+	end
+	local deExtra = {
+		settings = settings,
+		econ = econ,
+		minProfitCopper = (optsTbl and safeNumber(optsTbl.deMinProfitCopper)) or settings.deMinProfitCopper or 0,
+		useArcaneSalvager = deUseAS,
+		applyAHCut = deApplyCut,
+		itemKey = nil,
+		itemLink = nil,
+		quality = nil,
+		isCommodity = nil,
+		statsBucket = autoDE and SE.deScanStats or nil,
+		_hintScratch = {},
+	}
+	if autoDE and (SE.deScanStats.source == nil or SE.deScanStats.source == "Snapshot") then
+		SE.deScanStats.source = "Browse"
+	end
 
 	local flagged = 0
+	local deFlagged = 0
 	local validSeen = 0
 	for i = 1, #list do
 		local row = safeTable(list[i])
@@ -2458,6 +3162,9 @@ function SE.IngestBrowseBatch(rows, econOverride, opts)
 
 			if itemID and itemID > 0 and minPrice and minPrice > 0 then
 				validSeen = validSeen + 1
+				if autoDE then
+					SE.deScanStats.totalSeen = (SE.deScanStats.totalSeen or 0) + 1
+				end
 				local id = math.floor(itemID)
 				local p = math.floor(minPrice)
 				local cacheKey = makeItemKeySignature(id, itemKey) or id
@@ -2493,8 +3200,36 @@ function SE.IngestBrowseBatch(rows, econOverride, opts)
 						})
 					end
 				end
+				if autoDE and isComm ~= true then
+					deExtra.itemKey = itemKey
+					deExtra.itemLink = itemLink
+					deExtra.quality = quality
+					deExtra.isCommodity = isComm
+					local deDeal, deUncached = evaluateDECandidate(id, p, totalQty, "Browse", deExtra)
+					if deDeal then
+						upsertDEDeal(deDeal)
+						deFlagged = deFlagged + 1
+					elseif deUncached then
+						queueUnresolvedDE(cacheKey, id, {
+							itemID = id,
+							itemKey = itemKey,
+							minPrice = p,
+							totalQuantity = totalQty,
+							itemLink = itemLink,
+							quality = quality,
+							isCommodity = isComm,
+							source = "Browse",
+						})
+					end
+				end
 			end
 		end
+	end
+
+	if autoDE and validSeen > 0 then
+		SE.deScanStats.uncachedPending = countPendingDE()
+		SE.deScanStats.profitable = #SE.deDeals
+		SE.deScanStats.lastAt = now
 	end
 
 	if SE.scan.active and SE.scan.awaitingBrowse and validSeen > 0 then
@@ -2507,7 +3242,10 @@ function SE.IngestBrowseBatch(rows, econOverride, opts)
 		-- Defer sortVendorDeals() + notify("vendor_deals") until OnBrowseScanComplete (B5)
 		vendorDealsDirty = true
 	end
-	return flagged
+	if deFlagged > 0 then
+		deDealsDirty = true
+	end
+	return flagged, deFlagged
 end
 
 -- Alias matching MarketScan Wave B hook signature
@@ -2524,10 +3262,17 @@ function SE.OnBrowseScanComplete(econOverride, partial)
 	end
 	SE.scan.browseStartMono = nil
 	flushDeferredVendorDeals()
+	flushDeferredDEDeals()
+	SE.deScanStats.uncachedPending = countPendingDE()
+	SE.deScanStats.profitable = #SE.deDeals
+	if (SE.deScanStats.totalSeen or 0) > 0 or (SE.deScanStats.equipScanned or 0) > 0 or #SE.deDeals > 0 then
+		SE.deScanStats.lastAt = completeAt
+	end
 	notify("browse_complete", {
 		economy = econ,
 		partial = isPartial,
 		vendorCount = #SE.vendorDeals,
+		deCount = #SE.deDeals,
 	})
 	-- Stage 1 -> Stage 2 automatic transition: drill ONLY live browse hits from this sweep
 	if SE.scan.active and SE.scan.awaitingBrowse then
@@ -2555,6 +3300,7 @@ end
 function SE.OnBrowseScanCancelled(econOverride, partial)
 	SE.scan.browseStartMono = nil
 	flushDeferredVendorDeals()
+	flushDeferredDEDeals()
 	if SE.scan.active and SE.scan.awaitingBrowse then
 		SE.scan.awaitingBrowse = false
 		SE.scan.startedBrowse = false
@@ -2593,17 +3339,32 @@ function SE.ScanSnapshotForVendorDeals(econOverride, opts)
 	}
 
 	local found = 0
+	local seenIDs = {}
+	local db = safeTable(_G.MerchantMasterDB)
+	local ahRoot = db and safeTable(db.ahPrices)
+	local ahEcon = ahRoot and safeTable(ahRoot[econ])
 	for idKey, rec in pairs(snapItems) do
 		local id = safeNumber(idKey)
 		local rt = safeTable(rec)
 		if id and id > 0 and rt then
+			local intId = math.floor(id)
+			seenIDs[intId] = true
 			local minP = safeNumber(rt.minBuyout)
 			local snapQty = safeNumber(rt.qty) or 0
+			local snapAt = safeNumber(rt.updatedAt) or 0
+			local srcLabel = "Snapshot"
+			local ahRec = ahEcon and safeTable(ahEcon[intId]) or nil
+			if ahRec and (safeNumber(ahRec.at) or 0) > snapAt then
+				if ahRec.absent == true or not safeNumber(ahRec.price) or ahRec.price <= 0 or (safeNumber(ahRec.qty) or 0) <= 0 then
+					minP, snapQty = nil, 0
+				else
+					minP, snapQty, srcLabel = ahRec.price, ahRec.qty, "Live AH"
+				end
+			end
 			if minP and minP > 0 and snapQty > 0 then
-				local intId = math.floor(id)
 				local p = math.floor(minP)
 				local qty = math.max(1, math.floor(snapQty))
-				local deal, uncached = evaluateVendorCandidate(intId, p, qty, "Snapshot", vendorExtra)
+				local deal, uncached = evaluateVendorCandidate(intId, p, qty, srcLabel, vendorExtra)
 				if deal then
 					upsertVendorDeal(deal)
 					found = found + 1
@@ -2612,7 +3373,30 @@ function SE.ScanSnapshotForVendorDeals(econOverride, opts)
 						itemID = intId,
 						minPrice = p,
 						totalQuantity = qty,
-						source = "Snapshot",
+						source = srcLabel,
+					})
+				end
+			end
+		end
+	end
+	if ahEcon then
+		for idKey, rawRec in pairs(ahEcon) do
+			local id = type(idKey) == "number" and safeNumber(idKey) or nil
+			local intId = id and id > 0 and math.floor(id) or nil
+			local ahRec = intId and not seenIDs[intId] and safeTable(rawRec) or nil
+			if ahRec and not ahRec.absent and safeNumber(ahRec.price) and ahRec.price > 0 and (safeNumber(ahRec.qty) or 0) > 0 then
+				local p = math.floor(ahRec.price)
+				local qty = math.max(1, math.floor(ahRec.qty))
+				local deal, uncached = evaluateVendorCandidate(intId, p, qty, "Live AH", vendorExtra)
+				if deal then
+					upsertVendorDeal(deal)
+					found = found + 1
+				elseif uncached then
+					queueUnresolvedVendor(intId, intId, {
+						itemID = intId,
+						minPrice = p,
+						totalQuantity = qty,
+						source = "Live AH",
 					})
 				end
 			end
@@ -2630,17 +3414,337 @@ function SE.GetVendorDeals()
 	return SE.vendorDeals
 end
 
-function SE.ClearVendorDeals()
-	if SE.purchase and SE.purchase.mode == "vendor" then
-		SE.CancelActivePurchase("Cleared vendor deals")
+local function wipeModeDeals(modeKey)
+	if SE.purchase and SE.purchase.mode == modeKey then
+		SE.CancelActivePurchase(modeKey == "de" and "Cleared disenchant deals" or "Cleared vendor deals")
 	end
-	SE.pendingCheck = nil
-	SE.vendorDeals = {}
-	SE.vendorDealsByKey = {}
-	SE.unresolvedVendor = {}
-	unresolvedVendorByID = {}
-	vendorDealsDirty = false
-	notify("vendor_deals", SE.vendorDeals)
+	if SE.pendingCheck and SE.pendingCheck.mode == modeKey then
+		SE.pendingCheck = nil
+	end
+	if modeKey == "de" then
+		SE.deDeals = {}
+		SE.deDealsByKey = {}
+		SE.unresolvedDE = {}
+		unresolvedDEByID = {}
+		deDealsDirty = false
+		resetDEScanStats(nil, false)
+		notify("de_deals", SE.deDeals)
+	else
+		SE.vendorDeals = {}
+		SE.vendorDealsByKey = {}
+		SE.unresolvedVendor = {}
+		unresolvedVendorByID = {}
+		vendorDealsDirty = false
+		notify("vendor_deals", SE.vendorDeals)
+	end
+end
+
+function SE.ClearVendorDeals()
+	wipeModeDeals("vendor")
+end
+
+function SE.ScanSnapshotForDEDeals(econOverride, opts)
+	opts = safeTable(opts) or {}
+	local econ = activeEconomy(econOverride or opts.econ)
+	local snapItems = hydrateSnapshotItems(econ)
+	if not snapItems then
+		setStatusText("No snapshot data available for disenchant scan.")
+		notify("de_status", { scope = "de", message = "No snapshot data available for disenchant scan." })
+		return SE.deDeals
+	end
+
+	if opts.append ~= true then
+		clearStaleDEDeals()
+		resetDEScanStats("Snapshot", true)
+	elseif SE.deScanStats.source == nil then
+		SE.deScanStats.source = "Snapshot"
+	end
+
+	local settings = SE.GetSettings()
+	local minProfit = safeNumber(opts.deMinProfitCopper)
+	if minProfit == nil then minProfit = safeNumber(opts.minProfitCopper) end
+	if minProfit == nil then minProfit = safeNumber(opts.minProfit) end
+	if minProfit == nil then minProfit = settings.deMinProfitCopper or 0 end
+	local useAS = settings.deUseArcaneSalvager == true
+	if opts.deUseArcaneSalvager ~= nil then
+		useAS = (opts.deUseArcaneSalvager == true)
+	elseif opts.useArcaneSalvager ~= nil then
+		useAS = (opts.useArcaneSalvager == true)
+	end
+	local applyAHCut = (settings.deApplyAHCut ~= false)
+	if opts.deApplyAHCut ~= nil then
+		applyAHCut = (opts.deApplyAHCut == true)
+	elseif opts.applyAHCut ~= nil then
+		applyAHCut = (opts.applyAHCut == true)
+	end
+	local deExtra = {
+		settings = settings,
+		econ = econ,
+		minProfitCopper = minProfit,
+		useArcaneSalvager = useAS,
+		applyAHCut = applyAHCut,
+		statsBucket = SE.deScanStats,
+		_hintScratch = {},
+	}
+
+	local found = 0
+	local seenIDs = {}
+	local db = safeTable(_G.MerchantMasterDB)
+	local ahRoot = db and safeTable(db.ahPrices)
+	local ahEcon = ahRoot and safeTable(ahRoot[econ])
+	for idKey, rec in pairs(snapItems) do
+		local id = safeNumber(idKey)
+		local rt = safeTable(rec)
+		if id and id > 0 and rt then
+			local intId = math.floor(id)
+			seenIDs[intId] = true
+			local minP = safeNumber(rt.minBuyout)
+			local snapQty = safeNumber(rt.qty) or 0
+			local snapAt = safeNumber(rt.updatedAt) or 0
+			local srcLabel = "Snapshot"
+			local ahRec = ahEcon and safeTable(ahEcon[intId]) or nil
+			if ahRec and (safeNumber(ahRec.at) or 0) > snapAt then
+				if ahRec.absent == true or not safeNumber(ahRec.price) or ahRec.price <= 0 or (safeNumber(ahRec.qty) or 0) <= 0 then
+					minP, snapQty = nil, 0
+				else
+					minP, snapQty, srcLabel = ahRec.price, ahRec.qty, "Live AH"
+				end
+			end
+			if minP and minP > 0 and snapQty > 0 then
+				SE.deScanStats.totalSeen = (SE.deScanStats.totalSeen or 0) + 1
+				local p = math.floor(minP)
+				local qty = math.max(1, math.floor(snapQty))
+				local deal, uncached = evaluateDECandidate(intId, p, qty, srcLabel, deExtra)
+				if deal then
+					upsertDEDeal(deal)
+					found = found + 1
+				elseif uncached then
+					queueUnresolvedDE(intId, intId, {
+						itemID = intId,
+						minPrice = p,
+						totalQuantity = qty,
+						source = srcLabel,
+					})
+				end
+			end
+		end
+	end
+	if ahEcon then
+		for idKey, rawRec in pairs(ahEcon) do
+			local id = type(idKey) == "number" and safeNumber(idKey) or nil
+			local intId = id and id > 0 and math.floor(id) or nil
+			local ahRec = intId and not seenIDs[intId] and safeTable(rawRec) or nil
+			if ahRec and not ahRec.absent and safeNumber(ahRec.price) and ahRec.price > 0 and (safeNumber(ahRec.qty) or 0) > 0 then
+				SE.deScanStats.totalSeen = (SE.deScanStats.totalSeen or 0) + 1
+				local p = math.floor(ahRec.price)
+				local qty = math.max(1, math.floor(ahRec.qty))
+				local deal, uncached = evaluateDECandidate(intId, p, qty, "Live AH", deExtra)
+				if deal then
+					upsertDEDeal(deal)
+					found = found + 1
+				elseif uncached then
+					queueUnresolvedDE(intId, intId, {
+						itemID = intId,
+						minPrice = p,
+						totalQuantity = qty,
+						source = "Live AH",
+					})
+				end
+			end
+		end
+	end
+
+	deDealsDirty = false
+	sortDEDeals()
+	SE.deScanStats.uncachedPending = countPendingDE()
+	SE.deScanStats.profitable = #SE.deDeals
+	SE.deScanStats.lastAt = nowMono()
+	local msg = string.format("Disenchant snapshot scan: %d profitable items found.", found)
+	setStatusText(msg)
+	notify("de_status", { scope = "de", message = msg })
+	notify("de_deals", SE.deDeals)
+	return SE.deDeals
+end
+
+function SE.StartDEEquipmentBrowseScan(opts)
+	if not isAHOpen() then
+		local msg = "Open the Auction House before scanning equipment."
+		setStatusText(msg)
+		notify("de_status", { scope = "de", message = msg, code = "ah_closed" })
+		return false, "ah_closed"
+	end
+	if isCartBuyerActive(true) then
+		local msg = "Finish or pause Cart Buyer before scanning equipment."
+		setStatusText(msg)
+		notify("de_status", { scope = "de", message = msg, code = "cart_buyer_busy" })
+		return false, "cart_buyer_busy"
+	end
+
+	local ms = safeTable(ns.MarketScan)
+	local starter = nil
+	local usedEquipmentScan = false
+	if ms and type(ms.StartEquipmentBrowseScan) == "function" then
+		starter = ms.StartEquipmentBrowseScan
+		usedEquipmentScan = true
+	elseif ms and type(ms.EnsureBrowseRunning) == "function" then
+		starter = ms.EnsureBrowseRunning
+	end
+	if not starter then
+		local msg = "MarketScan browse scanner is unavailable."
+		setStatusText(msg)
+		notify("de_status", { scope = "de", message = msg, code = "no_scanner" })
+		return false, "no_scanner"
+	end
+
+	local alreadyEquipRunning = false
+	if ms and type(ms.GetState) == "function" then
+		local okS, st = pcall(ms.GetState)
+		local stTbl = okS and safeTable(st) or nil
+		if stTbl and safeBool(stTbl.active) == true
+			and (safeBool(stTbl.equipmentOnly) == true or SE.deScanStats.source == "Equipment Browse") then
+			alreadyEquipRunning = true
+		end
+	end
+	if not alreadyEquipRunning then
+		clearStaleDEDeals()
+		resetDEScanStats("Equipment Browse", true)
+	end
+	local startMsg = "Scanning all AH equipment for disenchant deals..."
+	setStatusText(startMsg)
+	notify("de_status", { scope = "de", message = startMsg })
+
+	local okCall, started, err
+	if usedEquipmentScan then
+		okCall, started, err = pcall(starter, opts)
+	else
+		okCall, started, err = pcall(starter)
+	end
+	if not okCall or started == false then
+		local errCode = safeString(err) or "browse_failed"
+		local failMsg = "Could not start AH equipment scan."
+		setStatusText(failMsg)
+		notify("de_status", { scope = "de", message = failMsg, code = errCode })
+		return false, errCode
+	end
+	if safeString(err) == "already_active" then
+		return true, "already_active"
+	end
+	return true, usedEquipmentScan and "equipment_browse" or "full_browse"
+end
+
+function SE.RefreshDEDealsFromCache(econOverride, opts)
+	opts = safeTable(opts) or {}
+	local econ = activeEconomy(econOverride or opts.econ)
+	local settings = SE.GetSettings()
+	local useAS = (settings.deUseArcaneSalvager == true)
+	if opts.deUseArcaneSalvager ~= nil then
+		useAS = (opts.deUseArcaneSalvager == true)
+	elseif opts.useArcaneSalvager ~= nil then
+		useAS = (opts.useArcaneSalvager == true)
+	end
+	local applyAHCut = (settings.deApplyAHCut ~= false)
+	if opts.deApplyAHCut ~= nil then
+		applyAHCut = (opts.deApplyAHCut == true)
+	elseif opts.applyAHCut ~= nil then
+		applyAHCut = (opts.applyAHCut == true)
+	end
+	local minProfit = safeNumber(opts.minProfitCopper)
+	if minProfit == nil then minProfit = safeNumber(opts.deMinProfitCopper) end
+	if minProfit == nil then minProfit = settings.deMinProfitCopper or 0 end
+
+	-- Recompute DE values and Buy Moat cleanly on existing deals first (preserving Snapshot / verified rows)
+	for i = #SE.deDeals, 1, -1 do
+		local d = SE.deDeals[i]
+		local inFlight = (SE.purchase and SE.purchase.deal == d) or (SE.pendingCheck and SE.pendingCheck.deal == d)
+		if d and not inFlight and d.status ~= "bought" then
+			if safeTable(d.buyQueue) and #d.buyQueue > 0 then
+				local left = recalcDEDealMoatFromQueue(d, useAS, minProfit, applyAHCut)
+				if left <= 0 and d.verifiedAt == nil then
+					removeModeDealByKey(SE.deDeals, SE.deDealsByKey, d.idKey)
+				end
+			else
+				local bd = safeTable(d.deBreakdown)
+				local deValue, deDisplayValue, deNet, deAsNet, deGross, deAsGross = resolveDEEffectiveValues(
+					d.deNet, d.deAsNet,
+					(bd and bd.grossCopper) or d.deGross,
+					(bd and bd.asGrossCopper) or d.deAsGross,
+					useAS, applyAHCut
+				)
+				if deValue then
+					local qty = math.max(1, math.floor(safeNumber(d.listedQty) or safeNumber(d.quantity) or 1))
+					local ahP = safeNumber(d.buyUnit) or safeNumber(d.ahPrice) or 0
+					d.deNet = deNet
+					d.deAsNet = deAsNet
+					d.deGross = deGross
+					d.deAsGross = deAsGross
+					d.deDisplayValue = deDisplayValue
+					d.deValue = deValue
+					d.usedArcaneSalvager = useAS
+					d.usedAHCut = applyAHCut
+					d.profitPerUnit = deValue - ahP
+					local ik = safeTable(d.itemKey)
+					local isScaled = ik ~= nil and ((safeNumber(ik.itemLevel) or 0) ~= 0 or (safeNumber(ik.itemSuffix) or 0) ~= 0)
+					local moat = nil
+					if not isScaled then
+						local ladder = getItemPriceLadder(d.itemID, econ)
+						if ladder and (not ladder[1] or ladder[1].price >= ahP) then
+							moat = computeDEMoatFromLadder(ladder, deValue, minProfit)
+						end
+					end
+					applyDEMoatFields(d, moat, ahP, qty, deValue, d.profitPerUnit)
+					if d.profitPerUnit <= 0 and d.verifiedAt == nil then
+						removeModeDealByKey(SE.deDeals, SE.deDealsByKey, d.idKey)
+					end
+				end
+			end
+		end
+	end
+
+	-- Also promote any browseCache items that became profitable with the updated threshold / AS bonus / AH cut
+	local deExtra = {
+		settings = settings,
+		econ = econ,
+		minProfitCopper = minProfit,
+		useArcaneSalvager = useAS,
+		applyAHCut = applyAHCut,
+		itemKey = nil,
+		itemLink = nil,
+		quality = nil,
+		isCommodity = nil,
+		_hintScratch = {},
+	}
+	for ck, cached in pairs(SE.browseCache) do
+		local bt = safeTable(cached)
+		if bt and bt.isCommodity ~= true and (bt.economy == nil or bt.economy == econ)
+			and safeNumber(bt.itemID) and safeNumber(bt.minPrice) and bt.minPrice > 0 then
+			local existingKey = makeDEDealKey(bt.itemID, bt.itemKey)
+			if not SE.deDealsByKey[existingKey] then
+				deExtra.itemKey = bt.itemKey
+				deExtra.itemLink = bt.itemLink
+				deExtra.quality = bt.quality
+				deExtra.isCommodity = bt.isCommodity
+				local deal = evaluateDECandidate(bt.itemID, bt.minPrice, bt.totalQuantity or 1, "Browse", deExtra)
+				if deal then
+					upsertDEDeal(deal)
+				end
+			end
+		end
+	end
+
+	deDealsDirty = false
+	sortDEDeals()
+	SE.deScanStats.uncachedPending = countPendingDE()
+	SE.deScanStats.profitable = #SE.deDeals
+	notify("de_deals", SE.deDeals)
+	return SE.deDeals
+end
+
+function SE.GetDEDeals()
+	return SE.deDeals
+end
+
+function SE.ClearDEDeals()
+	wipeModeDeals("de")
 end
 
 function SE.DismissDeal(deal)
@@ -2656,6 +3760,17 @@ function SE.DismissDeal(deal)
 			end
 		end
 		notify("vendor_deals", SE.vendorDeals)
+		return true
+	elseif deal.mode == "de" then
+		SE.deDealsByKey[deal.idKey] = nil
+		for i = #SE.deDeals, 1, -1 do
+			if SE.deDeals[i] == deal or SE.deDeals[i].idKey == deal.idKey then
+				table.remove(SE.deDeals, i)
+				break
+			end
+		end
+		SE.deScanStats.profitable = #SE.deDeals
+		notify("de_deals", SE.deDeals)
 		return true
 	else
 		SE.gapDealsByKey[deal.idKey] = nil
@@ -2686,7 +3801,7 @@ local function abortPurchase(reason, cancelServer)
 	SE.purchase = nil
 	releaseSniperChannel()
 	if p.deal then
-		if p.deal.mode == "vendor" and p.deal.status ~= "bought" then
+		if (p.deal.mode == "vendor" or p.deal.mode == "de") and p.deal.status ~= "bought" then
 			p.deal.status = (p.deal.verifiedAt and "ready_to_buy") or "unverified"
 		elseif p.deal.status ~= "bought" then
 			p.deal.status = "ready"
@@ -3013,8 +4128,145 @@ local function applyVendorCommodityTiers(deal, tiers)
 	end
 end
 
--- Click 1 for Vendor Sniper: live exact search to fetch fresh auctionID + itemLink + buyout
-function SE.StartVendorCheck(deal)
+local function applyDEItemRows(deal, rows)
+	local settings = SE.GetSettings()
+	local minProfit = settings.deMinProfitCopper or 0
+	local useAS = (settings.deUseArcaneSalvager == true)
+	local applyAHCut = (settings.deApplyAHCut ~= false)
+	local queue = {}
+	local listedQty = 0
+	local wallPrice = nil
+	local list = safeTable(rows) or {}
+	local rowHintScratch = {}
+	local dealKey = safeTable(deal.itemKey)
+	local dealKeyIlvl = dealKey and safeNumber(dealKey.itemLevel) or nil
+	if dealKeyIlvl and dealKeyIlvl <= 0 then dealKeyIlvl = nil end
+	local dealQual = safeNumber(deal.quality)
+
+	for i = 1, #list do
+		local info = safeTable(list[i])
+		if info then
+			local owned = (safeBool(info.containsOwnerItem) == true)
+				or (safeBool(info.containsAccountItem) == true)
+				or ((safeNumber(info.numOwnerItems) or 0) > 0)
+			local buyout = safeNumber(info.buyoutAmount)
+			local auctionID = safeNumber(info.auctionID)
+			if not owned and buyout and buyout > 0 and auctionID then
+				buyout = math.floor(buyout)
+				local qty = math.max(1, math.floor(safeNumber(info.quantity) or 1))
+				local unitBuyout = math.floor(buyout / qty)
+				listedQty = listedQty + qty
+				local liveLink = safeString(info.itemLink)
+				local evalLink = liveLink or deal.itemLink
+				local rowKey = safeTable(info.itemKey)
+				local rowIlvl = rowKey and safeNumber(rowKey.itemLevel) or nil
+				if rowIlvl and rowIlvl <= 0 then rowIlvl = nil end
+				rowIlvl = rowIlvl or dealKeyIlvl
+				local rowQual = safeNumber(info.quality) or dealQual
+				local rowHint = nil
+				if rowQual ~= nil or rowIlvl ~= nil then
+					rowHintScratch.quality = rowQual
+					rowHintScratch.ilvl = rowIlvl
+					rowHint = rowHintScratch
+				end
+				local bd, bdErr = nil, nil
+				if type(ns.GetItemDEBreakdown) == "function" then
+					bd, bdErr = ns.GetItemDEBreakdown(deal.itemID, evalLink, true, rowHint)
+				end
+				local liveDE, deDisplayValue, deNet, deAsNet, deGross, deAsGross, deMinNet, deMaxNet, deSummary
+				local deQuality, deIlvl
+				if bd and bd.netCopper ~= nil then
+					liveDE, deDisplayValue, deNet, deAsNet, deGross, deAsGross = resolveDEEffectiveValues(
+						bd.netCopper, bd.asNetCopper, bd.grossCopper, bd.asGrossCopper, useAS, applyAHCut
+					)
+					deMinNet = bd.minNetCopper
+					deMaxNet = bd.maxNetCopper
+					deSummary = bd.primarySummary or deal.dePrimarySummary or ""
+					deQuality = bd.quality
+					deIlvl = bd.ilvl
+				elseif (bdErr == "uncached" or bdErr == nil) and safeNumber(deal.deNet) then
+					local dealBd = safeTable(deal.deBreakdown)
+					liveDE, deDisplayValue, deNet, deAsNet, deGross, deAsGross = resolveDEEffectiveValues(
+						deal.deNet, deal.deAsNet,
+						(dealBd and dealBd.grossCopper) or deal.deGross,
+						(dealBd and dealBd.asGrossCopper) or deal.deAsGross,
+						useAS, applyAHCut
+					)
+					deMinNet = deal.deMinNet
+					deMaxNet = deal.deMaxNet
+					deSummary = deal.dePrimarySummary or ""
+					bd = deal.deBreakdown
+				end
+				local totalProfit = liveDE and (math.floor(liveDE * qty + 0.5) - buyout) or -1
+				local profitPerUnit = liveDE and math.floor(liveDE - unitBuyout + 0.5) or -1
+				if liveDE and (liveDE * qty) > buyout and totalProfit >= minProfit and profitPerUnit >= minProfit then
+					queue[#queue + 1] = {
+						auctionID = auctionID,
+						buyoutAmount = buyout,
+						quantity = qty,
+						unitBuyout = unitBuyout,
+						itemLink = liveLink,
+						deValue = liveDE,
+						deDisplayValue = deDisplayValue,
+						deNet = deNet,
+						deAsNet = deAsNet,
+						deGross = deGross,
+						deAsGross = deAsGross,
+						deMinNet = deMinNet,
+						deMaxNet = deMaxNet,
+						dePrimarySummary = deSummary,
+						deBreakdown = bd,
+						isEstimated = (bd and bd.isEstimated == true) or false,
+						estimateReason = bd and bd.estimateReason or nil,
+						quality = deQuality,
+						ilvl = deIlvl,
+						profitPerUnit = profitPerUnit,
+						totalProfit = totalProfit,
+					}
+				elseif not wallPrice or unitBuyout < wallPrice then
+					wallPrice = unitBuyout
+				end
+			end
+		end
+	end
+
+	table.sort(queue, function(a, b)
+		if a.unitBuyout ~= b.unitBuyout then return a.unitBuyout < b.unitBuyout end
+		if a.buyoutAmount ~= b.buyoutAmount then return a.buyoutAmount < b.buyoutAmount end
+		return (a.auctionID or 0) < (b.auctionID or 0)
+	end)
+
+	SE.pendingCheck = nil
+	if #queue > 0 then
+		deal.kind = "item"
+		deal.isCommodity = false
+		deal.buyQueue = queue
+		deal.totalListings = #queue
+		deal.boughtListings = 0
+		deal.listedQty = math.max(listedQty, 1)
+		deal.wallPrice = wallPrice
+		recalcDEDealMoatFromQueue(deal, useAS, minProfit, applyAHCut)
+		deal.verifiedAt = nowMono()
+		deal.status = "ready_to_buy"
+		if #queue > 1 then
+			setStatusText(string.format("Verified %d profitable listings (%dx moat). Click Buy to purchase.", #queue, deal.profitableQty or 1))
+		else
+			setStatusText("Live item verified below disenchant value. Click Buy to purchase.")
+		end
+		notify("de_checked", deal)
+	else
+		deal.buyQueue = nil
+		deal.listingCount = 0
+		deal.remainingListings = 0
+		deal.wallPrice = wallPrice
+		deal.status = "unavailable"
+		deal.verifiedAt = nil
+		setStatusText("Live check: no listing currently profitable below disenchant value.")
+		notify("de_unavailable", deal)
+	end
+end
+
+local function startLiveModeCheck(deal, modeKey, forceItem)
 	if not safeTable(deal) then return false, "no_deal" end
 	if not isAHOpen() then
 		setStatusText("Open the Auction House before checking live auctions.")
@@ -3038,7 +4290,7 @@ function SE.StartVendorCheck(deal)
 		itemKey = { itemID = deal.itemID, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 }
 	end
 
-	local isCommodity = deal.isCommodity
+	local isCommodity = forceItem and false or deal.isCommodity
 	if isCommodity == nil and ah and type(ah.GetItemKeyInfo) == "function" then
 		local okInfo, info = pcall(ah.GetItemKeyInfo, itemKey, true)
 		local it = okInfo and safeTable(info) or nil
@@ -3060,11 +4312,16 @@ function SE.StartVendorCheck(deal)
 		end
 	end
 
+	local isDE = (modeKey == "de")
+	local checkingEv = isDE and "de_checking" or "vendor_checking"
+	local unavailEv = isDE and "de_unavailable" or "vendor_unavailable"
+	local failedEv = isDE and "de_check_failed" or "vendor_check_failed"
+
 	checkSeq = checkSeq + 1
 	local seq = checkSeq
 	SE.pendingCheck = {
 		seq = seq,
-		mode = "vendor",
+		mode = modeKey,
 		deal = deal,
 		itemID = deal.itemID,
 		itemKey = itemKey,
@@ -3076,7 +4333,7 @@ function SE.StartVendorCheck(deal)
 	deal.status = "checking"
 	deal.lastError = nil
 	setStatusText("Checking live Auction House listing...")
-	notify("vendor_checking", deal)
+	notify(checkingEv, deal)
 
 	if useMarketScan then
 		local okCall, started, err = pcall(ms.CheckItemLive, itemKey, function(res)
@@ -3087,10 +4344,12 @@ function SE.StartVendorCheck(deal)
 				deal.status = "unavailable"
 				deal.verifiedAt = nil
 				setStatusText("Live check failed or timed out. Click Check again.")
-				notify("vendor_unavailable", deal)
+				notify(unavailEv, deal)
 				return
 			end
-			if rt.isCommodity == true or rt.whole == false then
+			if isDE then
+				applyDEItemRows(deal, rt.rawRows)
+			elseif rt.isCommodity == true or rt.whole == false then
 				applyVendorCommodityTiers(deal, extractTiersFromMarketScanResult(rt))
 			else
 				applyVendorItemRows(deal, rt.rawRows)
@@ -3100,7 +4359,7 @@ function SE.StartVendorCheck(deal)
 			SE.pendingCheck = nil
 			deal.status = "unverified"
 			setStatusText("Live check could not start. Try again.")
-			notify("vendor_check_failed", deal)
+			notify(failedEv, deal)
 			return false, err or "search_failed"
 		end
 	else
@@ -3109,7 +4368,7 @@ function SE.StartVendorCheck(deal)
 			SE.pendingCheck = nil
 			deal.status = "unverified"
 			setStatusText("Live search rejected. Try again.")
-			notify("vendor_check_failed", deal)
+			notify(failedEv, deal)
 			return false, "search_failed"
 		end
 	end
@@ -3119,15 +4378,23 @@ function SE.StartVendorCheck(deal)
 			SE.pendingCheck = nil
 			deal.status = "unverified"
 			setStatusText("Live check timed out. Click Check again.")
-			notify("vendor_check_failed", deal)
+			notify(failedEv, deal)
 		end
 	end)
 	return true
 end
 
--- Click 2 for Vendor Item Buy (strictly synchronous inside button OnClick):
--- Calls C_AuctionHouse.PlaceBid(auctionID, buyoutAmount).
-function SE.ExecuteVendorBuy(deal)
+-- Click 1 for Vendor Sniper: live exact search to fetch fresh auctionID + itemLink + buyout
+function SE.StartVendorCheck(deal)
+	return startLiveModeCheck(deal, "vendor", false)
+end
+
+-- Click 1 for Disenchant Sniper: live exact search to fetch fresh auctionID + itemLink + buyout
+function SE.StartDECheck(deal)
+	return startLiveModeCheck(deal, "de", true)
+end
+
+local function executeSingleItemBuy(deal, modeKey, proceedsPerUnit, unprofitableMsg)
 	if not safeTable(deal) then return false, "no_deal" end
 	if deal.status ~= "ready_to_buy" then
 		return false, "not_verified"
@@ -3147,11 +4414,11 @@ function SE.ExecuteVendorBuy(deal)
 		deal.status = "unverified"
 		deal.verifiedAt = nil
 		setStatusText("Live check expired. Click Check again.")
-		notify("vendor_deals", SE.vendorDeals)
+		notify(modeKey == "de" and "de_deals" or "vendor_deals", modeKey == "de" and SE.deDeals or SE.vendorDeals)
 		return false, "expired"
 	end
 
-	if deal.kind == "commodity" then
+	if modeKey == "vendor" and deal.kind == "commodity" then
 		return SE.StartCommodityBuy(deal)
 	end
 
@@ -3166,12 +4433,12 @@ function SE.ExecuteVendorBuy(deal)
 
 	local auctionID = safeNumber(deal.auctionID)
 	local buyout = math.floor(safeNumber(deal.buyoutAmount) or 0)
-	local qty = math.max(1, math.floor(safeNumber(deal.buyQty) or safeNumber(deal.quantity) or 1))
-	local vendorSell = safeNumber(deal.vendorSell) or 0
-	local totalVendorProceeds = vendorSell * qty
-	if not auctionID or buyout <= 0 or buyout >= totalVendorProceeds then
+	local qty = math.max(1, math.floor((modeKey == "de" and safeNumber(deal.nextBuyQty)) or safeNumber(deal.buyQty) or safeNumber(deal.quantity) or 1))
+	local perUnit = safeNumber(proceedsPerUnit) or 0
+	local totalProceeds = math.floor(perUnit * qty + 0.5)
+	if not auctionID or buyout <= 0 or buyout >= totalProceeds then
 		deal.status = "unverified"
-		setStatusText("Listing no longer profitable below vendor value.")
+		setStatusText(unprofitableMsg)
 		return false, "unprofitable"
 	end
 
@@ -3190,14 +4457,15 @@ function SE.ExecuteVendorBuy(deal)
 	local p = {
 		idKey = deal.idKey,
 		kind = "item",
-		mode = "vendor",
+		mode = modeKey,
 		deal = deal,
 		itemID = deal.itemID,
 		auctionID = auctionID,
 		buyoutAmount = buyout,
 		qty = qty,
-		vendorSell = vendorSell,
-		estProfit = totalVendorProceeds - buyout,
+		vendorSell = (modeKey == "vendor") and perUnit or nil,
+		deValue = (modeKey == "de") and perUnit or nil,
+		estProfit = totalProceeds - buyout,
 		state = "buying",
 		startedAt = nowMono(),
 	}
@@ -3224,6 +4492,48 @@ function SE.ExecuteVendorBuy(deal)
 		end
 	end)
 	return true
+end
+
+-- Click 2 for Vendor Item Buy (strictly synchronous inside button OnClick):
+-- Calls C_AuctionHouse.PlaceBid(auctionID, buyoutAmount).
+function SE.ExecuteVendorBuy(deal)
+	local vendorSell = safeTable(deal) and safeNumber(deal.vendorSell) or 0
+	return executeSingleItemBuy(deal, "vendor", vendorSell, "Listing no longer profitable below vendor value.")
+end
+
+-- Click 2 for Disenchant Item Buy (strictly synchronous inside button OnClick):
+-- Calls C_AuctionHouse.PlaceBid(auctionID, buyoutAmount).
+function SE.ExecuteDEBuy(deal)
+	if not safeTable(deal) then return false, "no_deal" end
+	local settings = SE.GetSettings()
+	local useAS = (settings.deUseArcaneSalvager == true)
+	local applyAHCut = (settings.deApplyAHCut ~= false)
+	local dealBd = safeTable(deal.deBreakdown)
+	local deVal = resolveDEEffectiveValues(
+		deal.deNet, deal.deAsNet,
+		(dealBd and dealBd.grossCopper) or deal.deGross,
+		(dealBd and dealBd.asGrossCopper) or deal.deAsGross,
+		useAS, applyAHCut
+	) or safeNumber(deal.deValue)
+	if safeTable(deal.buyQueue) and #deal.buyQueue > 0 then
+		local head = safeTable(deal.buyQueue[1])
+		if head then
+			deal.auctionID = head.auctionID
+			deal.buyoutAmount = head.buyoutAmount
+			deal.nextBuyQty = head.quantity
+			local headBd = safeTable(head.deBreakdown)
+			local headVal = resolveDEEffectiveValues(
+				head.deNet, head.deAsNet,
+				(headBd and headBd.grossCopper) or head.deGross,
+				(headBd and headBd.asGrossCopper) or head.deAsGross,
+				useAS, applyAHCut
+			) or safeNumber(head.deValue)
+			if headVal then
+				deVal = headVal
+			end
+		end
+	end
+	return executeSingleItemBuy(deal, "de", deVal or 0, "Listing no longer profitable below disenchant value.")
 end
 
 local function recalcItemGapDealRemaining(deal)
@@ -3600,7 +4910,13 @@ function SE.HandleRowAction(deal, action)
 	return SE.StartCommodityBuy(deal)
 end
 
-function SE.HandleVendorAction(deal)
+function SE.HandleVendorAction(deal, action)
+	if action == "cancel" then
+		if SE.purchase and (not deal or SE.purchase.deal == deal) then
+			return SE.CancelActivePurchase("Purchase cancelled by user.")
+		end
+		return false, "no_purchase"
+	end
 	if not safeTable(deal) then return false, "no_deal" end
 	if SE.purchase and SE.purchase.deal == deal
 		and SE.purchase.kind == "commodity" and SE.purchase.state == "awaiting_confirm" then
@@ -3610,6 +4926,27 @@ function SE.HandleVendorAction(deal)
 		return SE.ExecuteVendorBuy(deal)
 	end
 	return SE.StartVendorCheck(deal)
+end
+
+function SE.HandleDEAction(deal, action)
+	if action == "cancel" then
+		if SE.purchase and (not deal or SE.purchase.deal == deal) then
+			return SE.CancelActivePurchase("Purchase cancelled by user.")
+		end
+		if SE.pendingCheck and (not deal or SE.pendingCheck.deal == deal) then
+			local d = SE.pendingCheck.deal
+			SE.pendingCheck = nil
+			if d then d.status = (d.verifiedAt and "ready_to_buy") or "unverified" end
+			setStatusText("Check cancelled by user.")
+			return true
+		end
+		return false, "no_purchase"
+	end
+	if not safeTable(deal) then return false, "no_deal" end
+	if deal.status == "ready_to_buy" then
+		return SE.ExecuteDEBuy(deal)
+	end
+	return SE.StartDECheck(deal)
 end
 
 -------------------------------------------------------------------------------
@@ -4014,10 +5351,11 @@ function SE.StartGapScan(opts)
 		notify("scan_started", SE.GetScanProgress())
 
 		if not browseAlreadyActive then
-			-- Prune stale browseCache entries and stale vendor deals when starting a fresh browse
+			-- Prune stale browseCache entries and stale vendor/DE deals when starting a fresh browse
 			if not alreadyActive then
 				SE.PruneBrowseCache(econ)
 				clearStaleVendorDeals()
+				clearStaleDEDeals()
 			end
 			local okCall, started, ensureStatus = pcall(browseStarter)
 			-- Handle synchronous OnBrowseScanComplete / OnBrowseScanCancelled inside starter gracefully
@@ -4119,6 +5457,7 @@ function SE.ResetSessionStats()
 	SE.session.estProfit = 0
 	SE.session.gapDealsFound = 0
 	SE.session.vendorDealsFound = 0
+	SE.session.deDealsFound = 0
 	notify("session", SE.session)
 end
 
@@ -4260,6 +5599,32 @@ local function handleItemPurchaseCompleted(auctionID)
 					deal.itemName or ("Item " .. tostring(p.itemID))))
 			end
 			notify("gap_deals", SE.gapDeals)
+		elseif deal.mode == "de" and safeTable(deal.buyQueue) then
+			local removeIdx = 1
+			for i = 1, #deal.buyQueue do
+				local entry = safeTable(deal.buyQueue[i])
+				if entry and safeNumber(entry.auctionID) == p.auctionID then
+					removeIdx = i
+					break
+				end
+			end
+			if #deal.buyQueue >= removeIdx then
+				table.remove(deal.buyQueue, removeIdx)
+			end
+			local settings = SE.GetSettings()
+			local left = recalcDEDealMoatFromQueue(deal, settings.deUseArcaneSalvager == true, settings.deMinProfitCopper or 0, settings.deApplyAHCut ~= false)
+			deal.boughtListings = (safeNumber(deal.boughtListings) or 0) + 1
+			deal.totalListings = safeNumber(deal.totalListings) or (left + deal.boughtListings)
+			if left > 0 then
+				deal.status = "ready_to_buy"
+				setStatusText(string.format("Bought %s (%d listings left - click Buy).",
+					deal.itemName or ("Item " .. tostring(p.itemID)), left))
+			else
+				deal.status = "bought"
+				setStatusText(string.format("Bought all profitable %s listings.",
+					deal.itemName or ("Item " .. tostring(p.itemID))))
+			end
+			notify("de_deals", SE.deDeals)
 		else
 			deal.status = "bought"
 			setStatusText(string.format("Bought %s for %dc.",
@@ -4320,6 +5685,45 @@ local function readLiveCommodityTiers(itemID)
 	return tiers
 end
 
+local function recordSniperLiveRows(itemID, rows, tiers)
+	local ms = safeTable(ns.MarketScan)
+	if not (ms and type(ms.RecordLiveItemPrice) == "function") then return end
+	local id = safeNumber(itemID)
+	if not id or id <= 0 then return end
+	if safeTable(tiers) then
+		local minP, totQ = nil, 0
+		for i = 1, #tiers do
+			local t = safeTable(tiers[i])
+			if t and safeNumber(t.unitPrice) and t.unitPrice > 0 and safeNumber(t.quantity) and t.quantity > 0 then
+				minP = minP and math.min(minP, t.unitPrice) or t.unitPrice
+				totQ = totQ + t.quantity
+			end
+		end
+		if minP and totQ > 0 then
+			pcall(ms.RecordLiveItemPrice, id, minP, totQ, { itemWide = false })
+		end
+		return
+	end
+	if safeTable(rows) then
+		local minP, totQ = nil, 0
+		for i = 1, #rows do
+			local r = safeTable(rows[i])
+			if r then
+				local qty = math.max(1, math.floor(safeNumber(r.quantity) or 1))
+				local bo = safeNumber(r.buyoutAmount)
+				if bo and bo > 0 then
+					local unitP = math.max(1, math.floor(bo / qty + 0.5))
+					minP = minP and math.min(minP, unitP) or unitP
+					totQ = totQ + qty
+				end
+			end
+		end
+		if minP and totQ > 0 then
+			pcall(ms.RecordLiveItemPrice, id, minP, totQ, { itemWide = false })
+		end
+	end
+end
+
 local function handleVendorItemResults(itemKey)
 	local pc = SE.pendingCheck
 	if not pc or pc.usingMarketScan or pc.kind ~= "item" then return end
@@ -4333,8 +5737,11 @@ local function handleVendorItemResults(itemKey)
 
 	local searchKey = kt or pc.itemKey
 	local rows = readLiveItemRows(searchKey)
+	recordSniperLiveRows(pc.itemID, rows, nil)
 	if pc.mode == "gap" then
 		applyGapItemCheckRows(pc.deal, rows, searchKey)
+	elseif pc.mode == "de" then
+		applyDEItemRows(pc.deal, rows)
 	else
 		applyVendorItemRows(pc.deal, rows)
 	end
@@ -4343,7 +5750,9 @@ end
 local function handleVendorCommodityResults(itemID)
 	local pc = SE.pendingCheck
 	if not pc or pc.usingMarketScan or pc.kind ~= "commodity" or pc.itemID ~= itemID then return end
-	applyVendorCommodityTiers(pc.deal, readLiveCommodityTiers(itemID))
+	local tiers = readLiveCommodityTiers(itemID)
+	recordSniperLiveRows(itemID, nil, tiers)
+	applyVendorCommodityTiers(pc.deal, tiers)
 end
 
 local function handleGapScanCommodityResults(itemID)
@@ -4361,6 +5770,7 @@ local function handleGapScanCommodityResults(itemID)
 	end
 
 	local tiers = readLiveCommodityTiers(itemID)
+	recordSniperLiveRows(itemID, nil, tiers)
 	SE.scan.awaitingItemID = nil
 	SE.scan.awaitingKeySig = nil
 	SE.scan.awaitingItemKey = nil
@@ -4387,6 +5797,7 @@ local function handleGapScanItemResults(itemKey)
 		return
 	end
 	local rows = readLiveItemRows(kt)
+	recordSniperLiveRows(keyID, rows, nil)
 	SE.scan.awaitingItemID = nil
 	SE.scan.awaitingKeySig = nil
 	SE.scan.awaitingItemKey = nil
@@ -4399,40 +5810,45 @@ local function handleGapScanItemResults(itemKey)
 	stepGapScan()
 end
 
-local function handleItemInfoReceived(itemID, success)
-	local id = safeNumber(itemID)
-	if not id or id <= 0 then return end
-	id = math.floor(id)
-	if safeBool(success) == false then return end
-
+local function resolveUnresolvedForItem(id, mapTbl, byID, evalFn, upsertFn, statsBucket)
 	local keysToCheck = nil
-	local bucket = unresolvedVendorByID[id]
+	local bucket = byID[id]
 	if bucket then
 		keysToCheck = {}
 		for ck in pairs(bucket) do
 			keysToCheck[#keysToCheck + 1] = ck
 		end
-	elseif SE.unresolvedVendor[id] then
+	elseif mapTbl[id] then
 		keysToCheck = { id }
 	end
-	if not keysToCheck or #keysToCheck == 0 then return end
+	if not keysToCheck or #keysToCheck == 0 then return false, false end
 
 	local anyAdded = false
+	local anyResolved = false
+	local extra = {
+		itemKey = nil,
+		itemLink = nil,
+		quality = nil,
+		isCommodity = nil,
+		statsBucket = statsBucket,
+		_hintScratch = {},
+	}
 	for i = 1, #keysToCheck do
 		local ck = keysToCheck[i]
-		local pending = SE.unresolvedVendor[ck]
+		local pending = mapTbl[ck]
 		if pending then
-			local deal, stillUncached = evaluateVendorCandidate(id, pending.minPrice, pending.totalQuantity, pending.source, {
-				itemKey = pending.itemKey,
-				itemLink = pending.itemLink,
-				isCommodity = pending.isCommodity,
-			})
+			extra.itemKey = pending.itemKey
+			extra.itemLink = pending.itemLink
+			extra.quality = pending.quality
+			extra.isCommodity = pending.isCommodity
+			local deal, stillUncached = evalFn(id, pending.minPrice, pending.totalQuantity, pending.source, extra)
 			if not stillUncached then
-				SE.unresolvedVendor[ck] = nil
+				mapTbl[ck] = nil
 				if bucket then bucket[ck] = nil end
+				anyResolved = true
 			end
 			if deal then
-				upsertVendorDeal(deal)
+				upsertFn(deal)
 				anyAdded = true
 			end
 		elseif bucket then
@@ -4440,11 +5856,32 @@ local function handleItemInfoReceived(itemID, success)
 		end
 	end
 	if bucket and next(bucket) == nil then
-		unresolvedVendorByID[id] = nil
+		byID[id] = nil
 	end
-	if anyAdded then
+	return anyAdded, anyResolved
+end
+
+local function handleItemInfoReceived(itemID, success)
+	local id = safeNumber(itemID)
+	if not id or id <= 0 then return end
+	id = math.floor(id)
+	if safeBool(success) == false then return end
+
+	if resolveUnresolvedForItem(id, SE.unresolvedVendor, unresolvedVendorByID, evaluateVendorCandidate, upsertVendorDeal) then
 		sortVendorDeals()
 		notify("vendor_deals", SE.vendorDeals)
+	end
+	local deAdded, deResolved = resolveUnresolvedForItem(id, SE.unresolvedDE, unresolvedDEByID, evaluateDECandidate, upsertDEDeal, SE.deScanStats)
+	if deAdded or deResolved then
+		SE.deScanStats.uncachedPending = countPendingDE()
+		SE.deScanStats.profitable = #SE.deDeals
+		SE.deScanStats.lastAt = nowMono()
+	end
+	if deAdded then
+		sortDEDeals()
+		notify("de_deals", SE.deDeals)
+	elseif deResolved then
+		notify("de_status", { scope = "de" })
 	end
 end
 

@@ -324,23 +324,23 @@ check(view.shiftBadge:IsShown(), "SetShiftMode(true) reveals shiftBadge")
 W.SetShiftMode(false)
 check(not view.shiftBadge:IsShown(), "SetShiftMode(false) hides shiftBadge")
 
--- Verify 13 default visible columns + Cols popover toggle
-check(#tbl.columns == 13, "Watchlist defaults to 13 visible columns, got " .. tostring(#tbl.columns))
+-- Verify 15 default visible columns + Cols popover toggle
+check(#tbl.columns == 15, "Watchlist defaults to 15 visible columns, got " .. tostring(#tbl.columns))
 local expectedDefaultCols = {
 	"fav", "name", "kindLabel", "knownSort", "ownedQty", "listed",
-	"unitAH", "craftCost", "profit", "marginPct", "salesPerDay", "demandSort", "trendPct",
+	"unitAH", "craftCost", "profit", "marginPct", "salesPerDay", "demandSort", "trend24hDelta", "trend24hPct", "trendPct",
 }
 for i, k in ipairs(expectedDefaultCols) do
 	check(tbl.columns[i] and tbl.columns[i].key == k,
 		string.format("Default column #%d is %s (got %s)", i, k, tostring(tbl.columns[i] and tbl.columns[i].key)))
 end
 W.SetColumnVisible("vendorSell", true)
-check(#tbl.columns == 14 and MerchantMasterDB.watchlistColumns.hidden.vendorSell == nil,
+check(#tbl.columns == 16 and MerchantMasterDB.watchlistColumns.hidden.vendorSell == nil,
 	"SetColumnVisible('vendorSell', true) shows optional column and persists in watchlistColumns")
 check(W.ToggleColumnSettings(true) == true and view.colSettingsPopover:IsShown(), "Cols popover opens")
 check(W.ToggleColumnSettings(false) == false and not view.colSettingsPopover:IsShown(), "Cols popover closes")
 W.ResetColumns()
-check(#tbl.columns == 13, "ResetColumns restores 13 default columns")
+check(#tbl.columns == 15, "ResetColumns restores 15 default columns")
 
 -- Verify standalone Thick Leather renders muted "-" for craftCost, profit, marginPct, knownSort
 local tlFrame
@@ -498,6 +498,152 @@ do
 			"GetItemTrend7d prior-day mean baseline computes -20% drop cleanly, got " .. tostring(ss7d and ss7d.trendPct))
 		ns.MarketScan.GetItemTrend7d = origGetTrend7d
 	end
+end
+
+-- Verify 24h Trend (%) and 24h Value Change (copper delta) on Dreamfoil (60s -> 20s drop),
+-- plus Price Drop pill coverage, nil-last sorting, and SavedVariables column migration
+do
+	local origGetTrend24h = ns.MarketScan and ns.MarketScan.GetItemTrend24h
+	local origGetTrend7d = ns.MarketScan and ns.MarketScan.GetItemTrend7d
+	local dreamID = 13463
+	snapItems[dreamID] = { minBuyout = 2000, marketValue = 2000, historical = 2000, qty = 32, dailySold = 40.0 }
+	host.loadSyntheticSnapshots({ items = snapItems })
+	if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+
+	W.Add({ kind = "item", itemID = dreamID })
+	if ns.MarketScan then
+		ns.MarketScan.GetItemTrend24h = function(id)
+			if id == dreamID then
+				return {
+					source = "ahSnapshots",
+					hoursCollected = 12,
+					startPrice24h = 6000,
+					currentPrice = 2000,
+					trendPct = -66.6667,
+				}
+			end
+			return nil
+		end
+		ns.MarketScan.GetItemTrend7d = function(id)
+			if id == dreamID then
+				return {
+					source = "ahDaily",
+					daysCollected = 2,
+					startPrice7d = 2000,
+					trendPct = 0,
+				}
+			end
+			return origGetTrend7d and origGetTrend7d(id) or nil
+		end
+	end
+
+	W.Refresh(wlCtx)
+	local dreamRow
+	for _, r in ipairs(W.GetRows()) do
+		if r.key == ("item:" .. tostring(dreamID)) then dreamRow = r; break end
+	end
+	check(dreamRow ~= nil, "Dreamfoil evaluated in Watchlist")
+	check(dreamRow.unitAH == 2000 and dreamRow.trend24hStart == 6000
+		and dreamRow.trend24hDelta == -4000 and approx(dreamRow.trend24hPct, -66.67, 0.2),
+		string.format("Dreamfoil 24h trend computes start=6000, cur=2000, delta=-4000 (-40s), pct=-66.7%% (got delta=%s, pct=%s)",
+			tostring(dreamRow.trend24hDelta), tostring(dreamRow.trend24hPct)))
+
+	-- Find bound Dreamfoil table row frame and inspect 24h Chg, 24h Trend cells & hover tooltip
+	local dreamFrame
+	for _, fr in ipairs(tbl.scrollBox._frames or {}) do
+		if fr:IsShown() and fr.data and fr.data.key == ("item:" .. tostring(dreamID)) then
+			dreamFrame = fr
+			break
+		end
+	end
+	check(dreamFrame ~= nil and dreamFrame.cellGroup ~= nil, "Dreamfoil row frame bound in Watchlist table")
+	local d24Cell = dreamFrame.cellGroup.cellsByKey.trend24hDelta
+	local p24Cell = dreamFrame.cellGroup.cellsByKey.trend24hPct
+	check(d24Cell ~= nil and p24Cell ~= nil, "24h Chg and 24h Trend cells bound")
+	local d24Raw = d24Cell.fs:GetText() or ""
+	local d24Txt = stripColor(d24Raw)
+	local p24Txt = stripColor(p24Cell.fs:GetText() or "")
+	check(d24Txt:find("-40s", 1, true) ~= nil, "24h Chg cell displays '-40s', got: " .. tostring(d24Txt))
+	local pal = (ns.Theme and ns.Theme.GetActivePalette and ns.Theme.GetActivePalette()) or {}
+	local d24Lower = d24Raw:lower()
+	local isGreenBuy = d24Lower:find("|cff34c759", 1, true) ~= nil
+		or d24Lower:find("|cff30d158", 1, true) ~= nil
+		or d24Lower:find("|cff007a2b", 1, true) ~= nil
+		or d24Lower:find("|cff5ff9ad", 1, true) ~= nil
+	for _, k in ipairs({ "hexPositive", "hexGreen", "hexSuccess" }) do
+		local hv = pal[k]
+		if type(hv) == "string" and hv ~= "" then
+			if d24Lower:find("|cff" .. hv:lower(), 1, true) ~= nil then
+				isGreenBuy = true
+			end
+		end
+	end
+	check(isGreenBuy, "24h Chg price drop renders green buy-deal ink, got: " .. tostring(d24Raw))
+	check(p24Txt == "-67%", "24h Trend cell displays '-67%', got: " .. tostring(p24Txt))
+
+	GameTooltip:Hide()
+	dreamFrame._scripts.OnEnter(dreamFrame)
+	check(GameTooltip:IsShown(), "Hovering Dreamfoil row displays tooltip")
+	local found24hLine = false
+	for _, line in ipairs(GameTooltip._lines or {}) do
+		local txt = stripColor(type(line) == "table" and (tostring(line.left or "") .. " " .. tostring(line.right or "")) or tostring(line or ""))
+		if txt:find("24h Trend", 1, true) and txt:find("-66.7%", 1, true) and txt:find("-40s", 1, true)
+			and txt:find("60s", 1, true) and txt:find("->", 1, true) and txt:find("20s", 1, true) then
+			found24hLine = true
+			break
+		end
+	end
+	check(found24hLine, "Hover tooltip includes '24h Trend' with '-66.7%', '-40s', and '60s -> 20s'")
+	dreamFrame._scripts.OnLeave(dreamFrame)
+
+	-- Price Drop pill catches 24h drop even when Dreamfoil 7d baseline is 0%
+	view.filterBtns.price_drop:Click("LeftButton")
+	local foundDreamInDrop = false
+	for _, r in ipairs(W.GetFilteredRows()) do
+		if r.key == ("item:" .. tostring(dreamID)) then foundDreamInDrop = true; break end
+	end
+	check(foundDreamInDrop, "Price Drop filter includes Dreamfoil via its 24h -66.7% drop even when 7d trend is 0%")
+	view.resetButton:Click("LeftButton")
+
+	-- Nil-last numeric sorting works on trend24hDelta and trend24hPct (ascending & descending)
+	local allRowsNow = W.GetRows()
+	for _, sortKey in ipairs({ "trend24hDelta", "trend24hPct" }) do
+		for _, asc in ipairs({ true, false }) do
+			local sorted = W.FilterSort(allRowsNow, { filter = "all" }, { key = sortKey, ascending = asc })
+			check(#sorted == #allRowsNow and sorted[1].key == ("item:" .. tostring(dreamID)),
+				string.format("Single non-nil 24h item (%s asc=%s) sorts first while nils stay at bottom", sortKey, tostring(asc)))
+			check(sorted[#sorted][sortKey] == nil,
+				string.format("Nil %s rows pushed to bottom (asc=%s)", sortKey, tostring(asc)))
+		end
+	end
+
+	-- Existing SavedVariables column order migration inserts trend24hDelta & trend24hPct right before trendPct
+	MerchantMasterDB.watchlistColumns = {
+		order = {
+			"fav", "name", "kindLabel", "knownSort", "ownedQty", "listed",
+			"unitAH", "craftCost", "profit", "marginPct", "salesPerDay", "demandSort", "trendPct",
+		},
+		hidden = {},
+	}
+	local migCfg = W.GetColumnConfig()
+	local trendIdx, chg24Idx, pct24Idx
+	for idx, k in ipairs(migCfg.order or {}) do
+		if k == "trend24hDelta" then chg24Idx = idx end
+		if k == "trend24hPct" then pct24Idx = idx end
+		if k == "trendPct" then trendIdx = idx end
+	end
+	check(chg24Idx and pct24Idx and trendIdx and chg24Idx + 1 == pct24Idx and pct24Idx + 1 == trendIdx,
+		"Legacy SavedVariables order inserts 24h Chg & 24h Trend immediately before 7d Trend")
+	check(migCfg.hidden.trend24hDelta == nil and migCfg.hidden.trend24hPct == nil,
+		"Migrated 24h Chg & 24h Trend remain visible by default")
+
+	W.ResetColumns()
+	if ns.MarketScan then
+		ns.MarketScan.GetItemTrend24h = origGetTrend24h
+		ns.MarketScan.GetItemTrend7d = origGetTrend7d
+	end
+	snapItems[dreamID] = nil
+	W.Remove(dreamID)
 end
 
 -- Clear remaining favorites to verify empty state

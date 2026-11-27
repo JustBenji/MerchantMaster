@@ -2,6 +2,14 @@
 
 All notable player-facing changes to **MerchantMaster** are documented in this file.
 
+## [3.3.4] - 2026-11-27
+
+*   **GoblinTV Broadcast Overview & Neutral Volume Bars:** Added the multi-pane **GoblinTV** overview (`Today's Overview`), unified `GoblinTV | Morning Brief | Market Pulse` switcher, and neutral-blue volume histogram bars across price and profit charts (reserving green/red strictly for price direction).
+*   **Unified Canonical Market Pricing Across Every Page:** Synchronized `Pricing.lua` so Today's Overview, Portfolio, Deep Analysis, Watchlist, All Items, SuperList, Crafting, Sniper, MM Sell, and Hover Tooltips all display one canonical latest-scan AH price across Manual AH, Snapshot Sync, and TSM Light.
+*   **MM Sell Redesign & Auction House Buy List Banner:** Moved **Deposit** into its own frame underneath duration matching vendor value, standardized font sizes across **Deposit**, **Price per Item**, **Auction House Cut**, and **Total Price**, added card contrast/dividers in **MM Sell**, and mounted a quick **Buy List** extension banner beside **MM Sell** on the Auction House frame.
+*   **Zero-API-Key Snapshot Sync (Windows, Linux / Steam Deck & macOS):** Replaced the old per-user Battle.net API builder tab inside Console with **Snapshot Sync** (`/mm snapshots`) and the 3-way **Price Refresh Mode** (`Local Snapshot` | `TSM Light` | `None (Manual AH)`). Players install **Snapshot Sync** with zero Battle.net API keys to pull incremental updates automatically from the public GitHub feed (`JustBenji/MerchantMaster-SnapshotData`), with preview (`--check-only`), rebuild (`--force`), and turn-off (`uninstall-task`) commands.
+*   **Console Tooltip Setup, Enhanced Mail Safety & Disenchant Catalog Expansion:** Expanded WoW Forever Disenchant metadata, added **Console -> Tooltip Setup** (`/mm tooltips`) with live item preview, and upgraded Mail Helper and Sniper workflows.
+
 ## [3.3.3] - 2026-11-27
 
 *   **Disenchant 1-to-1 Cost Carryover & Indirect Profit Tracking:** Disenchanting now transfers the broken item's cost directly onto its output shards, dust, or essence instead of stamping market value and recording false losses when you sell those materials. On load, MerchantMaster automatically replays legacy `v3.3.2` ledgers to repair past sales, tags entries with `via DE: <Item>` in the Ledger and Recent AH Sales feed, and reports indirect disenchant profits in **Deep Analysis** and Item details without double-counting.

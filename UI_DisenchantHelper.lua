@@ -220,6 +220,7 @@ local function scrollListToRatio(ratio)
 end
 
 function DisenchantHelper.ScanBags()
+	state.lastPriceRev = (ns.GetPriceDataRevision and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
 	syncSettingsFromDB()
 	local items = {}
 	local validKeys = {}
@@ -391,6 +392,61 @@ local function applyButtonMacro(btn, macro)
 	btn:SetAttribute("*macrotext1", text)
 end
 
+local function isFrameVisible(fr)
+	if not fr then return false end
+	if type(fr.IsVisible) == "function" then
+		local vis = fr:IsVisible()
+		if not hasSecret(vis) then
+			return vis and true or false
+		end
+	end
+	if type(fr.IsShown) == "function" then
+		local sh = fr:IsShown()
+		if not hasSecret(sh) then
+			return sh and true or false
+		end
+	end
+	return false
+end
+
+local function getDefaultAnchorFrame()
+	for _, fr in ipairs({ _G.ProfessionsFrame, _G.CraftFrame, _G.TradeSkillFrame, _G.SpellBookFrame }) do
+		if isFrameVisible(fr) then
+			return fr
+		end
+	end
+	return nil
+end
+
+local function syncDockModeButton(f)
+	if not (f and f.dockModeBtn) then return end
+	local btn = f.dockModeBtn
+	local mode = (ns.Window and ns.Window.GetMode) and ns.Window.GetMode("disenchant_helper", "snap") or "snap"
+	local lbl = (mode == "lock" and "Lock") or (mode == "free" and "Free") or "Snap"
+	if btn.SetText then
+		btn:SetText(lbl)
+	elseif btn.fs and btn.fs.SetText then
+		btn.fs:SetText(lbl)
+	end
+	if btn.SetVariant then
+		btn:SetVariant(mode == "lock" and "primary" or "secondary")
+	end
+	if btn.SetActive then
+		btn:SetActive(mode == "lock")
+	end
+end
+
+local function applyWindowPosition(f)
+	if not f or isInCombat() then return end
+	local mode = (ns.Window and ns.Window.GetMode) and ns.Window.GetMode("disenchant_helper", "snap") or "snap"
+	if mode == "free" and ns.Window and ns.Window.HasSavedPosition and ns.Window.HasSavedPosition("disenchant_helper") then
+		ns.Window.RestorePosition(f, "disenchant_helper")
+	elseif ns.Window and ns.Window.PlaceBeside then
+		ns.Window.PlaceBeside(f, getDefaultAnchorFrame(), "CENTER", 0, 0, 12)
+	end
+	syncDockModeButton(f)
+end
+
 local function ensureBuilt()
 	if state.frame then return state.frame end
 	if isInCombat() then return nil end
@@ -402,8 +458,59 @@ local function ensureBuilt()
 		compactChrome = true,
 		customTitleUpper = true,
 		centerY = 0,
+		positionKey = "disenchant_helper",
+		combatSafeDrag = true,
+		canDrag = function()
+			return (not ns.Window or not ns.Window.GetMode)
+				or ns.Window.GetMode("disenchant_helper", "snap") ~= "lock"
+		end,
+		onDragStart = function(win)
+			if ns.Window and ns.Window.GetMode and ns.Window.GetMode("disenchant_helper", "snap") == "snap" then
+				ns.Window.SetMode("disenchant_helper", "free")
+				syncDockModeButton(win)
+			end
+		end,
 	})
 	state.frame = f
+	if f.header and f.closeBtn then
+		local dockBtn = T.CreatePlateButton(f.header, "Snap", 48, 22, { variant = "secondary", pill = true, fontSize = 10 })
+		dockBtn:SetPoint("RIGHT", f.closeBtn, "LEFT", -6, 0)
+		dockBtn:SetScript("OnClick", function()
+			if not (ns.Window and ns.Window.CycleMode) then return end
+			local nextMode = ns.Window.CycleMode("disenchant_helper", "snap")
+			if nextMode == "free" then
+				if ns.Window.DetachToUIParent then ns.Window.DetachToUIParent(f) end
+				if ns.Window.SavePosition then ns.Window.SavePosition(f, "disenchant_helper") end
+				syncDockModeButton(f)
+			else
+				applyWindowPosition(f)
+			end
+		end)
+		if dockBtn.HookScript and _G.GameTooltip then
+			dockBtn:HookScript("OnEnter", function(self)
+				local mode = (ns.Window and ns.Window.GetMode) and ns.Window.GetMode("disenchant_helper", "snap") or "snap"
+				_G.GameTooltip:SetOwner(self, "ANCHOR_TOP")
+				_G.GameTooltip:AddLine("Window Dock: " .. ((mode == "lock" and "Lock") or (mode == "free" and "Free") or "Snap"), 1, 0.85, 0.25)
+				if mode == "snap" then
+					_G.GameTooltip:AddLine("Snap: Attached to the profession window. Drag to switch to Free, or click to Lock.", 0.9, 0.92, 0.96, true)
+				elseif mode == "lock" then
+					_G.GameTooltip:AddLine("Lock: Locked beside the profession window so they stay together. Click to switch to Free.", 0.9, 0.92, 0.96, true)
+				else
+					_G.GameTooltip:AddLine("Free: Saved free position. Click to snap back beside the profession window.", 0.9, 0.92, 0.96, true)
+				end
+				_G.GameTooltip:Show()
+			end)
+			dockBtn:HookScript("OnLeave", function()
+				if _G.GameTooltip_Hide then _G.GameTooltip_Hide() elseif _G.GameTooltip then _G.GameTooltip:Hide() end
+			end)
+		end
+		f.dockModeBtn = dockBtn
+		f._mmTitleRightAnchor = dockBtn
+		if f.titleFs then
+			f.titleFs:SetPoint("RIGHT", dockBtn, "LEFT", -8, 0)
+		end
+		syncDockModeButton(f)
+	end
 	local body = f.body or f
 
 	-- Filter / Selection Bar
@@ -764,6 +871,7 @@ end
 updateUI = function()
 	local f = state.frame
 	if not f then return end
+	syncDockModeButton(f)
 	local p = pal()
 	local textCol = p.text or { 1, 1, 1, 1 }
 	local secCol = p.textSecondary or { 0.78, 0.78, 0.82, 1 }
@@ -947,11 +1055,26 @@ local function deferFirstOpenInCombat()
 	return false
 end
 
+function DisenchantHelper.ApplyPosition()
+	if state.frame then
+		applyWindowPosition(state.frame)
+	end
+end
+
+function DisenchantHelper.Invalidate()
+	state.lastPriceRev = nil
+	if ns.ClearDECache then ns.ClearDECache() end
+	if state.frame and state.frame:IsShown() then
+		DisenchantHelper.ScanBags()
+	end
+end
+
 function DisenchantHelper.Show()
 	if deferFirstOpenInCombat() then return false end
 	local f = ensureBuilt()
 	if not f then return false end
 	state.pendingOpenAfterCombat = false
+	applyWindowPosition(f)
 	f:Show()
 	DisenchantHelper.ScanBags()
 	return true
@@ -976,23 +1099,6 @@ end
 ---------------------------------------------------------------------------------------------------
 -- Launcher Buttons in Blizzard Professions Spellbook & Enchanting Craft Windows
 ---------------------------------------------------------------------------------------------------
-local function isFrameVisible(fr)
-	if not fr then return false end
-	if type(fr.IsVisible) == "function" then
-		local vis = fr:IsVisible()
-		if not hasSecret(vis) then
-			return vis and true or false
-		end
-	end
-	if type(fr.IsShown) == "function" then
-		local sh = fr:IsShown()
-		if not hasSecret(sh) then
-			return sh and true or false
-		end
-	end
-	return false
-end
-
 local function isProfBookVisible(profFrame)
 	if not isFrameVisible(profFrame) then return false end
 	if profFrame == _G.SpellBookProfessionFrame and _G.SpellBookFrame then
@@ -1656,6 +1762,14 @@ function DisenchantHelper.RefreshProfessionButtons()
 	state.pendingButtonsRefresh = false
 	local profShown = refreshProfBookButton()
 	local craftShown = refreshCraftWindowButtons()
+	if state.frame and state.frame:IsShown() then
+		local mode = (ns.Window and ns.Window.GetMode) and ns.Window.GetMode("disenchant_helper", "snap") or "snap"
+		if mode ~= "free" and not (ns.Window and ns.Window.IsDragging and ns.Window.IsDragging(state.frame)) then
+			applyWindowPosition(state.frame)
+		else
+			syncDockModeButton(state.frame)
+		end
+	end
 	return profShown or craftShown
 end
 

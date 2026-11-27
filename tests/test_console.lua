@@ -67,10 +67,16 @@ do
 	assertCheck(app.activeTab == "console_overview" and UI.IsShown() and UI._state.built,
 		"Opening Console builds UI lazily and activates console_overview")
 	local setupTabBtn = UI._state.subTabBar and UI._state.subTabBar.buttons.console_setup
-	assertCheck(setupTabBtn and setupTabBtn:IsShown(),
-		"Standalone Console keeps Snapshot Settings sub-tab button visible")
-	assertCheck(setupTabBtn.fs and setupTabBtn.fs:GetText() == "Snapshot Settings",
-		"Snapshot Settings sub-tab button is labeled 'Snapshot Settings', got " .. tostring(setupTabBtn.fs and setupTabBtn.fs:GetText()))
+	assertCheck(setupTabBtn == nil and UI._state.setupView == nil,
+		"Standalone Console completely removes legacy Snapshot Builder sub-tab and view")
+	local setup2TabBtn = UI._state.subTabBar and UI._state.subTabBar.buttons.console_setup2
+	assertCheck(setup2TabBtn and setup2TabBtn:IsShown() and setup2TabBtn.fs and setup2TabBtn.fs:GetText() == "Snapshot Sync",
+		"Standalone Console exposes primary Snapshot Sync sub-tab button")
+	-- Console -> Settings no longer exposes legacyBuilderCheck
+	app.setTab("console_settings")
+	assertCheck(UI._state.settingsControls and UI._state.settingsControls.legacyBuilderCheck == nil,
+		"Console -> Settings removes legacyBuilderCheck")
+	app.setTab("console_overview")
 	local ovStandalone = UI._state.overviewView
 	assertCheck(ovStandalone and ovStandalone.kpis and ovStandalone.kpis[2] and not ovStandalone.kpis[2].frame:IsShown(),
 		"Standalone Console Overview hides Snapshot Storage (Disk) KPI card")
@@ -85,47 +91,34 @@ do
 	assertCheck((dbViewStandalone.sumBody:GetText() or ""):find("External SQLite Disk DB: 0 B", 1, true) ~= nil,
 		"Standalone Database svStorageCard notes 0 B external SQLite disk DB")
 
-	-- Standalone Snapshot Settings tab opens cleanly in 2-column layout (Left=Windows, Right=Linux)
+	-- Legacy console_setup route redirects cleanly to Snapshot Sync (console_setup2)
 	app.setTab("console_setup")
-	assertCheck(UI.GetActiveSubTab() == "console_setup" and app.activeTab == "console_setup",
-		"Standalone console_setup opens directly without redirecting")
-	local suStandalone = UI._state.setupView
-	assertCheck(suStandalone and suStandalone.standalonePanel and suStandalone.standalonePanel:IsShown(),
-		"Standalone console_setup shows standalonePanel")
-	assertCheck(suStandalone.connectedPanel and not suStandalone.connectedPanel:IsShown(),
-		"Standalone console_setup hides connectedPanel")
-	assertCheck(suStandalone.winCard and suStandalone.winCard:IsShown()
-		and suStandalone.linuxCard and suStandalone.linuxCard:IsShown(),
-		"Standalone console_setup displays split Left Windows and Right Linux install cards")
-	assertCheck((suStandalone.stTitle:GetText() or ""):find("Not Installed", 1, true) ~= nil,
-		"Standalone status title shows Optional Add-On - Not Installed")
-	assertCheck((suStandalone.stFolders:GetText() or ""):find("No in-game folder setup needed", 1, true) ~= nil,
-		"Standalone status folder line explains zero in-game folder setup")
-	assertCheck((suStandalone.winInstallBox:GetText() or ""):find("py -m pip install", 1, true) ~= nil,
-		"Standalone Windows install box populated")
-	assertCheck((suStandalone.winAltBox:GetText() or ""):find("python -m pip install", 1, true) ~= nil,
-		"Standalone Windows fallback install box populated")
-	assertCheck((suStandalone.guideBox:GetText() or ""):find("MerchantMaster-Snapshots", 1, true) ~= nil,
-		"Standalone guide box contains repo guide URL")
-	assertCheck((suStandalone.linuxInstallBox:GetText() or ""):find("install_linux.py", 1, true) ~= nil,
-		"Standalone Linux / Steam Deck install box uses install_linux.py")
-	assertCheck((suStandalone.linuxScriptBox:GetText() or ""):find("raw.githubusercontent.com", 1, true) ~= nil
-		and (suStandalone.linuxScriptBox:GetText() or ""):find("install_linux.py", 1, true) ~= nil,
-		"Standalone Linux script box contains direct install_linux.py URL")
-	assertCheck((suStandalone.macInstallBox:GetText() or ""):find("python3 -m pip install", 1, true) ~= nil,
-		"Standalone macOS install box populated")
+	assertCheck(UI.GetActiveSubTab() == "console_setup2" and app.activeTab == "console_setup2",
+		"Legacy console_setup route redirects cleanly to console_setup2")
+	local su2Standalone = UI._state.setupV2View
+	assertCheck(su2Standalone and su2Standalone.winCard and su2Standalone.winCard:IsShown()
+		and su2Standalone.unixCard and su2Standalone.unixCard:IsShown(),
+		"Standalone console_setup2 displays split Left Windows and Right Linux/macOS sync cards")
+	assertCheck((su2Standalone.stTitle:GetText() or ""):find("GitHub Auto-Sync", 1, true) ~= nil
+		and (su2Standalone.stTitle:GetText() or ""):find("Zero API Key", 1, true) ~= nil,
+		"Standalone Snapshot Sync title shows GitHub Auto-Sync - Zero API Key")
+	assertCheck((su2Standalone.winInstallBox:GetText() or ""):find("py -m pip install", 1, true) ~= nil
+		and (su2Standalone.winAltBox:GetText() or ""):find("python -m pip install", 1, true) ~= nil
+		and (su2Standalone.linuxInstallBox:GetText() or ""):find("install_linux.py --sync-mode github", 1, true) ~= nil
+		and (su2Standalone.macInstallBox:GetText() or ""):find("python3 -m pip install", 1, true) ~= nil,
+		"Standalone Snapshot Sync populates Windows, Linux/Steam Deck, and macOS 1-line GitHub install boxes")
 
 	-- Disabled addon state (present in AddOns folder, unchecked for current character) shows clear Esc -> AddOns guidance
 	hostEnv.setMockAddon("MerchantMaster_Snapshots", { enabled = false, loaded = false, memKB = 0, version = "1.1.0" })
 	assertCheck(CE.GetAddonState("MerchantMaster_Snapshots") == "disabled",
 		"GetAddonState reports 'disabled' when MerchantMaster_Snapshots exists but is unloaded")
 	UI.Refresh("test_disabled")
-	assertCheck((suStandalone.stTitle:GetText() or ""):find("Disabled in WoW AddOns Menu", 1, true) ~= nil
-		and (suStandalone.stBody:GetText() or ""):find("Esc -> AddOns", 1, true) ~= nil,
-		"Disabled companion shows Esc -> AddOns instructions in Snapshot Settings")
+	assertCheck((su2Standalone.stTitle:GetText() or ""):find("Enable Pack in WoW", 1, true) ~= nil
+		and (su2Standalone.stBody:GetText() or ""):find("Esc -> AddOns", 1, true) ~= nil,
+		"Disabled companion shows Enable Pack in WoW and Esc -> AddOns instructions in Snapshot Sync")
 	app.setTab("console_database")
-	assertCheck((dbViewStandalone.snapHeadline:GetText() or ""):find("Disabled in WoW AddOns Menu", 1, true) ~= nil,
-		"Disabled companion shows Disabled state in Database -> AH Snapshot Storage card")
+	assertCheck((dbViewStandalone.snapHeadline:GetText() or ""):find("Data Pack Unchecked in Esc -> AddOns", 1, true) ~= nil,
+		"Disabled companion shows Data Pack Unchecked in Esc -> AddOns in Database -> AH Snapshot Storage card")
 	hostEnv.setMockAddon("MerchantMaster_Snapshots", nil)
 
 	-- Standalone fallback presets & OS-aware command builder
@@ -149,15 +142,56 @@ do
 		and macCmds.apiKeyCmd:find('--clear-houses --house "3:120=RP-Horde" --prompt-creds', 1, true) ~= nil,
 		"Fallback macOS commands use python3 -m snapshot_builder with --prompt-creds and --clear-houses --house")
 
-	-- Standalone /mm snapshots and /mm setup open console_setup
+	-- Standalone /mm snapshots, /mm setup, /mm builder, /mm setup1, /mm snapshots2, and /mm github all open console_setup2
 	app.setTab("dashboard")
 	SlashCmdList.MERCHANTMASTER("snapshots")
-	assertCheck(app.activeTab == "console_setup" and UI.GetActiveSubTab() == "console_setup",
-		"/mm snapshots opens console_setup standalone")
+	assertCheck(app.activeTab == "console_setup2" and UI.GetActiveSubTab() == "console_setup2",
+		"/mm snapshots opens console_setup2 standalone")
 	app.setTab("dashboard")
 	SlashCmdList.MERCHANTMASTER("setup")
-	assertCheck(app.activeTab == "console_setup" and UI.GetActiveSubTab() == "console_setup",
-		"/mm setup opens console_setup standalone")
+	assertCheck(app.activeTab == "console_setup2" and UI.GetActiveSubTab() == "console_setup2",
+		"/mm setup opens console_setup2 standalone")
+	app.setTab("dashboard")
+	SlashCmdList.MERCHANTMASTER("builder")
+	assertCheck(app.activeTab == "console_setup2" and UI.GetActiveSubTab() == "console_setup2",
+		"/mm builder redirects cleanly to console_setup2 standalone")
+	app.setTab("dashboard")
+	SlashCmdList.MERCHANTMASTER("setup1")
+	assertCheck(app.activeTab == "console_setup2" and UI.GetActiveSubTab() == "console_setup2",
+		"/mm setup1 redirects cleanly to console_setup2 standalone")
+	SlashCmdList.MERCHANTMASTER("snapshots2")
+	assertCheck(app.activeTab == "console_setup2" and UI.GetActiveSubTab() == "console_setup2",
+		"/mm snapshots2 opens console_setup2 standalone")
+	app.setTab("dashboard")
+	SlashCmdList.MERCHANTMASTER("github")
+	assertCheck(app.activeTab == "console_setup2" and UI.GetActiveSubTab() == "console_setup2",
+		"/mm github opens console_setup2 standalone")
+	local su2 = UI._state.setupV2View
+	assertCheck(su2 and su2.frame and su2.frame:IsShown()
+		and (su2.winInstallBox:GetText() or ""):find("--sync-mode github --apply-task --sync-now", 1, true) ~= nil
+		and (su2.linuxInstallBox:GetText() or ""):find("install_linux.py --sync-mode github", 1, true) ~= nil
+		and (su2.macInstallBox:GetText() or ""):find("--sync-mode github --apply-task --sync-now", 1, true) ~= nil
+		and (su2.winRebuildBox:GetText() or ""):find("sync --source github --force", 1, true) ~= nil
+		and (su2.winUninstallBox:GetText() or ""):find("uninstall-task", 1, true) ~= nil
+		and (su2.linuxRebuildBox:GetText() or ""):find("sync --source github --force", 1, true) ~= nil
+		and (su2.linuxUninstallBox:GetText() or ""):find("uninstall-task", 1, true) ~= nil,
+		"Snapshot Sync populates 1-line GitHub auto-sync, rebuild (--force), and turn-off (uninstall-task) commands")
+	local prevBgMode = _G.MerchantMasterDB and _G.MerchantMasterDB.backgroundPriceMode
+	su2.enableBtn:Click("LeftButton")
+	assertCheck((ns.GetBackgroundPriceMode and ns.GetBackgroundPriceMode() or (_G.MerchantMasterDB and _G.MerchantMasterDB.backgroundPriceMode)) == "local",
+		"Snapshot Sync Enable Local Snapshot button activates local snapshot mode")
+	su2.disableBtn:Click("LeftButton")
+	assertCheck((ns.GetBackgroundPriceMode and ns.GetBackgroundPriceMode() or (_G.MerchantMasterDB and _G.MerchantMasterDB.backgroundPriceMode)) == "none",
+		"Snapshot Sync Turn Off Snapshots button sets backgroundPriceMode = 'none'")
+	if ns.SetBackgroundPriceMode then
+		if prevBgMode then
+			ns.SetBackgroundPriceMode(prevBgMode)
+		elseif _G.MerchantMasterDB then
+			_G.MerchantMasterDB.backgroundPriceMode = nil
+			_G.MerchantMasterDB.useTSMPrices = false
+			if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+		end
+	end
 	app.setTab("dashboard")
 end
 
@@ -398,7 +432,7 @@ do
 	app.togglePanel("console_overview")
 	assertCheck(app.activeTab == "console_overview" and UI.IsShown() and UI._state.built,
 		"Opening Console builds UI lazily and activates console_overview")
-	for _, sub in ipairs({ "console_database", "console_perf", "console_setup", "console_settings", "console_ui", "console_data", "console_overview" }) do
+	for _, sub in ipairs({ "console_database", "console_perf", "console_setup2", "console_settings", "console_ui", "console_data", "console_overview" }) do
 		app.setTab(sub)
 		assertCheck(app.activeTab == sub and UI.GetActiveSubTab() == sub and UI.IsShown(),
 			"Switching to " .. sub .. " activates corresponding Console view")
@@ -479,52 +513,34 @@ do
 	app.applyTableStyle("t5_ruled")
 	app.applyPriceDisplayMode("compact")
 
-	-- Slash Routing (including /mm snapshots, /mm ui and /mm data)
+	-- Slash Routing (including /mm snapshots, /mm setup, /mm builder -> console_setup2)
 	SlashCmdList.MERCHANTMASTER("snapshots")
-	assertCheck(app.activeTab == "console_setup", "/mm snapshots opens console_setup")
+	assertCheck(app.activeTab == "console_setup2", "/mm snapshots opens console_setup2")
 	SlashCmdList.MERCHANTMASTER("snapshot")
-	assertCheck(app.activeTab == "console_setup", "/mm snapshot opens console_setup")
+	assertCheck(app.activeTab == "console_setup2", "/mm snapshot opens console_setup2")
 	SlashCmdList.MERCHANTMASTER("setup")
-	assertCheck(app.activeTab == "console_setup", "/mm setup opens console_setup")
+	assertCheck(app.activeTab == "console_setup2", "/mm setup opens console_setup2")
+	SlashCmdList.MERCHANTMASTER("builder")
+	assertCheck(app.activeTab == "console_setup2", "/mm builder redirects to console_setup2")
 
-	-- Connected Snapshot Settings: split Left Windows / Right Linux command cards + macOS switch + Database disk summary
-	local suConn = UI._state.setupView
-	assertCheck(suConn and suConn.connectedPanel and suConn.connectedPanel:IsShown(),
-		"Connected console_setup shows connectedPanel")
-	assertCheck(suConn.standalonePanel and not suConn.standalonePanel:IsShown(),
-		"Connected console_setup hides standalonePanel")
-	assertCheck(suConn.winCmdCard and suConn.winCmdCard:IsShown()
-		and suConn.linuxCmdCard and suConn.linuxCmdCard:IsShown(),
-		"Connected console_setup shows split Left Windows and Right Linux command cards")
-	assertCheck((suConn.stTitle:GetText() or ""):find("Active Background Helper", 1, true) ~= nil,
-		"Connected status title shows Active Background Helper")
-	assertCheck((suConn.stBody:GetText() or ""):find("Snapshots: 19", 1, true) ~= nil
-		and (suConn.stBody:GetText() or ""):find("Disk: " .. CE.FormatBytes(5448576), 1, true) ~= nil,
+	-- Connected Snapshot Sync: live Disk & Snapshot count summary + OS command boxes + 3-way Price Refresh Mode
+	local su2Conn = UI._state.setupV2View
+	assertCheck(UI._state.setupView == nil and su2Conn ~= nil and su2Conn.frame and su2Conn.frame:IsShown(),
+		"Connected console_setup2 is active and setupView is removed")
+	assertCheck(su2Conn.winCard and su2Conn.winCard:IsShown()
+		and su2Conn.unixCard and su2Conn.unixCard:IsShown(),
+		"Connected console_setup2 shows split Left Windows and Right Linux/macOS command cards")
+	assertCheck((su2Conn.stTitle:GetText() or ""):find("GitHub Auto-Sync - Active", 1, true) ~= nil,
+		"Connected status title shows GitHub Auto-Sync - Active")
+	assertCheck((su2Conn.stBody:GetText() or ""):find("Snapshots: 19", 1, true) ~= nil
+		and (su2Conn.stBody:GetText() or ""):find("Disk: " .. CE.FormatBytes(5448576), 1, true) ~= nil,
 		"Connected stBody summarizes live snapshot count and total disk size")
-	local folderTxt = suConn.stFolders:GetText() or ""
-	assertCheck(folderTxt:find("snapshots.sqlite3", 1, true) ~= nil
-		and folderTxt:find("AddOns/MerchantMaster_Snapshots", 1, true) ~= nil
-		and folderTxt:find("No in-game redirect needed", 1, true) ~= nil,
-		"Connected stFolders shows live sys.dbPath, sys.outDir, and move note: " .. folderTxt)
-
-	suConn.updateCommands()
-	assertCheck((suConn.guiBox:GetText() or ""):find("python -m snapshot_builder setup-gui", 1, true) ~= nil
-		and (suConn.keyBox:GetText() or ""):find("setx BLIZZARD_CLIENT_ID", 1, true) ~= nil,
-		"Connected left card generates Windows PowerShell commands simultaneously")
-	assertCheck((suConn.linuxCmdTitle:GetText() or ""):find("Linux", 1, true) ~= nil
-		and (suConn.linuxGuiBox:GetText() or ""):find("~/.local/bin/mm-snapshots setup-gui", 1, true) ~= nil
-		and (suConn.linuxKeyBox:GetText() or ""):find("--prompt-creds", 1, true) ~= nil,
-		"Connected right card simultaneously generates Linux ~/.local/bin/mm-snapshots commands")
-
-	suConn.posixModeBtn:Click("LeftButton")
-	assertCheck((suConn.linuxCmdTitle:GetText() or ""):find("macOS", 1, true) ~= nil
-		and (suConn.linuxGuiBox:GetText() or ""):find("python3 -m snapshot_builder setup-gui", 1, true) ~= nil
-		and (suConn.linuxKeyBox:GetText() or ""):find("--prompt-creds", 1, true) ~= nil,
-		"Clicking posixModeBtn switches right card to macOS python3 commands")
-	suConn.posixModeBtn:Click("LeftButton")
-	assertCheck((suConn.linuxCmdTitle:GetText() or ""):find("Linux", 1, true) ~= nil
-		and (suConn.linuxGuiBox:GetText() or ""):find("~/.local/bin/mm-snapshots setup-gui", 1, true) ~= nil,
-		"Clicking posixModeBtn again switches right card back to Linux commands")
+	assertCheck((su2Conn.stFeed:GetText() or ""):find("JustBenji/MerchantMaster-SnapshotData", 1, true) ~= nil,
+		"Connected stFeed shows public GitHub snapshot feed slug")
+	assertCheck((su2Conn.winInstallBox:GetText() or ""):find("snapshot_builder configure --sync-mode github", 1, true) ~= nil
+		and (su2Conn.linuxInstallBox:GetText() or ""):find("install_linux.py --sync-mode github", 1, true) ~= nil
+		and (su2Conn.macInstallBox:GetText() or ""):find("python3 -m snapshot_builder configure --sync-mode github", 1, true) ~= nil,
+		"Connected cards display Windows, Linux, and macOS GitHub auto-sync commands")
 
 	-- Connected Console -> Database dedicated disk storage card
 	app.setTab("console_database")
@@ -723,29 +739,30 @@ do
 	_G.LoadAddOn = lazyLoader
 
 	SlashCmdList.MERCHANTMASTER("snapshots")
-	local suLazy = UI._state.setupView
 	assertCheck(loadCalls >= 1 and CE.HasSnapshotExtension() == true,
 		"Cold /mm snapshots triggers EnsureSnapshotsLoaded and loads LoadOnDemand MerchantMaster_Snapshots")
-	assertCheck(app.activeTab == "console_setup" and UI.GetActiveSubTab() == "console_setup"
-		and suLazy and suLazy.connectedPanel:IsShown() and not suLazy.standalonePanel:IsShown(),
-		"Cold /mm snapshots immediately renders connectedPanel instead of standalonePanel")
-	assertCheck((suLazy.stTitle:GetText() or ""):find("Active Background Helper", 1, true) ~= nil,
-		"Cold /mm snapshots status title reflects Active Background Helper")
+	assertCheck(app.activeTab == "console_setup2" and UI.GetActiveSubTab() == "console_setup2",
+		"Cold /mm snapshots opens primary Snapshot Sync (console_setup2)")
+	SlashCmdList.MERCHANTMASTER("builder")
+	local su2Lazy = UI._state.setupV2View
+	assertCheck(app.activeTab == "console_setup2" and UI.GetActiveSubTab() == "console_setup2"
+		and su2Lazy and (su2Lazy.stTitle:GetText() or ""):find("GitHub Auto-Sync - Active", 1, true) ~= nil,
+		"Connected /mm builder redirects to console_setup2 showing Active status")
 
-	-- Part B: Late RegisterSnapshotExtension while console_setup is already open in standalone mode
+	-- Part B: Late RegisterSnapshotExtension while console_setup2 is already open standalone
 	if _G.C_AddOns then _G.C_AddOns.LoadAddOn = function() return false end end
 	_G.LoadAddOn = function() return false end
 	app.snapshotExtension = nil
 	UI.SyncExtensions()
-	assertCheck(suLazy.standalonePanel:IsShown() and not suLazy.connectedPanel:IsShown(),
-		"SyncExtensions switches open Snapshot Settings back to standalonePanel when extension is cleared")
+	assertCheck((su2Lazy.stTitle:GetText() or ""):find("Zero API Key", 1, true) ~= nil,
+		"SyncExtensions switches open Snapshot Sync back to Zero API Key status when extension is cleared")
 	MerchantMasterAPI.RegisterSnapshotExtension({
 		apiVersion = 1,
 		version = "1.1.0",
 		supportsOsMode = true,
 	})
-	assertCheck(suLazy.connectedPanel:IsShown() and not suLazy.standalonePanel:IsShown(),
-		"RegisterSnapshotExtension calls consoleProvider.SyncExtensions and immediately flips open view to connectedPanel")
+	assertCheck((su2Lazy.stTitle:GetText() or ""):find("GitHub Auto-Sync - Active", 1, true) ~= nil,
+		"RegisterSnapshotExtension calls consoleProvider.SyncExtensions and flips open Snapshot Sync to Active")
 
 	-- Restore environment
 	if _G.C_AddOns then _G.C_AddOns.LoadAddOn = savedCLoad end
@@ -810,11 +827,20 @@ do
 		assertCheck(pBtn ~= nil and (pBtn:GetWidth() or 0) >= 62,
 			"Profession Pick button " .. pk .. " has width >= 62px (got " .. tostring(pBtn and pBtn:GetWidth()) .. ")")
 	end
-	for _, ck in ipairs({ "bank", "auction", "mainCrafter" }) do
+	for _, ck in ipairs({ "bank", "investmentStorage", "auction", "mainCrafter" }) do
+		local box = mv.inputs[ck]
+		assertCheck(box ~= nil and (box:GetWidth() or 0) >= 148,
+			"Core input " .. ck .. " exists with width >= 148px (got " .. tostring(box and box:GetWidth()) .. ")")
 		local pBtn = mv.pickBtns[ck]
 		assertCheck(pBtn ~= nil and (pBtn:GetWidth() or 0) >= 64,
 			"Core Pick button " .. ck .. " has width >= 64px (got " .. tostring(pBtn and pBtn:GetWidth()) .. ")")
 	end
+	mv.inputs.investmentStorage:SetText("VaultHold")
+	mv.inputs.investmentStorage:GetScript("OnEnterPressed")(mv.inputs.investmentStorage)
+	assertCheck(ns.MailHelper and ns.MailHelper.IsSavedMailRecipient("VaultHold") == true,
+		"Investment Storage mail preset input saves recipient cleanly into MerchantMasterDB.mailPresets")
+	mv.inputs.investmentStorage:SetText("")
+	mv.inputs.investmentStorage:GetScript("OnEnterPressed")(mv.inputs.investmentStorage)
 	assertCheck(#mv.previewChips >= 5, "Live Mailbox Preview exposes at least 5 preview chip slots")
 	for i = 1, #mv.previewChips do
 		assertCheck(mv.previewChips[i]:GetHeight() == 32,
@@ -864,79 +890,328 @@ do
 end
 
 ---------------------------------------------------------------------------------------------------
--- 12. TSM Light Mode Toggle Card in Console -> Snapshot Settings
+-- 12. 3-Way Price Refresh Mode Selector Card in Console -> Snapshot Settings
 ---------------------------------------------------------------------------------------------------
 do
+	local savedBgMode = _G.MerchantMasterDB.backgroundPriceMode
 	local savedUseTSM = _G.MerchantMasterDB.useTSMPrices
 	local savedPriceSrc = _G.MerchantMasterDB.priceSource
 	local savedExt = app.snapshotExtension
+	local savedRaw = ns.snapshotRaw
+	local savedParsed = ns.snapshotParsed
 	local savedTSMAPI = rawget(_G, "TSM_API")
 
 	app.snapshotExtension = nil
+	ns.snapshotRaw = {}
+	ns.snapshotParsed = {}
+	_G.MerchantMasterDB.backgroundPriceMode = nil
 	_G.MerchantMasterDB.useTSMPrices = false
 	_G.MerchantMasterDB.priceSource = "auto"
 	_G.TSM_API = nil
 
-	app.togglePanel("console_setup")
-	local su = UI._state.setupView
-	assertCheck(su ~= nil and su.tsmCard ~= nil and su.tsmSwitch ~= nil and su.tsmStatusFs ~= nil,
-		"Console -> Snapshot Settings exposes tsmCard, tsmSwitch, and tsmStatusFs")
-	assertCheck(su.tsmCard:GetHeight() == 64, "tsmCard height is 64px")
-	local _, _, _, _, spY = su.standalonePanel:GetPoint(1)
-	local _, _, _, _, cpY = su.connectedPanel:GetPoint(1)
-	assertCheck(spY == -168 and cpY == -168,
-		"standalonePanel and connectedPanel shift top anchor to -168 below 64px tsmCard (got "
-			.. tostring(spY) .. ", " .. tostring(cpY) .. ")")
-	local tsmSubTxt = su.tsmSubFs and su.tsmSubFs:GetText() or ""
-	assertCheck(tsmSubTxt:find("updated hourly inside MerchantMaster tables", 1, true) ~= nil
-		and tsmSubTxt:find("Requires the TradeSkillMaster addon + TSM Desktop App installed locally", 1, true) ~= nil,
-		"tsmSubFs explains hourly table refresh advantage and local TSM addon + Desktop App requirement")
-	assertCheck(su.tsmSwitch:GetChecked() == false, "TSM Light Mode switch defaults OFF")
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("Off", 1, true) ~= nil,
-		"TSM Light Mode status shows Off when disabled")
+	app.togglePanel("console_setup2")
+	local su = UI._state.setupV2View
+	assertCheck(su ~= nil and su.tsmCard ~= nil and su.tsmStatusFs ~= nil and su.tsmSubFs ~= nil,
+		"Console -> Snapshot Sync exposes tsmCard, tsmStatusFs, and tsmSubFs")
+	assertCheck(su.tsmSwitch == nil and type(su.modeBtns) == "table"
+		and su.modeBtns["local"] ~= nil and su.modeBtns["tsm"] ~= nil and su.modeBtns["none"] ~= nil,
+		"Console -> Snapshot Sync exposes 3-way su.modeBtns (local, tsm, none)")
+	assertCheck(su.tsmCard:GetHeight() == 72,
+		"tsmCard height is 72px (got " .. tostring(su.tsmCard:GetHeight()) .. ")")
+	local _, _, _, _, tsmY = su.tsmCard:GetPoint(1)
+	local _, _, _, _, winY = su.winCard:GetPoint(1)
+	local _, _, _, _, unixY = su.unixCard:GetPoint(2)
+	assertCheck(tsmY == -80 and winY == -160 and unixY == -160,
+		"tsmCard sits at -80 and winCard/unixCard sit at -160 (got "
+			.. tostring(tsmY) .. ", " .. tostring(winY) .. ", " .. tostring(unixY) .. ")")
 
-	-- Toggle ON (standalone, no TSM_API) -> sets useTSMPrices=true, priceSource="tsm", status="Waiting for TradeSkillMaster"
-	su.tsmSwitch:SetChecked(true)
-	su.tsmSwitch:GetScript("OnClick")(su.tsmSwitch, "LeftButton")
-	assertCheck(_G.MerchantMasterDB.useTSMPrices == true,
-		"Turning TSM Light Mode ON sets MerchantMasterDB.useTSMPrices = true")
-	assertCheck(_G.MerchantMasterDB.priceSource == "tsm",
-		"Turning TSM Light Mode ON standalone switches MerchantMasterDB.priceSource to 'tsm'")
+	-- Standalone default (no snapshots, no TSM) -> Manual AH Only (Local OFF)
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("Manual AH Only (Local OFF)", 1, true) ~= nil,
+		"Standalone default status shows Manual AH Only (Local OFF)")
+
+	-- Click Local Snapshot while not installed -> Local Snapshot (Not Installed)
+	su.modeBtns["local"]:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.backgroundPriceMode == "local" and _G.MerchantMasterDB.useTSMPrices == false,
+		"Clicking Local Snapshot sets backgroundPriceMode='local' and useTSMPrices=false")
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("Local Snapshot (Not Installed)", 1, true) ~= nil,
+		"Status shows Local Snapshot (Not Installed) when extension is absent")
+
+	-- Click TSM Light (no TSM_API) -> Waiting for TradeSkillMaster + explanatory subtext
+	su.modeBtns["tsm"]:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.backgroundPriceMode == "tsm" and _G.MerchantMasterDB.useTSMPrices == true,
+		"Clicking TSM Light sets backgroundPriceMode='tsm' and useTSMPrices=true")
+	assertCheck(_G.MerchantMasterDB.priceSource == "auto",
+		"Clicking TSM Light keeps MerchantMasterDB.priceSource on 'auto'")
 	assertCheck((su.tsmStatusFs:GetText() or ""):find("Waiting for TradeSkillMaster", 1, true) ~= nil,
-		"TSM Light Mode status shows Waiting for TradeSkillMaster when TSM_API absent")
+		"TSM Light status shows Waiting for TradeSkillMaster when TSM_API absent")
+	local tsmSubTxt = su.tsmSubFs and su.tsmSubFs:GetText() or ""
+	assertCheck(tsmSubTxt:find("TradeSkillMaster addon + TSM Desktop App", 1, true) ~= nil
+		and tsmSubTxt:find("never mix", 1, true) ~= nil,
+		"tsmSubFs explains local TSM addon + Desktop App requirement and mutual exclusivity")
 
-	-- When TSM becomes available while ON -> shows "TSM Active (Hourly)"
+	-- When TSM becomes available while in TSM mode -> TSM Light Active (Local OFF)
 	_G.TSM_API = { GetCustomPriceValue = function() return 1000 end }
 	su.retheme()
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("TSM Active (Hourly)", 1, true) ~= nil,
-		"TSM Light Mode status shows TSM Active (Hourly) when TSM is available")
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("TSM Light Active (Local OFF)", 1, true) ~= nil,
+		"TSM Light status shows TSM Light Active (Local OFF) when TSM is available")
 
-	-- Toggle OFF -> sets useTSMPrices=false, resets priceSource="auto", status="Off"
-	su.tsmSwitch:SetChecked(false)
-	su.tsmSwitch:GetScript("OnClick")(su.tsmSwitch, "LeftButton")
-	assertCheck(_G.MerchantMasterDB.useTSMPrices == false,
-		"Turning TSM Light Mode OFF sets MerchantMasterDB.useTSMPrices = false")
+	-- Click None (Manual AH) -> backgroundPriceMode='none', useTSMPrices=false, priceSource='auto'
+	su.modeBtns["none"]:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.backgroundPriceMode == "none" and _G.MerchantMasterDB.useTSMPrices == false,
+		"Clicking None (Manual AH) sets backgroundPriceMode='none' and useTSMPrices=false")
 	assertCheck(_G.MerchantMasterDB.priceSource == "auto",
-		"Turning TSM Light Mode OFF resets MerchantMasterDB.priceSource back to 'auto'")
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("Off", 1, true) ~= nil,
-		"TSM Light Mode status returns to Off when disabled")
+		"Clicking None (Manual AH) resets MerchantMasterDB.priceSource back to 'auto'")
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("Manual AH Only (Local OFF)", 1, true) ~= nil,
+		"Status shows Manual AH Only (Local OFF) in None mode")
 
-	-- Verify ConsoleEngine settings fields documents useTSMPrices and keeps savedTables == 13
+	-- With extension installed on disk: stTitle reflects Active vs Paused by TSM Light vs OFF / Manual AH
+	app.snapshotExtension = savedExt
+	ns.snapshotRaw = savedRaw
+	ns.snapshotParsed = savedParsed
+	su.modeBtns["local"]:Click("LeftButton")
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("Local Snapshot Active", 1, true) ~= nil,
+		"Status shows Local Snapshot Active when extension is installed on disk")
+	assertCheck((su.stTitle:GetText() or ""):find("GitHub Auto-Sync - Active", 1, true) ~= nil,
+		"stTitle shows GitHub Auto-Sync - Active in Local Snapshot mode")
+
+	su.modeBtns["tsm"]:Click("LeftButton")
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("TSM Light Active (Local OFF)", 1, true) ~= nil,
+		"Status shows TSM Light Active (Local OFF) even with extension on disk")
+	assertCheck((su.stTitle:GetText() or ""):find("GitHub Auto-Sync - Paused by TSM Light", 1, true) ~= nil,
+		"stTitle shows GitHub Auto-Sync - Paused by TSM Light when suppressed by TSM")
+
+	su.modeBtns["none"]:Click("LeftButton")
+	assertCheck((su.tsmStatusFs:GetText() or ""):find("Manual AH Only (Local OFF)", 1, true) ~= nil,
+		"Status shows Manual AH Only (Local OFF) with extension on disk")
+	assertCheck((su.stTitle:GetText() or ""):find("GitHub Auto-Sync - OFF / Manual AH", 1, true) ~= nil,
+		"stTitle shows GitHub Auto-Sync - OFF / Manual AH when suppressed by None mode")
+
+	-- Verify ConsoleEngine settings fields documents backgroundPriceMode & useTSMPrices and keeps savedTables == 13
 	local stTsm = CE.CollectStorageSnapshot()
 	assertCheck(#stTsm.savedTables == 13,
-		"savedTables remains strictly 13 with TSM Light Mode setting")
+		"savedTables remains strictly 13 with 3-way backgroundPriceMode setting")
 	local foundSettings = nil
 	for _, entry in ipairs(stTsm.savedTables) do
 		if entry.id == "MerchantMasterDB.settings" then foundSettings = entry; break end
 	end
-	assertCheck(foundSettings ~= nil and (foundSettings.fields or ""):find("useTSMPrices", 1, true) ~= nil,
-		"MerchantMasterDB.settings fields description includes useTSMPrices")
+	assertCheck(foundSettings ~= nil
+		and (foundSettings.fields or ""):find("backgroundPriceMode", 1, true) ~= nil
+		and (foundSettings.fields or ""):find("useTSMPrices", 1, true) ~= nil,
+		"MerchantMasterDB.settings fields description includes backgroundPriceMode and useTSMPrices")
 
 	-- Restore environment
+	_G.MerchantMasterDB.backgroundPriceMode = savedBgMode
 	_G.MerchantMasterDB.useTSMPrices = savedUseTSM
 	_G.MerchantMasterDB.priceSource = savedPriceSrc
 	app.snapshotExtension = savedExt
+	ns.snapshotRaw = savedRaw
+	ns.snapshotParsed = savedParsed
 	_G.TSM_API = savedTSMAPI
+	if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
+	app.panel:Hide()
+end
+
+---------------------------------------------------------------------------------------------------
+-- 13. Console -> Tooltip Setup Sub-Tab (console_tooltips), Slash Routing, Live Preview & Presets
+---------------------------------------------------------------------------------------------------
+do
+	local ttKeys = {
+		"ttEnabled", "ttPriceFormat", "ttModifier",
+		"ttMarketEnabled", "ttMinBuyout", "ttMarketValue", "ttListedCount", "ttVendorSell",
+		"tooltipCraftCost", "ttCraftProfit", "tooltipDEValue", "ttDEArcaneSalvager",
+		"tooltipDEBreakdown", "crateTooltips",
+		"anTooltips", "ttAccSell", "ttAccBasis", "ttAccProfit", "ttAccLastSold",
+		"ttAccSaleRate", "ttAccSlowing", "ttHideEmpty",
+		"anTooltipInventory", "ttInvByChar", "ttInvHideZero", "ttInvCompact",
+	}
+	local savedTT = {}
+	for _, k in ipairs(ttKeys) do
+		savedTT[k] = _G.MerchantMasterDB[k]
+	end
+	local savedSample = UI._state.tooltipSampleKey
+
+	-- Slash routing: /mm tooltips and /mm tooltip open console_tooltips
+	app.setTab("dashboard")
+	SlashCmdList.MERCHANTMASTER("tooltips")
+	assertCheck(app.activeTab == "console_tooltips" and UI.GetActiveSubTab() == "console_tooltips" and UI.IsShown(),
+		"/mm tooltips opens Console -> Tooltip Setup")
+	app.setTab("dashboard")
+	SlashCmdList.MERCHANTMASTER("tooltip")
+	assertCheck(app.activeTab == "console_tooltips" and UI.GetActiveSubTab() == "console_tooltips",
+		"/mm tooltip opens Console -> Tooltip Setup")
+
+	-- Sub-tab bar placement: console_tooltips sits immediately after console_mail, console_mail immediately after console_settings, rightStart < 860
+	local bar = UI._state.subTabBar
+	assertCheck(bar and bar.buttons and bar.buttons.console_tooltips and bar.buttons.console_tooltips:IsShown(),
+		"Console sub-tab bar exposes visible Tooltip Setup sub-tab button")
+	assertCheck((bar.rightStart or 9999) < 860,
+		"Console sub-tab bar leaves ample headroom inside 1036px with Tooltip Setup (rightStart=" .. tostring(bar.rightStart) .. ")")
+	local settingsIdx, mailIdx, ttIdx
+	for idx, d in ipairs(bar._defs or {}) do
+		if d.key == "console_settings" then settingsIdx = idx end
+		if d.key == "console_mail" then mailIdx = idx end
+		if d.key == "console_tooltips" then ttIdx = idx end
+	end
+	assertCheck(settingsIdx and mailIdx and mailIdx == settingsIdx + 1 and ttIdx == mailIdx + 1,
+		"Console -> Mail sits immediately after Settings and Tooltip Setup immediately after Mail")
+
+	-- Settings shortcut button jumps to console_tooltips
+	app.setTab("console_settings")
+	local ttJump = UI._state.settingsControls and UI._state.settingsControls.tooltipShortcutBtn
+	assertCheck(ttJump ~= nil, "Console -> Settings exposes Tooltip Setup shortcut button")
+	ttJump:Click("LeftButton")
+	assertCheck(app.activeTab == "console_tooltips" and UI.GetActiveSubTab() == "console_tooltips",
+		"Clicking Tooltip Setup button in Settings opens Console -> Tooltip Setup")
+
+	-- Verify tooltipControls structure
+	local tc = UI._state.tooltipControls
+	local tv = UI._state.tooltipsView
+	assertCheck(tc ~= nil and type(tc.checks) == "table" and type(tc.sampleBtns) == "table"
+		and type(tc.presetBtns) == "table" and type(tc.formatBtns) == "table"
+		and type(tc.modBtns) == "table" and type(tc.previewRows) == "table",
+		"state.tooltipControls exposes checks, sampleBtns, presetBtns, formatBtns, modBtns, and previewRows")
+	assertCheck(#tc.previewRows == 36, "Example Tooltip pools 36 preview rows")
+
+	local function findPreviewRow(substr)
+		for _, row in ipairs(tc.previewRows) do
+			if row.frame and row.frame:IsShown() then
+				local txt = row.leftFs and row.leftFs:GetText() or ""
+				if txt:find(substr, 1, true) then
+					return row
+				end
+			end
+		end
+		return nil
+	end
+
+	-- Toggling checkboxes updates MerchantMasterDB and immediately updates Example Tooltip (enabled vs dimmed lines)
+	tc.sampleBtns.green_lens:Click("LeftButton")
+	assertCheck((tc.headerNameFs:GetText() or ""):find("Green Lens", 1, true) ~= nil,
+		"Green Lens sample displays Green Lens header")
+
+	local minRowBefore = findPreviewRow("Min Buyout")
+	local craftRowBefore = findPreviewRow("Craft Cost (est.)")
+	assertCheck(minRowBefore ~= nil and minRowBefore.enabled == true,
+		"Min Buyout preview row starts enabled on Green Lens")
+	assertCheck(craftRowBefore ~= nil and craftRowBefore.enabled == false,
+		"Craft Cost preview row starts dimmed when tooltipCraftCost is false")
+
+	local function setCheck(cb, checkedVal)
+		cb:SetChecked(checkedVal)
+		local fn = cb:GetScript("OnClick")
+		if fn then fn(cb, "LeftButton") end
+	end
+
+	-- Toggle Min Buyout OFF -> DB updates and preview row dims
+	setCheck(tc.checks.ttMinBuyout, false)
+	assertCheck(_G.MerchantMasterDB.ttMinBuyout == false,
+		"Unchecking ttMinBuyout updates MerchantMasterDB.ttMinBuyout = false")
+	local minRowOff = findPreviewRow("Min Buyout")
+	assertCheck(minRowOff ~= nil and minRowOff.enabled == false,
+		"Unchecking ttMinBuyout immediately dims Min Buyout in Example Tooltip")
+	if minRowOff and minRowOff.leftFs and minRowOff.leftFs.GetTextColor then
+		local r, g, b = minRowOff.leftFs:GetTextColor()
+		assertCheck(math.abs(r - 0.42) < 0.02 and math.abs(g - 0.45) < 0.02 and math.abs(b - 0.50) < 0.02,
+			"Dimmed preview row renders with dimmed slate RGB")
+	end
+
+	-- Toggle Craft Cost ON -> DB updates and preview row enables
+	setCheck(tc.checks.tooltipCraftCost, true)
+	assertCheck(_G.MerchantMasterDB.tooltipCraftCost == true,
+		"Checking tooltipCraftCost updates MerchantMasterDB.tooltipCraftCost = true")
+	local craftRowOn = findPreviewRow("Craft Cost (est.)")
+	assertCheck(craftRowOn ~= nil and craftRowOn.enabled == true,
+		"Checking tooltipCraftCost immediately enables Craft Cost in Example Tooltip")
+
+	-- Switching sample items updates Example Tooltip header & rows
+	tc.sampleBtns.silk_cloth:Click("LeftButton")
+	assertCheck((tc.headerNameFs:GetText() or ""):find("Silk Cloth", 1, true) ~= nil
+		and findPreviewRow("Total Inventory") ~= nil,
+		"Clicking Silk Cloth sample switches Example Tooltip to Silk Cloth")
+	tc.sampleBtns.waylaid_crate:Click("LeftButton")
+	assertCheck((tc.headerNameFs:GetText() or ""):find("Waylaid Crate", 1, true) ~= nil
+		and findPreviewRow("MerchantMaster Waylaid Crate") ~= nil,
+		"Clicking Waylaid Crate sample switches Example Tooltip to Waylaid Crate")
+
+	-- Price format buttons & Modifier buttons update DB and preview
+	tc.formatBtns.icons:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.ttPriceFormat == "icons",
+		"Clicking Coin Icons format button sets ttPriceFormat = 'icons'")
+	local fillRowIcons = findPreviewRow("Fill Cost")
+	assertCheck(fillRowIcons and (fillRowIcons.rightFs:GetText() or ""):find("MoneyFrame\\UI-", 1, true) ~= nil,
+		"Coin Icons format renders WoW coin texture markup in Example Tooltip")
+	tc.formatBtns.colored:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.ttPriceFormat == "colored",
+		"Clicking Colored Text format button restores ttPriceFormat = 'colored'")
+
+	tc.modBtns.alt:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.ttModifier == "alt"
+		and tv and tv.previewStatusFs and (tv.previewStatusFs:GetText() or ""):find("Alt", 1, true) ~= nil,
+		"Clicking Alt modifier button sets ttModifier = 'alt' and updates preview status")
+	tc.modBtns.none:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.ttModifier == "none",
+		"Clicking Always modifier button restores ttModifier = 'none'")
+
+	-- Presets (Compact / All On / Reset) update preview lines & sync with console_settings / app.ui.optCrateTooltipCheck / crateTooltipCheck
+	tc.sampleBtns.green_lens:Click("LeftButton")
+	tc.presetBtns.all:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.tooltipCraftCost == true
+		and _G.MerchantMasterDB.ttVendorSell == true
+		and _G.MerchantMasterDB.ttInvHideZero == false
+		and _G.MerchantMasterDB.crateTooltips == true,
+		"All On preset enables all tooltip toggles including Craft Cost, Vendor Sell, and zero-count alts")
+	local vendorRowAll = findPreviewRow("Vendor Sell Price")
+	assertCheck(vendorRowAll ~= nil and vendorRowAll.enabled == true,
+		"All On preset enables Vendor Sell Price in Example Tooltip")
+
+	tc.presetBtns.compact:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.tooltipCraftCost == false
+		and _G.MerchantMasterDB.tooltipDEBreakdown == false
+		and _G.MerchantMasterDB.ttInvByChar == false
+		and _G.MerchantMasterDB.ttInvCompact == true,
+		"Compact preset hides detailed breakdowns and per-char rows while enabling compact inventory")
+	local deBdRowCompact = findPreviewRow("Vision Dust")
+	assertCheck(deBdRowCompact ~= nil and deBdRowCompact.enabled == false,
+		"Compact preset dims DE material breakdown rows in Example Tooltip")
+
+	-- Uncheck crateTooltips in Tooltip Setup -> syncs app.ui.optCrateTooltipCheck & crateTooltipCheck & console_settings
+	setCheck(tc.checks.crateTooltips, false)
+	assertCheck(_G.MerchantMasterDB.crateTooltips == false,
+		"Unchecking crateTooltips in Tooltip Setup updates MerchantMasterDB.crateTooltips = false")
+	if app.ui and app.ui.optCrateTooltipCheck and app.ui.optCrateTooltipCheck.GetChecked then
+		assertCheck(app.ui.optCrateTooltipCheck:GetChecked() == false,
+			"crateTooltips toggle syncs to app.ui.optCrateTooltipCheck")
+	end
+	if app.ui and app.ui.crateTooltipCheck and app.ui.crateTooltipCheck.GetChecked then
+		assertCheck(app.ui.crateTooltipCheck:GetChecked() == false,
+			"crateTooltips toggle syncs to app.ui.crateTooltipCheck")
+	end
+
+	-- Reset preset restores defaults including crateTooltips = true and syncs external controls back ON
+	tc.presetBtns.reset:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.crateTooltips == true
+		and _G.MerchantMasterDB.tooltipDEValue == true
+		and _G.MerchantMasterDB.tooltipDEBreakdown == true
+		and _G.MerchantMasterDB.tooltipCraftCost == false,
+		"Reset preset restores recommended defaults")
+	if app.ui and app.ui.optCrateTooltipCheck and app.ui.optCrateTooltipCheck.GetChecked then
+		assertCheck(app.ui.optCrateTooltipCheck:GetChecked() == true,
+			"Reset preset syncs crateTooltips = true back to app.ui.optCrateTooltipCheck")
+	end
+	if app.ui and app.ui.crateTooltipCheck and app.ui.crateTooltipCheck.GetChecked then
+		assertCheck(app.ui.crateTooltipCheck:GetChecked() == true,
+			"Reset preset syncs crateTooltips = true back to app.ui.crateTooltipCheck")
+	end
+
+	-- Restore saved tooltip state
+	for _, k in ipairs(ttKeys) do
+		_G.MerchantMasterDB[k] = savedTT[k]
+	end
+	UI._state.tooltipSampleKey = savedSample
+	if ns.TooltipPrefs and ns.TooltipPrefs.InvalidateAll then
+		ns.TooltipPrefs.InvalidateAll()
+	end
+	UI.SyncSettings()
 	app.panel:Hide()
 end
 

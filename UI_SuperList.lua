@@ -12,8 +12,14 @@ local uiCache = {
     metaEpoch = 0,
     prewarmSeq = 0,
     metaTargets = nil,
+    builtPriceRev = nil,
     appleRoot = 'Interface\\AddOns\\' .. tostring(ADDON or 'MerchantMaster') .. '\\Assets\\apple\\',
 }
+function uiCache.curPriceRev()
+    return (ns.GetPriceDataRevision and ns.GetPriceDataRevision())
+        or (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion())
+        or ns.priceCacheEpoch or 0
+end
 function uiCache.snapshotsAvailable()
     if type(ns.HasSnapshots) == 'function' then
         return ns.HasSnapshots() == true
@@ -2039,7 +2045,7 @@ function provider.Cancel()
 end
 function provider.Invalidate(reason, itemIDs)
     if not reason then
-        provider.Cancel(); signature=nil; buildState=nil; rows=nil; metaPatch=nil; uiCache.metaTargets=nil; repairPatch=nil
+        provider.Cancel(); signature=nil; uiCache.builtPriceRev=nil; buildState=nil; rows=nil; metaPatch=nil; uiCache.metaTargets=nil; repairPatch=nil; changes={}; itemChanges={}
         uiCache.retainedResult=nil; uiCache.boundResult=nil; uiCache.boundFilterKey=nil
         uiCache.earlyPresentedFilterKey=nil; uiCache.earlyBoundResult=nil; uiCache.earlyCountShown=nil
         uiCache.filterLRU:clear()
@@ -2813,7 +2819,7 @@ local function computeDatasetSig(context)
     local store=ns.Analytics and ns.Analytics.Store
     local statsContext=context.statsContext
     return fingerprint({economy=context.econInfo and context.econInfo.effectiveKey,
-        price=ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion() or ns.priceCacheEpoch,
+        price=(ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion()) or ns.priceCacheEpoch or 0,
         source=db.priceSource,cut=db.applyAHCut,mode=context.subCraftMode,overrides=context.subCraftOverrides,
         prices=db.outlierPrices,
         revision=not statsContext and context.revision or nil,forced=forceVersion,
@@ -2890,8 +2896,8 @@ local function syncEvaluationState(context, sig)
             end
         end
     elseif sig~=signature then
-        metaDirty=false; metaPatch=nil; uiCache.metaTargets=nil; repairPatch=nil
-        provider.Cancel(); buildState=nil; signature=sig
+        metaDirty=false; metaPatch=nil; uiCache.metaTargets=nil; repairPatch=nil; itemChanges={}
+        provider.Cancel(); buildState=nil; signature=sig; uiCache.builtPriceRev=uiCache.curPriceRev()
         uiCache.retainedResult=nil; uiCache.boundResult=nil; uiCache.boundFilterKey=nil
         uiCache.earlyPresentedFilterKey=nil; uiCache.earlyBoundResult=nil; uiCache.earlyCountShown=nil
         uiCache.filterLRU:clear()
@@ -2988,7 +2994,12 @@ local function makeForegroundHandlers(token)
         if next(itemChanges) or metaDirty or uiCache.metaTargets then
             uiCache.retainedResult=nil; uiCache.boundResult=nil; uiCache.boundFilterKey=nil
             uiCache.earlyPresentedFilterKey=nil; uiCache.earlyBoundResult=nil; uiCache.earlyCountShown=nil
-            laterGuarded(function() if token==generation and active() then provider.Refresh(latest) end end)
+            laterGuarded(function()
+                if token==generation and active() then
+                    provider.Refresh(latest)
+                    if provider.RefreshQuickLook then provider.RefreshQuickLook() end
+                end
+            end)
             return
         end
         local col,asc=resolveSort(latest.db)
@@ -2996,11 +3007,13 @@ local function makeForegroundHandlers(token)
         if not metaPatch and earlyKey and earlyKey==activeFilterKey and earlyAuth and earlyResult then
             uiCache.earlyPresentedFilterKey=nil; uiCache.earlyBoundResult=nil; uiCache.earlyCountShown=nil
             view.summary:SetText(string.format('%d / %d recipes',#earlyResult,#rows))
+            if provider.RefreshQuickLook then provider.RefreshQuickLook() end
             return
         end
         uiCache.retainedResult=nil; uiCache.boundResult=nil; uiCache.boundFilterKey=nil
         uiCache.earlyPresentedFilterKey=nil; uiCache.earlyBoundResult=nil; uiCache.earlyCountShown=nil
         present()
+        if provider.RefreshQuickLook then provider.RefreshQuickLook() end
     end
     return onProgress, onComplete, onTierReady
 end
@@ -4552,7 +4565,7 @@ do
             row=host.resolveQuickLookRow(kind,row) or row
         end
         local context=hud.context
-        if (kind~='recipe' or hud.openedTab~='recipes') and host.getQuickLookContext then
+        if host.getQuickLookContext then
             context=host.getQuickLookContext()
         end
         context=quickLookContext(context,kind)
@@ -6745,7 +6758,7 @@ do
         local leg = legacy or H.resolveLegacy(context)
         return fingerprint({
             economy = context and context.econInfo and context.econInfo.effectiveKey,
-            price = (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion()) or ns.priceCacheEpoch,
+            price = (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion()) or ns.priceCacheEpoch or 0,
             source = db.priceSource,
             mode = context and context.subCraftMode,
             overrides = context and context.subCraftOverrides,
@@ -6937,10 +6950,12 @@ do
         elseif sig ~= S.signature then
             S.metaDirty = false
             S.metaTargets = nil
+            S.itemChanges = {}
             vcProvider.Cancel()
             S.buildState = nil
             S.rows = nil
             S.signature = sig
+            S.builtPriceRev = uiCache.curPriceRev()
             S.seenCraftYieldVersion = (store and type(store.craftYieldVersion) == 'number') and store.craftYieldVersion or 0
             S.retainedResult = nil
             S.retainedPlan = nil
@@ -7531,6 +7546,7 @@ do
             end
             vcProvider.Cancel()
             S.signature = nil
+            S.builtPriceRev = nil
             S.buildState = nil
             S.rows = nil
             S.metaDirty = false
@@ -7682,6 +7698,7 @@ do
             S.filterLRU:clear()
             if H.active() and S.latest and not S.pending then
                 vcProvider.Refresh(S.latest)
+                if provider and provider.RefreshQuickLook then provider.RefreshQuickLook() end
             elseif not H.active() then
                 H.prewarmPresentation(S.warmContext or context)
             end
@@ -10326,7 +10343,7 @@ do
         local statsContext = context and context.statsContext
         return fingerprint({
             economy = context and context.econInfo and context.econInfo.effectiveKey,
-            price = (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion()) or ns.priceCacheEpoch,
+            price = (ns.GetEffectivePriceVersion and ns.GetEffectivePriceVersion()) or ns.priceCacheEpoch or 0,
             source = db.priceSource,
             cut = db.applyAHCut ~= false,
             char = context and context.charKey,
@@ -10413,11 +10430,13 @@ do
         elseif sig ~= S.signature then
             S.metaDirty = false
             S.metaTargets = nil
+            S.itemChanges = {}
             aiProvider.Cancel()
             S.buildState = nil
             S.rows = nil
             S.filteredRows = nil
             S.signature = sig
+            S.builtPriceRev = uiCache.curPriceRev()
             S.metaEpoch = S.metaEpoch + 1
             H.clearRetained()
             S.evaluation = {
@@ -11185,6 +11204,7 @@ do
         if not reason then
             aiProvider.Cancel()
             S.signature = nil
+            S.builtPriceRev = nil
             S.buildState = nil
             S.rows = nil
             S.filteredRows = nil
