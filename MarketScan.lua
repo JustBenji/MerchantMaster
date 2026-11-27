@@ -2856,6 +2856,7 @@ local orderFlow = {
 			activeIndex = 1,
 			baselineBagQty = {},
 			pendingTake = nil,
+			collectAll = nil,
 		},
 		craft = {
 			tasks = {},
@@ -4010,6 +4011,7 @@ do
 			activeIndex = 1,
 			baselineBagQty = {},
 			pendingTake = nil,
+			collectAll = nil,
 		}
 		orderFlow.stages.craft = {
 			tasks = {},
@@ -4648,6 +4650,10 @@ do
 		end
 		orderFlow.stages.vendor.pendingBuy = nil
 		orderFlow.stages.collect.pendingTake = nil
+		if orderFlow.stages.collect.collectAll then
+			orderFlow.stages.collect.collectAll.active = false
+			orderFlow.stages.collect.collectAll = nil
+		end
 		local crSt = orderFlow.stages.craft
 		crSt.pendingCraft = nil
 		crSt.activeCast = nil
@@ -6811,6 +6817,62 @@ do
 		return matchedCount
 	end
 
+	local collectAllSerial = 0
+	local stepCollectAllInternal
+	local scheduleNextCollectAllStep
+	local armCollectAllWatchdog
+
+	local function hasCollectableForSource(src)
+		local cSt = orderFlow.stages.collect
+		if not cSt then return false end
+		for _, it in ipairs(cSt.items or {}) do
+			if it and it.source == src and (it.remaining or 0) > 0
+				and it.status ~= "done" and it.status ~= "skipped" then
+				if src == "bank" then
+					local slots = it.itemID and orderFlow.liveBankSlots[it.itemID] or nil
+					if (it.availableHere or 0) > 0 or (slots and #slots > 0) then
+						return true
+					end
+				elseif src == "mail" then
+					local atts = it.itemID and orderFlow.liveMailSlots[it.itemID] or nil
+					if (it.availableHere or 0) > 0 or (atts and #atts > 0) then
+						return true
+					end
+				end
+			end
+		end
+		return false
+	end
+
+	local function hasPendingForSource(src)
+		local cSt = orderFlow.stages.collect
+		if not cSt then return false end
+		for _, it in ipairs(cSt.items or {}) do
+			if it and it.source == src and (it.remaining or 0) > 0
+				and it.status ~= "done" and it.status ~= "skipped" then
+				return true
+			end
+		end
+		return false
+	end
+
+	local function isCollectActionBlocked(addonArg, funcName)
+		if readable(funcName) and type(funcName) == "string" then
+			if funcName == "UseContainerItem" or funcName == "SplitContainerItem"
+				or funcName == "PickupContainerItem" or funcName == "TakeInboxItem"
+				or funcName:find("UseContainerItem", 1, true)
+				or funcName:find("SplitContainerItem", 1, true)
+				or funcName:find("PickupContainerItem", 1, true)
+				or funcName:find("TakeInboxItem", 1, true) then
+				return true
+			end
+		end
+		if readable(addonArg) and (addonArg == ADDON or addonArg == "MerchantMaster") then
+			return true
+		end
+		return funcName == nil and addonArg == nil
+	end
+
 	function OrderFlow.OnBankShow()
 		local wasAtBank = (orderFlow.env.atBank == true)
 		orderFlow.env._bankEventOpen = true
@@ -6847,8 +6909,12 @@ do
 		orderFlow.env._bankAwaitFrameHide = isFrameShownSafe(_G.BankFrame)
 		orderFlow.env._bankAutoSwitched = false
 		orderFlow.env.atBank = false
-		if orderFlow.stages.collect.pendingTake and orderFlow.stages.collect.pendingTake.source == "bank" then
-			orderFlow.stages.collect.pendingTake = nil
+		local cStClose = orderFlow.stages.collect
+		if cStClose.pendingTake and cStClose.pendingTake.source == "bank" then
+			cStClose.pendingTake = nil
+		end
+		if cStClose.collectAll and cStClose.collectAll.active and cStClose.collectAll.source == "bank" then
+			OrderFlow.StopCollectAll("bank_closed")
 		end
 		OrderFlow.ScanOpenBank()
 		notifyOrderFlow()
@@ -6858,6 +6924,11 @@ do
 		if orderFlow.env.atBank then
 			OrderFlow.ScanOpenBank()
 			notifyOrderFlow()
+			local cSt = orderFlow.stages.collect
+			local ca = cSt and cSt.collectAll
+			if ca and ca.active and ca.source == "bank" and cSt.pendingTake == nil and not ca.stepScheduled then
+				scheduleNextCollectAllStep(ca.serial)
+			end
 		end
 	end
 
@@ -6894,6 +6965,11 @@ do
 		if orderFlow.env.atMail then
 			OrderFlow.ScanOpenMailbox()
 			notifyOrderFlow()
+			local cSt = orderFlow.stages.collect
+			local ca = cSt and cSt.collectAll
+			if ca and ca.active and ca.source == "mail" and cSt.pendingTake == nil and not ca.stepScheduled then
+				scheduleNextCollectAllStep(ca.serial)
+			end
 		end
 	end
 
@@ -6904,8 +6980,12 @@ do
 		orderFlow.env._mailAwaitFrameHide = isFrameShownSafe(_G.MailFrame)
 		orderFlow.env._mailAutoSwitched = false
 		orderFlow.env.atMail = false
-		if orderFlow.stages.collect.pendingTake and orderFlow.stages.collect.pendingTake.source == "mail" then
-			orderFlow.stages.collect.pendingTake = nil
+		local cStClose = orderFlow.stages.collect
+		if cStClose.pendingTake and cStClose.pendingTake.source == "mail" then
+			cStClose.pendingTake = nil
+		end
+		if cStClose.collectAll and cStClose.collectAll.active and cStClose.collectAll.source == "mail" then
+			OrderFlow.StopCollectAll("mail_closed")
 		end
 		OrderFlow.ScanOpenMailbox()
 		notifyOrderFlow()
@@ -6976,6 +7056,12 @@ do
 		cSt.activeIndex = idx
 
 		if slotEntry.count <= item.remaining then
+			if not hasBagSpaceForItem(item.itemID, slotEntry.count, nil) then
+				orderFlow.notice = "Bags full - free 1 slot before withdrawing from Bank."
+				orderFlow.noticeKind = "warning"
+				notifyOrderFlow()
+				return false, "bags_full"
+			end
 			if not useFn then return false, "no_api" end
 			cSt.pendingTake = {
 				source = "bank",
@@ -7082,6 +7168,284 @@ do
 		orderFlow.noticeKind = "info"
 		notifyOrderFlow()
 		return true
+	end
+
+	function OrderFlow.IsCollectAllActive()
+		local cSt = orderFlow.stages.collect
+		return (cSt and cSt.collectAll and cSt.collectAll.active == true) and true or false
+	end
+
+	function OrderFlow.HasCollectableAtCurrentSource()
+		syncLiveEnvironmentInternal()
+		if orderFlow.env.atBank and hasCollectableForSource("bank") then
+			return true
+		end
+		if orderFlow.env.atMail and hasCollectableForSource("mail") then
+			return true
+		end
+		return false
+	end
+
+	function OrderFlow.StopCollectAll(reason)
+		local cSt = orderFlow.stages.collect
+		local ca = cSt and cSt.collectAll
+		local wasActive = (ca and ca.active == true) and true or false
+		local src = ca and ca.source or nil
+		local count = ca and (ca.collectedCount or 0) or 0
+		if ca then
+			ca.active = false
+			ca.stepScheduled = false
+		end
+		collectAllSerial = collectAllSerial + 1
+		if cSt then
+			cSt.collectAll = nil
+		end
+		if not wasActive then
+			return false
+		end
+		local srcLabel = (src == "bank") and "Bank" or ((src == "mail") and "Mailbox" or "container")
+		if reason == "done" then
+			if count > 0 then
+				orderFlow.notice = "Collected all needed items from " .. srcLabel .. "!"
+				orderFlow.noticeKind = "positive"
+			else
+				orderFlow.notice = "No matching pending items found at " .. srcLabel .. "."
+				orderFlow.noticeKind = "warning"
+			end
+		elseif reason == "user_stop" then
+			orderFlow.notice = "Stopped Collect All."
+			orderFlow.noticeKind = "info"
+		elseif reason == "bank_closed" then
+			orderFlow.notice = "Stopped Collect All - Bank closed."
+			orderFlow.noticeKind = "warning"
+		elseif reason == "mail_closed" then
+			orderFlow.notice = "Stopped Collect All - Mailbox closed."
+			orderFlow.noticeKind = "warning"
+		elseif reason == "action_blocked" then
+			orderFlow.notice = "Collect All stopped - hardware action blocked. Click item button manually."
+			orderFlow.noticeKind = "warning"
+		elseif reason == "timeout" then
+			orderFlow.notice = "Collect All paused - waiting on server timed out. Click Collect All to retry."
+			orderFlow.noticeKind = "warning"
+		elseif reason == "mail_helper_active" then
+			orderFlow.notice = "Mail Helper is currently looting - wait or click Stop first."
+			orderFlow.noticeKind = "info"
+		elseif reason == "bags_full" then
+			if not orderFlow.notice or orderFlow.notice == "" then
+				orderFlow.notice = "Bags full - free 1 slot before collecting."
+			end
+			orderFlow.noticeKind = "warning"
+		elseif reason == "withdraw_failed" or reason == "split_failed" then
+			orderFlow.notice = "Stopped Collect All - bank withdrawal failed."
+			orderFlow.noticeKind = "warning"
+		elseif reason == "take_failed" then
+			orderFlow.notice = "Stopped Collect All - mail collection failed."
+			orderFlow.noticeKind = "warning"
+		elseif reason == "no_api" then
+			orderFlow.notice = "Stopped Collect All - container API unavailable."
+			orderFlow.noticeKind = "warning"
+		elseif type(reason) == "string" and reason ~= "" then
+			orderFlow.notice = reason
+			orderFlow.noticeKind = "info"
+		end
+		notifyOrderFlow()
+		return true
+	end
+
+	function OrderFlow.OnActionBlocked(addonArg, funcName)
+		local cSt = orderFlow.stages.collect
+		if cSt and cSt.collectAll and cSt.collectAll.active and isCollectActionBlocked(addonArg, funcName) then
+			cSt.pendingTake = nil
+			OrderFlow.StopCollectAll("action_blocked")
+			return true
+		end
+		return false
+	end
+
+	armCollectAllWatchdog = function(serial, takeToken)
+		if not (C_Timer and type(C_Timer.After) == "function") then return end
+		local arming = true
+		C_Timer.After(4.0, function()
+			if arming then return end
+			local cSt = orderFlow.stages.collect
+			local ca = cSt and cSt.collectAll
+			if ca and ca.active and ca.serial == serial and cSt.pendingTake == takeToken then
+				cSt.pendingTake = nil
+				OrderFlow.StopCollectAll("timeout")
+			end
+		end)
+		arming = false
+	end
+
+	scheduleNextCollectAllStep = function(serial)
+		local cSt = orderFlow.stages.collect
+		local ca = cSt and cSt.collectAll
+		if not (ca and ca.active and ca.serial == serial) then return end
+		if ca.stepScheduled then return end
+		if C_Timer and type(C_Timer.After) == "function" then
+			ca.stepScheduled = true
+			C_Timer.After(0.15, function()
+				local curCSt = orderFlow.stages.collect
+				local curCa = curCSt and curCSt.collectAll
+				if not (curCa and curCa.active and curCa.serial == serial) then return end
+				curCa.stepScheduled = false
+				stepCollectAllInternal(serial)
+			end)
+		else
+			ca.stepScheduled = false
+			stepCollectAllInternal(serial)
+		end
+	end
+
+	stepCollectAllInternal = function(serial)
+		local cSt = orderFlow.stages.collect
+		local ca = cSt and cSt.collectAll
+		if not (ca and ca.active and ca.serial == serial) then
+			return false, "inactive"
+		end
+		syncLiveEnvironmentInternal()
+		local src = ca.source
+		if src == "bank" and not orderFlow.env.atBank then
+			OrderFlow.StopCollectAll("bank_closed")
+			return false, "bank_closed"
+		elseif src == "mail" and not orderFlow.env.atMail then
+			OrderFlow.StopCollectAll("mail_closed")
+			return false, "mail_closed"
+		end
+		if src == "mail" and ns.MailHelper and type(ns.MailHelper.IsActive) == "function" and ns.MailHelper.IsActive() then
+			OrderFlow.StopCollectAll("mail_helper_active")
+			return false, "mail_helper_active"
+		end
+		if cSt.pendingTake ~= nil then
+			return false, "pending"
+		end
+
+		local maxSteps = math.max(1, #(cSt.items or {})) + 2
+		for _ = 1, maxSteps do
+			if not (cSt.collectAll == ca and ca.active and ca.serial == serial) then
+				return false, "inactive"
+			end
+			local nextIdx, nextItem = nil, nil
+			for idx, it in ipairs(cSt.items or {}) do
+				if it and it.source == src and (it.remaining or 0) > 0
+					and it.status ~= "done" and it.status ~= "skipped"
+					and not (ca.skippedIdx and ca.skippedIdx[idx])
+					and not (ca.skippedItems and ca.skippedItems[it]) then
+					nextIdx = idx
+					nextItem = it
+					break
+				end
+			end
+			if not nextIdx then
+				local finishedCount = ca.collectedCount or 0
+				OrderFlow.StopCollectAll("done")
+				return finishedCount > 0, finishedCount > 0 and "done" or "nothing_to_collect"
+			end
+
+			local ok, err
+			if src == "bank" then
+				ok, err = OrderFlow.WithdrawFromBank(nextIdx)
+			else
+				ok, err = OrderFlow.CollectFromMail(nextIdx)
+			end
+
+			if ok then
+				if cSt.pendingTake ~= nil then
+					armCollectAllWatchdog(serial, cSt.pendingTake)
+				end
+				return true
+			elseif err == "not_in_bank" or err == "not_in_mail" or err == "already_done" then
+				ca.skippedIdx[nextIdx] = true
+				ca.skippedItems[nextItem] = true
+			else
+				OrderFlow.StopCollectAll(err or "failed")
+				return false, err or "failed"
+			end
+		end
+
+		local finishedCount = ca.collectedCount or 0
+		OrderFlow.StopCollectAll("done")
+		return finishedCount > 0, "done"
+	end
+
+	function OrderFlow.CollectAllAtCurrentSource()
+		syncLiveEnvironmentInternal()
+		local atBank = (orderFlow.env.atBank == true)
+		local atMail = (orderFlow.env.atMail == true)
+		if not atBank and not atMail then
+			orderFlow.notice = "Please open Bank or Mailbox to collect all."
+			orderFlow.noticeKind = "warning"
+			notifyOrderFlow()
+			return false, "source_closed"
+		end
+
+		local cSt = orderFlow.stages.collect
+		local src = nil
+		if atBank and atMail then
+			local cur = cSt.items and cSt.items[cSt.activeIndex]
+			if cur and (cur.source == "bank" or cur.source == "mail")
+				and hasPendingForSource(cur.source) then
+				if hasCollectableForSource(cur.source) then
+					src = cur.source
+				else
+					local other = (cur.source == "bank") and "mail" or "bank"
+					src = hasCollectableForSource(other) and other or cur.source
+				end
+			elseif hasCollectableForSource("bank") then
+				src = "bank"
+			elseif hasCollectableForSource("mail") then
+				src = "mail"
+			elseif hasPendingForSource("bank") then
+				src = "bank"
+			else
+				src = "mail"
+			end
+		elseif atBank then
+			src = "bank"
+		else
+			src = "mail"
+		end
+
+		if src == "mail" and ns.MailHelper and type(ns.MailHelper.IsActive) == "function" and ns.MailHelper.IsActive() then
+			orderFlow.notice = "Mail Helper is currently looting - wait or click Stop first."
+			orderFlow.noticeKind = "info"
+			notifyOrderFlow()
+			return false, "mail_helper_active"
+		end
+
+		if src == "bank" then
+			OrderFlow.ScanOpenBank()
+		else
+			OrderFlow.ScanOpenMailbox()
+		end
+		sortCollectItems()
+		selectNextPendingCollectInternal(1, src)
+
+		collectAllSerial = collectAllSerial + 1
+		local serial = collectAllSerial
+		cSt.collectAll = {
+			active = true,
+			source = src,
+			serial = serial,
+			skippedIdx = {},
+			skippedItems = {},
+			collectedCount = 0,
+			stepScheduled = false,
+		}
+		return stepCollectAllInternal(serial)
+	end
+
+	if type(_G.CreateFrame) == "function" then
+		local okF, af = pcall(_G.CreateFrame, "Frame")
+		if okF and af and type(af.SetScript) == "function" and type(af.RegisterEvent) == "function" then
+			af:SetScript("OnEvent", function(_, event, arg1, arg2)
+				if event == "ADDON_ACTION_BLOCKED" then
+					OrderFlow.OnActionBlocked(arg1, arg2)
+				end
+			end)
+			pcall(af.RegisterEvent, af, "ADDON_ACTION_BLOCKED")
+			OrderFlow._collectActionFrame = af
+		end
 	end
 
 	function OrderFlow.MarkCollected(index)
@@ -8027,6 +8391,7 @@ do
 
 		-- 2. Reconcile Stage 3 (Collect Owned: Bank / Mail) bag deltas
 		local cSt = orderFlow.stages.collect
+		local nextCollectAllSerial = nil
 		if orderFlow.env.atBank or orderFlow.env.atMail or cSt.pendingTake ~= nil then
 			local activeSrc = (cSt.pendingTake and cSt.pendingTake.source)
 				or (orderFlow.env.atBank and "bank")
@@ -8091,6 +8456,13 @@ do
 					orderFlow.noticeKind = "positive"
 				end
 			end
+			if reconciledCollect and cSt.collectAll and cSt.collectAll.active then
+				local ca = cSt.collectAll
+				if activeSrc == nil or ca.source == activeSrc then
+					ca.collectedCount = (ca.collectedCount or 0) + 1
+					nextCollectAllSerial = ca.serial
+				end
+			end
 		end
 
 		-- 3. Recompute Stage 4 (Craft) live bag readiness
@@ -8136,6 +8508,9 @@ do
 		end
 
 		notifyOrderFlow()
+		if nextCollectAllSerial then
+			scheduleNextCollectAllStep(nextCollectAllSerial)
+		end
 	end
 
 	function OrderFlow.MarkCraftDone(index)
@@ -9068,6 +9443,7 @@ do
 		if not index or index < 1 or index > #(sl.items or {}) then return false end
 		sl.activeIndex = index
 		sl.warningConfirm = nil
+		sl.scanRetrySerial = (sl.scanRetrySerial or 0) + 1
 		local it = sl.items[index]
 		if it then
 			it.bidPrice = 0
@@ -9076,7 +9452,7 @@ do
 			end
 			OrderFlow.GetSellPostQty(it)
 		end
-		if orderFlow.env.atAH and it and it.channel == "ah"
+		if atAH() and it and it.channel == "ah"
 			and (it.remaining or 0) > 0 and it.status ~= "done" and it.status ~= "skipped" then
 			OrderFlow.ScanSellItemMarket(index, "select")
 		end
@@ -9090,6 +9466,7 @@ do
 		local it = sl.items[idx]
 		if not it then return false end
 		sl.warningConfirm = nil
+		sl.scanRetrySerial = (sl.scanRetrySerial or 0) + 1
 		it.channel = (channel == "vendor") and "vendor" or "ah"
 		if it.itemID and it.itemID > 0 then
 			it.inBags = getSellableBagCount(it.itemID, it.channel == "vendor", it.itemLink)
@@ -9349,7 +9726,7 @@ do
 					it.postQty = lim
 				end
 				sl.activeIndex = idx
-				if orderFlow.env.atAH and it.channel == "ah" then
+				if atAH() and it.channel == "ah" then
 					OrderFlow.ScanSellItemMarket(idx, "select")
 				end
 				orderFlow.notice = "Updated " .. tostring(it.name) .. " in Sell list."
@@ -9432,7 +9809,7 @@ do
 		sl.items[#sl.items + 1] = entry
 		local newIdx = #sl.items
 		sl.activeIndex = newIdx
-		if orderFlow.env.atAH and entry.channel == "ah" then
+		if atAH() and entry.channel == "ah" then
 			OrderFlow.ScanSellItemMarket(newIdx, "select")
 		end
 		orderFlow.notice = "Added " .. tostring(dispName) .. " (" .. tostring(addQty) .. "x) to Sell list."
@@ -9610,13 +9987,46 @@ do
 		})
 	end
 
+	local function scheduleSellScanRetry(targetInfo, itemIndex)
+		local sl = orderFlow.stages and orderFlow.stages.sell
+		if not (sl and targetInfo and targetInfo.itemID and targetInfo.itemID > 0) then return end
+		if not (C_Timer and type(C_Timer.After) == "function") then return end
+		sl.scanRetrySerial = (sl.scanRetrySerial or 0) + 1
+		local retrySerial = sl.scanRetrySerial
+		local baseSearchSerial = sl.searchSerial or 0
+		local targetItemID = targetInfo.itemID
+		C_Timer.After(0.45, function()
+			local s = orderFlow.stages and orderFlow.stages.sell
+			if not (s and s.scanRetrySerial == retrySerial and (s.searchSerial or 0) == baseSearchSerial) then return end
+			if not atAH() or s.pendingPost ~= nil or s.pendingSearch ~= nil then return end
+			if itemIndex ~= nil then
+				local cur = s.items and s.items[s.activeIndex]
+				if s.activeIndex ~= itemIndex or not cur or cur.channel ~= "ah"
+					or cur.itemID ~= targetItemID
+					or (cur.remaining or 0) <= 0 or cur.status == "done" or cur.status == "skipped" then
+					return
+				end
+			else
+				if (s.items and s.items[s.activeIndex]) or not (s.lastItemInfo and s.lastItemInfo.itemID == targetItemID) then
+					return
+				end
+			end
+			OrderFlow.RefreshSellSearch("retry")
+		end)
+	end
+
 	local function dispatchSellScanInternal(targetInfo, itemIndex, reason)
 		local sl = orderFlow.stages.sell
 		if not targetInfo or not targetInfo.itemID or targetInfo.itemID <= 0 then return false, "no_item" end
 		if isSellLegacyAH() then return false, "legacy_ah" end
 		if not atAH() then return false, "ah_closed" end
 		if sl.pendingPost ~= nil then return false, "post_in_flight" end
-		if not isSellThrottledReady() then return false, "throttled" end
+		if not isSellThrottledReady() then
+			if reason ~= "retry" then
+				scheduleSellScanRetry(targetInfo, itemIndex)
+			end
+			return false, "throttled"
+		end
 		local ah = _G.C_AuctionHouse
 		if not ah then return false, "api_unavailable" end
 
@@ -9628,8 +10038,14 @@ do
 
 		if ns.AHChannel and ns.AHChannel.TryAcquire then
 			local okCh = ns.AHChannel.TryAcquire("orderflow_sell", { preemptScan = true })
-			if not okCh then return false, "channel_busy" end
+			if not okCh then
+				if reason ~= "retry" then
+					scheduleSellScanRetry(targetInfo, itemIndex)
+				end
+				return false, "channel_busy"
+			end
 		end
+		sl.scanRetrySerial = (sl.scanRetrySerial or 0) + 1
 
 		local bagInfo = findSellableBagSlot(targetInfo.itemID, 1, targetInfo.itemLink)
 		local isComm = (bagInfo and bagInfo.isCommodity == true)
@@ -9720,14 +10136,14 @@ do
 		return dispatchSellScanInternal(it, idx, reason or "select")
 	end
 
-	function OrderFlow.RefreshSellSearch()
+	function OrderFlow.RefreshSellSearch(reason)
 		local sl = orderFlow.stages.sell
 		if not sl then return false, "no_stage" end
 		local cur = sl.items[sl.activeIndex]
 		if cur and cur.channel == "ah" and cur.itemID and cur.itemID > 0 then
-			return dispatchSellScanInternal(cur, sl.activeIndex, "refresh")
+			return dispatchSellScanInternal(cur, sl.activeIndex, reason or "refresh")
 		elseif sl.lastItemInfo and sl.lastItemInfo.itemID and sl.lastItemInfo.itemID > 0 then
-			return dispatchSellScanInternal(sl.lastItemInfo, nil, "refresh_last")
+			return dispatchSellScanInternal(sl.lastItemInfo, nil, (reason == "retry") and "retry" or "refresh_last")
 		end
 		return false, "no_item"
 	end

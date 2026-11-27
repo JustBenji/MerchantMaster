@@ -4933,4 +4933,780 @@ local function runStandaloneMMSellTabRegression()
 end
 runStandaloneMMSellTabRegression()
 
+-- Regression D: Sell Auto-Refresh (SelectTab / atAH / 0.45s retry + cancel) & TopBar Redesign (UcBtns, Equip/Vendor, Wide/Compact Bounds)
+local function runSellAutoRefreshAndTopBarRedesignTests()
+	local of = ns.MarketScan.OrderFlow
+	local tab = ns.AHSellTab
+	local origAHF = _G.AuctionHouseFrame
+	local origAH = _G.C_AuctionHouse
+	local origCCont = _G.C_Container
+	local origGetItemInfo = _G.GetItemInfo
+	local origCItem = _G.C_Item
+	local origGetTime = _G.GetTime
+	local origTimerAfter = _G.C_Timer and _G.C_Timer.After
+	local origTryAcquire = ns.AHChannel and ns.AHChannel.TryAcquire
+
+	local simTime = 1000.0
+	_G.GetTime = function() return simTime end
+
+	local pendingTimers = {}
+	if _G.C_Timer then
+		_G.C_Timer.After = function(delay, fn)
+			pendingTimers[#pendingTimers + 1] = { at = simTime + (delay or 0), delay = delay or 0, fn = fn, fired = false }
+		end
+	end
+	local function runTimers(dt)
+		simTime = simTime + (dt or 0)
+		local i = 1
+		while i <= #pendingTimers do
+			local t = pendingTimers[i]
+			if not t.fired and t.at <= simTime + 1e-6 then
+				t.fired = true
+				t.fn()
+			end
+			i = i + 1
+		end
+	end
+
+	local ahOpen = true
+	local mockAHF = CreateFrame("Frame", "MockSellRefreshAHFrame", UIParent)
+	mockAHF:SetSize(1080, 660)
+	mockAHF.IsShown = function() return ahOpen end
+	mockAHF.SetDisplayMode = function() end
+	_G.AuctionHouseFrame = mockAHF
+
+	local mockBag = {
+		[1] = { itemID = 97001, stackCount = 12, quality = 1, isLocked = false, isBound = false,
+			hyperlink = "|cffffffff|Hitem:97001::::::::60:::::::|h[Refresh Elixir]|h|r" },
+		[2] = { itemID = 97002, stackCount = 1, quality = 3, isLocked = false, isBound = false,
+			hyperlink = "|cff0070dd|Hitem:97002::::::::60:::::::|h[Refresh Helm]|h|r" },
+	}
+	local meta = {
+		[97001] = { name = "Refresh Elixir", quality = 1, ilvl = 55, class = "Consumable", classID = 0, maxStack = 20, vendor = 500 },
+		[97002] = { name = "Refresh Helm", quality = 3, ilvl = 62, class = "Armor", classID = 4, maxStack = 1, vendor = 2500 },
+	}
+	_G.C_Container = {
+		GetContainerNumSlots = function(b) return (b == 0) and 2 or 0 end,
+		GetContainerItemInfo = function(b, s) return (b == 0) and mockBag[s] or nil end,
+	}
+	_G.GetItemInfo = function(q)
+		local id = tonumber(q) or tonumber(tostring(q or ""):match("item:(%d+)"))
+		local m = id and meta[id]
+		if not m then return nil end
+		return m.name, "|cffffffff|Hitem:" .. id .. "|h[" .. m.name .. "]|h|r", m.quality, m.ilvl, 45, m.class, m.class, m.maxStack, "", 134400, m.vendor, m.classID, 0
+	end
+	_G.C_Item = {
+		GetItemInfo = _G.GetItemInfo,
+		GetItemIconByID = function() return 134400 end,
+		DoesItemExist = function(loc) return loc and mockBag[loc.slotIndex] ~= nil end,
+		IsBound = function() return false end,
+	}
+
+	local throttleReady = true
+	local channelBusy = false
+	local searchDispatches = {}
+	_G.C_AuctionHouse = {
+		IsSellItemValid = function() return true end,
+		GetItemCommodityStatus = function(loc)
+			local s = loc and mockBag[loc.slotIndex]
+			return (s and s.itemID == 97002) and 1 or 2
+		end,
+		GetItemKeyFromItem = function(loc)
+			local s = loc and mockBag[loc.slotIndex]
+			local id = s and s.itemID or 0
+			return { itemID = id, itemLevel = (id == 97002) and 62 or 0, itemSuffix = 0, battlePetSpeciesID = 0 }
+		end,
+		MakeItemKey = function(id, ilvl) return { itemID = id, itemLevel = ilvl or 0, itemSuffix = 0, battlePetSpeciesID = 0 } end,
+		GetItemKeyInfo = function(k) return { itemID = k.itemID, isCommodity = (k.itemID ~= 97002) } end,
+		SendSellSearchQuery = function(k) searchDispatches[#searchDispatches + 1] = k.itemID end,
+		SendSearchQuery = function(k) searchDispatches[#searchDispatches + 1] = k.itemID end,
+		IsThrottledMessageSystemReady = function() return throttleReady end,
+		CalculateCommodityDeposit = function(_, dur, qty) return (dur or 2) * 100 * (qty or 1) end,
+		CalculateItemDeposit = function(_, dur, qty) return (dur or 2) * 200 * (qty or 1) end,
+	}
+	if ns.AHChannel and origTryAcquire then
+		ns.AHChannel.TryAcquire = function(owner, opts)
+			if channelBusy then return false end
+			return origTryAcquire(owner, opts)
+		end
+	end
+
+	of.ClearSavedState()
+	local st = of.GetState()
+	local sl = st.stages.sell
+	st.env.atAH = false -- intentionally stale to prove live atAH() works!
+
+	-- 1. AddBagItemToSell & SelectSellItem trigger live scan via atAH() even when orderFlow.env.atAH == false
+	searchDispatches = {}
+	of.AddBagItemToSell(97001, nil, { useDefaultQty = true })
+	check(#searchDispatches == 1 and searchDispatches[1] == 97001,
+		"RegD: AddBagItemToSell triggers live AH scan via atAH() even when orderFlow.env.atAH == false")
+	sl.pendingSearch = nil
+	if ns.AHChannel and ns.AHChannel.Release then ns.AHChannel.Release("orderflow_sell") end
+
+	searchDispatches = {}
+	of.AddBagItemToSell(97002, nil, { useDefaultQty = true })
+	check(#searchDispatches == 1 and searchDispatches[1] == 97002,
+		"RegD: AddBagItemToSell triggers live AH scan for equipment (97002) via atAH()")
+	sl.pendingSearch = nil
+	if ns.AHChannel and ns.AHChannel.Release then ns.AHChannel.Release("orderflow_sell") end
+
+	searchDispatches = {}
+	of.SelectSellItem(1)
+	check(#searchDispatches == 1 and searchDispatches[1] == 97001,
+		"RegD: SelectSellItem triggers live AH scan via atAH() even when orderFlow.env.atAH == false")
+	sl.pendingSearch = nil
+	if ns.AHChannel and ns.AHChannel.Release then ns.AHChannel.Release("orderflow_sell") end
+
+	-- 2. SelectTab ALWAYS refreshes even when cur.listingsScanned == true, dedupes within 2s, resets on HideTab
+	sl.items[1].listingsScanned = true
+	tab.HideTab()
+	searchDispatches = {}
+	tab.SelectTab()
+	check(#searchDispatches == 1 and searchDispatches[1] == 97001,
+		"RegD: SelectTab triggers live AH scan even when cur.listingsScanned == true")
+	sl.pendingSearch = nil
+	if ns.AHChannel and ns.AHChannel.Release then ns.AHChannel.Release("orderflow_sell") end
+
+	-- Rapid re-call within 2s dedupes
+	simTime = simTime + 0.5
+	searchDispatches = {}
+	tab.SelectTab()
+	check(#searchDispatches == 0,
+		"RegD: Rapid SelectTab within 2s dedupes redundant same-item scan")
+
+	-- HideTab resets dedupe -> reopening immediately scans even within 2s
+	tab.HideTab()
+	searchDispatches = {}
+	tab.SelectTab()
+	check(#searchDispatches == 1 and searchDispatches[1] == 97001,
+		"RegD: HideTab resets auto-scan dedupe so reopening MM Sell immediately refreshes live AH")
+	sl.pendingSearch = nil
+	if ns.AHChannel and ns.AHChannel.Release then ns.AHChannel.Release("orderflow_sell") end
+
+	-- 3. Throttled / channel_busy schedule a single 0.45s retry; executes when ready & cancels on AH close or Vendor switch
+	pendingTimers = {}
+	searchDispatches = {}
+	throttleReady = false
+	local okTh, errTh = of.ScanSellItemMarket(1, "select")
+	check(okTh == false and errTh == "throttled" and #pendingTimers == 1 and math.abs(pendingTimers[1].delay - 0.45) < 0.01,
+		"RegD: Throttled ScanSellItemMarket schedules a single 0.45s retry timer")
+	throttleReady = true
+	runTimers(0.45)
+	check(#searchDispatches == 1 and searchDispatches[1] == 97001,
+		"RegD: 0.45s throttled retry dispatches live scan once AH throttle clears")
+	sl.pendingSearch = nil
+	if ns.AHChannel and ns.AHChannel.Release then ns.AHChannel.Release("orderflow_sell") end
+
+	-- channel_busy schedules 0.45s retry -> executes once channel releases
+	pendingTimers = {}
+	searchDispatches = {}
+	channelBusy = true
+	local okBusy, errBusy = of.ScanSellItemMarket(1, "select")
+	check(okBusy == false and errBusy == "channel_busy" and #pendingTimers == 1,
+		"RegD: channel_busy ScanSellItemMarket schedules a single 0.45s retry timer")
+	channelBusy = false
+	runTimers(0.45)
+	check(#searchDispatches == 1 and searchDispatches[1] == 97001,
+		"RegD: 0.45s channel_busy retry dispatches live scan once AHChannel clears")
+	sl.pendingSearch = nil
+	if ns.AHChannel and ns.AHChannel.Release then ns.AHChannel.Release("orderflow_sell") end
+
+	-- Retry cancels cleanly if OnAuctionHouseClosed fires before 0.45s (even if AH reopens before 0.45s!)
+	pendingTimers = {}
+	searchDispatches = {}
+	throttleReady = false
+	of.ScanSellItemMarket(1, "select")
+	of.OnAuctionHouseClosed()
+	throttleReady = true
+	ahOpen = true
+	runTimers(0.45)
+	check(#searchDispatches == 0,
+		"RegD: 0.45s retry cancels cleanly after OnAuctionHouseClosed (searchSerial guard)")
+
+	-- Retry cancels cleanly if item switches to vendor before 0.45s
+	pendingTimers = {}
+	searchDispatches = {}
+	throttleReady = false
+	of.ScanSellItemMarket(1, "select")
+	of.SetSellItemChannel(1, "vendor")
+	throttleReady = true
+	runTimers(0.45)
+	check(#searchDispatches == 0,
+		"RegD: 0.45s retry cancels cleanly when item channel switches to vendor")
+	of.SetSellItemChannel(1, "ah")
+	sl.pendingSearch = nil
+	if ns.AHChannel and ns.AHChannel.Release then ns.AHChannel.Release("orderflow_sell") end
+
+	-- 4. Side-by-side sellUcBtns (Match, -1c, -1s, -1%) + backward-compat sellUcBtn
+	check(tab.sellUcBtns and #tab.sellUcBtns == 4,
+		"RegD: sellUcBtns exposes 4 side-by-side undercut rule buttons")
+	tab.sellUcBtns[2]:Click("LeftButton")
+	check(sl.undercutMode == "1c", "RegD: sellUcBtns[2] sets undercutMode = '1c'")
+	tab.sellUcBtns[3]:Click("LeftButton")
+	check(sl.undercutMode == "1s", "RegD: sellUcBtns[3] sets undercutMode = '1s'")
+	tab.sellUcBtns[4]:Click("LeftButton")
+	check(sl.undercutMode == "pct", "RegD: sellUcBtns[4] sets undercutMode = 'pct'")
+	tab.sellUcBtns[1]:Click("LeftButton")
+	check(sl.undercutMode == "match", "RegD: sellUcBtns[1] sets undercutMode = 'match'")
+	tab.sellUcBtn:Click("LeftButton")
+	check(sl.undercutMode == "1c", "RegD: Backward-compat sellUcBtn proxy still cycles match -> 1c")
+
+	-- 5. Commodity vs Equipment vs Vendor visibility & live vendor typing readout
+	of.SelectSellItem(1)
+	sl.pendingSearch = nil
+	tab.Render()
+	check(tab.sellUnitRow:IsShown() and not tab.sellBidRow:IsShown(),
+		"RegD: Commodity shows Price/Item summary row and hides Starting Bid row")
+
+	of.SelectSellItem(2)
+	sl.pendingSearch = nil
+	tab.Render()
+	check(tab.sellBidRow:IsShown() and not tab.sellUnitRow:IsShown(),
+		"RegD: Equipment shows Starting Bid row and hides Price/Item summary row")
+
+	of.SetSellItemChannel(1, "vendor")
+	of.SelectSellItem(1)
+	tab.Render()
+	check((not tab.sellForm:IsShown()) and tab.sellVendorBar:IsShown()
+		and (not tab.postBtn:IsShown()) and (not tab.postAllBtn:IsShown())
+		and (not tab.doneBtn:IsShown()) and (not tab.skipBtn:IsShown())
+		and (not tab.sellDurLbl:IsShown()) and (not tab.sellDurBtns[1]:IsShown())
+		and (not tab.sellRuleLbl:IsShown()) and (not tab.sellUcBtns[1]:IsShown()),
+		"RegD: Vendor channel hides AH form, action bar, Duration, and side-by-side Rule buttons")
+
+	-- Typing in vendQtyBox updates Vendor Value live
+	tab.vendQtyBox:SetText("3")
+	local vOnTxt = tab.vendQtyBox:GetScript("OnTextChanged")
+	if vOnTxt then vOnTxt(tab.vendQtyBox, true) end
+	check(stripColors(tab.sellTotalFs:GetText()):find("15s", 1, true) ~= nil,
+		"RegD: Typing in vendQtyBox updates Vendor Value live (3 * 5s = 15s), got: " .. tostring(stripColors(tab.sellTotalFs:GetText())))
+
+	of.SetSellItemChannel(1, "ah")
+	sl.pendingSearch = nil
+	tab.Render()
+	check(tab.sellForm:IsShown() and tab.sellDurLbl:IsShown() and tab.sellDurBtns[1]:IsShown()
+		and tab.sellRuleLbl:IsShown() and tab.sellUcBtns[1]:IsShown(),
+		"RegD: Switching back to AH restores AH form, Duration, and side-by-side Rule buttons")
+
+	-- 6. Wide (1080px host -> 1048px topBar) and Compact (796px host -> 764px topBar) layoutTopBar bounds: zero overflow past topDiv2
+	local function getPointX(widget)
+		if widget and widget.GetPoint then
+			local _, _, _, x = widget:GetPoint(1)
+			return tonumber(x) or 0
+		end
+		return 0
+	end
+	mockAHF:SetSize(1080, 660)
+	tab.topBar:SetWidth(1048)
+	tab.Render()
+	local wideFormRight = getPointX(tab.sellForm) + (tab.sellForm:GetWidth() or 0)
+	local wideDiv2X = getPointX(tab.topDiv2)
+	check(wideDiv2X > 0 and wideFormRight < wideDiv2X,
+		"RegD: Wide layoutTopBar keeps sellForm strictly left of topDiv2 (" .. tostring(wideFormRight) .. " < " .. tostring(wideDiv2X) .. ")")
+
+	mockAHF:SetSize(800, 540)
+	tab.topBar:SetWidth(768)
+	tab.Render()
+	local cmpFormRight = getPointX(tab.sellForm) + (tab.sellForm:GetWidth() or 0)
+	local cmpDiv2X = getPointX(tab.topDiv2)
+	check(cmpDiv2X > 0 and cmpFormRight < cmpDiv2X,
+		"RegD: Compact (768px) layoutTopBar keeps sellForm strictly left of topDiv2 (" .. tostring(cmpFormRight) .. " < " .. tostring(cmpDiv2X) .. ")")
+
+	-- Cleanup
+	tab.HideTab()
+	of.ClearSavedState()
+	if ns.AHChannel and origTryAcquire then ns.AHChannel.TryAcquire = origTryAcquire end
+	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+	_G.GetTime = origGetTime
+	_G.AuctionHouseFrame = origAHF
+	_G.C_AuctionHouse = origAH
+	_G.C_Container = origCCont
+	_G.GetItemInfo = origGetItemInfo
+	_G.C_Item = origCItem
+	if ns.MarketScan and ns.MarketScan.MarkBagsDirty then ns.MarketScan.MarkBagsDirty() end
+end
+runSellAutoRefreshAndTopBarRedesignTests()
+
+-- =============================================================================
+-- Stage 2 Collect All (Bank + Mail batch workflow + UI spotlight buttons)
+-- =============================================================================
+local function runCollectAllTests()
+	local of = app.orderFlow
+	local modal = app.ui and app.ui.cartBuyerModal
+	local origCCont = _G.C_Container
+	local origClearCursor = _G.ClearCursor
+	local origBF = _G.BankFrame
+	local origMailF = _G.MailFrame
+	local origGetTime = _G.GetTime
+	local origTimerAfter = _G.C_Timer and _G.C_Timer.After
+	local origGetInboxNum = _G.GetInboxNumItems
+	local origGetInboxHeader = _G.GetInboxHeaderInfo
+	local origGetInboxItem = _G.GetInboxItem
+	local origGetInboxLink = _G.GetInboxItemLink
+	local origTakeInbox = _G.TakeInboxItem
+	local origMailHelper = ns.MailHelper
+	local origGetBag = app.getBagCountByID
+
+	local mockNow = 70000
+	_G.GetTime = function() return mockNow end
+
+	local scheduledTimers = {}
+	if _G.C_Timer then
+		_G.C_Timer.After = function(delay, fn)
+			scheduledTimers[#scheduledTimers + 1] = { at = mockNow + (tonumber(delay) or 0), delay = tonumber(delay) or 0, fn = fn }
+		end
+	end
+	local function advanceTimers(sec)
+		mockNow = mockNow + sec
+		local keep, run = {}, {}
+		for _, t in ipairs(scheduledTimers) do
+			if t.at <= mockNow then run[#run + 1] = t.fn else keep[#keep + 1] = t end
+		end
+		scheduledTimers = keep
+		for _, fn in ipairs(run) do fn() end
+	end
+
+	-- Mock bags (0..1, 4 slots each) and bank (-1, 6 slots)
+	local mockBagMax = { [0] = 4, [1] = 4, [-1] = 6 }
+	local mockCont = { [0] = {}, [1] = {}, [-1] = {} }
+	local function clearCont(bag)
+		mockCont[bag] = {}
+	end
+	local function setSlot(bag, slot, itemID, qty, locked)
+		if itemID and qty and qty > 0 then
+			mockCont[bag][slot] = { itemID = itemID, stackCount = qty, isLocked = locked or false }
+		else
+			mockCont[bag][slot] = nil
+		end
+	end
+	local function addBagItem(itemID, qty)
+		for b = 0, 1 do
+			for s = 1, mockBagMax[b] do
+				local cell = mockCont[b][s]
+				if cell and cell.itemID == itemID then
+					cell.stackCount = cell.stackCount + qty
+					return true
+				end
+			end
+		end
+		for b = 0, 1 do
+			for s = 1, mockBagMax[b] do
+				if not mockCont[b][s] then
+					mockCont[b][s] = { itemID = itemID, stackCount = qty, isLocked = false }
+					return true
+				end
+			end
+		end
+		return false
+	end
+	local function bagCount(itemID)
+		local tot = 0
+		for b = 0, 1 do
+			for s = 1, mockBagMax[b] do
+				local cell = mockCont[b][s]
+				if cell and cell.itemID == itemID then tot = tot + (cell.stackCount or 0) end
+			end
+		end
+		return tot
+	end
+
+	local useCalls, splitCalls, pickupCalls, clearCursorCount = {}, {}, {}, 0
+	local splitPending = nil
+	_G.ClearCursor = function()
+		clearCursorCount = clearCursorCount + 1
+		splitPending = nil
+	end
+	_G.C_Container = {
+		GetContainerNumSlots = function(b) return mockBagMax[b] or 0 end,
+		GetContainerItemInfo = function(b, s)
+			local c = mockCont[b] and mockCont[b][s]
+			if not c then return nil end
+			return { itemID = c.itemID, stackCount = c.stackCount, isLocked = c.isLocked }
+		end,
+		GetContainerItemID = function(b, s)
+			local c = mockCont[b] and mockCont[b][s]
+			return c and c.itemID or nil
+		end,
+		UseContainerItem = function(b, s)
+			useCalls[#useCalls + 1] = { bag = b, slot = s }
+			local c = mockCont[b] and mockCont[b][s]
+			if c then
+				addBagItem(c.itemID, c.stackCount)
+				mockCont[b][s] = nil
+			end
+		end,
+		SplitContainerItem = function(b, s, qty)
+			splitCalls[#splitCalls + 1] = { bag = b, slot = s, qty = qty }
+			local c = mockCont[b] and mockCont[b][s]
+			if c and c.stackCount >= qty then
+				c.stackCount = c.stackCount - qty
+				if c.stackCount <= 0 then mockCont[b][s] = nil end
+				splitPending = { itemID = c.itemID, qty = qty }
+			end
+		end,
+		PickupContainerItem = function(b, s)
+			pickupCalls[#pickupCalls + 1] = { bag = b, slot = s }
+			if splitPending then
+				setSlot(b, s, splitPending.itemID, splitPending.qty, false)
+				splitPending = nil
+			end
+		end,
+	}
+	app.getBagCountByID = bagCount
+
+	local bf = _G.CreateFrame("Frame")
+	bf:Hide()
+	_G.BankFrame = bf
+	local mf = _G.CreateFrame("Frame")
+	mf:Hide()
+	_G.MailFrame = mf
+
+	local mockInbox = {}
+	local mailTakeCalls = {}
+	_G.GetInboxNumItems = function() return #mockInbox end
+	_G.GetInboxHeaderInfo = function(idx)
+		local m = mockInbox[idx]
+		if not m then return nil end
+		return nil, nil, m.sender, m.subject, 0, m.cod or 0, 30, m.hasItem
+	end
+	_G.GetInboxItem = function(mailIdx, attachIdx)
+		local m = mockInbox[mailIdx]
+		local a = m and m.attach and m.attach[attachIdx]
+		if not a then return nil end
+		return a.name, a.itemID, 134400, a.count, 1, true
+	end
+	_G.GetInboxItemLink = function(mailIdx, attachIdx)
+		local m = mockInbox[mailIdx]
+		local a = m and m.attach and m.attach[attachIdx]
+		if not a then return nil end
+		return "|cffffffff|Hitem:" .. tostring(a.itemID) .. "::::::::60:::::|h[" .. a.name .. "]|h|r"
+	end
+	_G.TakeInboxItem = function(mailIdx, attachIdx)
+		mailTakeCalls[#mailTakeCalls + 1] = { mailIdx = mailIdx, attachIdx = attachIdx }
+		local m = mockInbox[mailIdx]
+		local a = m and m.attach and m.attach[attachIdx]
+		if a then
+			addBagItem(a.itemID, a.count)
+			m.attach[attachIdx] = nil
+		end
+	end
+
+	-- 1. Closed Bank & Mail guard
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Batch Herb A", itemID = 78101, qty = 0, ownedUsed = 4, ahUnitPrice = 100 },
+		{ name = "Batch Herb B", itemID = 78102, qty = 0, ownedUsed = 3, ahUnitPrice = 100 },
+		{ name = "Batch Herb C", itemID = 78103, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+	}, {
+		title = "Collect All Bank Test",
+		ownershipProvider = function(id)
+			if id == 78101 then return { bags = 0, bank = 4, mail = 0, alts = {} } end
+			if id == 78102 then return { bags = 0, bank = 3, mail = 0, alts = {} } end
+			if id == 78103 then return { bags = 0, bank = 2, mail = 0, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	check(of.HasCollectableAtCurrentSource() == false,
+		"CollectAll: HasCollectableAtCurrentSource is false when Bank and Mail are closed")
+	local closedOk, closedErr = of.CollectAllAtCurrentSource()
+	check(closedOk == false and closedErr == "source_closed" and of.IsCollectAllActive() == false
+		and of.GetState().notice == "Please open Bank or Mailbox to collect all.",
+		"CollectAll: Refuses cleanly when neither Bank nor Mailbox is open")
+
+	-- 2. Bank multi-item batch: Item A exact stack (UseContainerItem), Item B missing (skip), Item C larger stack (SplitContainerItem)
+	clearCont(0); clearCont(1); clearCont(-1)
+	setSlot(-1, 1, 78101, 4, false)  -- exact match for Item A (4)
+	-- Item B (78102) intentionally missing from bank
+	setSlot(-1, 2, 78103, 10, false) -- stack of 10 > needed 2 -> split stack!
+	bf:Show()
+	of.OnBankShow()
+	check(of.HasCollectableAtCurrentSource() == true,
+		"CollectAll: HasCollectableAtCurrentSource is true when open Bank has matching items")
+
+	useCalls, splitCalls, pickupCalls, clearCursorCount = {}, {}, {}, 0
+	scheduledTimers = {}
+	local bStartOk = of.CollectAllAtCurrentSource()
+	check(bStartOk == true and of.IsCollectAllActive() == true and #useCalls == 1 and useCalls[1].slot == 1,
+		"CollectAll Bank: Starts batch and withdraws Item A (exact stack via UseContainerItem)")
+
+	-- Bag update completes Item A and schedules next step after 0.15s
+	of.OnBagUpdateDelayed()
+	local cItems = of.GetState().stages.collect.items
+	local byID = {}
+	for _, it in ipairs(cItems) do byID[it.itemID] = it end
+	check(byID[78101].status == "done" and byID[78101].collected == 4 and of.IsCollectAllActive() == true,
+		"CollectAll Bank: Bag update reconciles Item A (4/4) and keeps batch active")
+
+	-- Advance 0.2s -> skips missing Item B (not_in_bank) and immediately splits Item C (2 from 10)
+	advanceTimers(0.2)
+	check(#splitCalls == 1 and splitCalls[1].qty == 2 and #pickupCalls == 1 and clearCursorCount >= 1
+		and of.IsCollectAllActive() == true,
+		"CollectAll Bank: Skips missing Item B and splits 2x Item C from bank stack of 10")
+
+	-- Bag update completes Item C -> advance 0.2s -> finishes cleanly!
+	of.OnBagUpdateDelayed()
+	advanceTimers(0.2)
+	check(byID[78103].status == "done" and byID[78103].collected == 2
+		and byID[78102].status ~= "done" and byID[78102].remaining == 3
+		and of.IsCollectAllActive() == false
+		and of.GetState().notice == "Collected all needed items from Bank!"
+		and of.GetState().noticeKind == "positive",
+		"CollectAll Bank: Completes all present items, leaves missing item untouched, and posts positive completion notice")
+
+	-- 3. Bank bags-full stop
+	clearCont(0); clearCont(1); clearCont(-1)
+	for b = 0, 1 do
+		for s = 1, mockBagMax[b] do setSlot(b, s, 99991, 1, false) end
+	end
+	setSlot(-1, 1, 78102, 10, false)
+	of.ScanOpenBank()
+	local fullOk, fullErr = of.CollectAllAtCurrentSource()
+	check(fullOk == false and fullErr == "bags_full" and of.IsCollectAllActive() == false
+		and of.GetState().noticeKind == "warning",
+		"CollectAll Bank: Stops cleanly with warning when bags are full")
+	clearCont(0); clearCont(1)
+
+	-- 4. Bank close cancel mid-batch + stale timer safety
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Cancel Herb 1", itemID = 78111, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+		{ name = "Cancel Herb 2", itemID = 78112, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+	}, {
+		title = "Collect All Bank Close Test",
+		ownershipProvider = function(id)
+			if id == 78111 or id == 78112 then return { bags = 0, bank = 2, mail = 0, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	clearCont(-1)
+	setSlot(-1, 1, 78111, 2, false)
+	setSlot(-1, 2, 78112, 2, false)
+	bf:Show()
+	of.OnBankShow()
+	useCalls = {}
+	scheduledTimers = {}
+	of.CollectAllAtCurrentSource()
+	check(of.IsCollectAllActive() == true and #useCalls == 1, "CollectAll Bank close test: batch active after item 1")
+	bf:Hide()
+	of.OnBankClosed()
+	check(of.IsCollectAllActive() == false and of.GetState().stages.collect.pendingTake == nil
+		and of.GetState().notice == "Stopped Collect All - Bank closed.",
+		"CollectAll Bank: Closing Bank mid-batch cancels cleanly and clears pendingTake")
+	advanceTimers(5.0)
+	check(#useCalls == 1, "CollectAll Bank: Stale timers do not fire withdrawals after Bank closes")
+
+	-- 5. ADDON_ACTION_BLOCKED cancel mid-batch
+	clearCont(0); clearCont(1); clearCont(-1)
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Blocked Herb", itemID = 78121, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+	}, {
+		title = "Collect All Action Blocked Test",
+		ownershipProvider = function(id)
+			if id == 78121 then return { bags = 0, bank = 2, mail = 0, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	setSlot(-1, 1, 78121, 2, false)
+	bf:Show()
+	of.OnBankShow()
+	scheduledTimers = {}
+	of.CollectAllAtCurrentSource()
+	check(of.IsCollectAllActive() == true, "CollectAll ActionBlocked: batch active before block event")
+	if of._collectActionFrame and of._collectActionFrame.GetScript then
+		local onEv = of._collectActionFrame:GetScript("OnEvent")
+		if onEv then onEv(of._collectActionFrame, "ADDON_ACTION_BLOCKED", "MerchantMaster", "UseContainerItem") end
+	else
+		of.OnActionBlocked("MerchantMaster", "UseContainerItem")
+	end
+	check(of.IsCollectAllActive() == false and of.GetState().stages.collect.pendingTake == nil
+		and (of.GetState().notice or ""):find("hardware action blocked", 1, true) ~= nil,
+		"CollectAll: ADDON_ACTION_BLOCKED cancels active Collect All cleanly")
+	bf:Hide()
+	of.OnBankClosed()
+
+	-- 6. Mail Collect All: MailHelper.IsActive guard, multi-item batch + COD skip + missing skip, bags full stop, user StopCollectAll
+	clearCont(0); clearCont(1); clearCont(-1)
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Mail Herb 1", itemID = 78201, qty = 0, ownedUsed = 3, ahUnitPrice = 100 },
+		{ name = "Mail Herb Missing", itemID = 78202, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+		{ name = "Mail Herb 3", itemID = 78203, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+	}, {
+		title = "Collect All Mail Test",
+		ownershipProvider = function(id)
+			if id == 78201 then return { bags = 0, bank = 0, mail = 3, alts = {} } end
+			if id == 78202 then return { bags = 0, bank = 0, mail = 2, alts = {} } end
+			if id == 78203 then return { bags = 0, bank = 0, mail = 2, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	mockInbox = {
+		{ sender = "Scam", subject = "COD", cod = 9999, hasItem = 1, attach = { [1] = { name = "Mail Herb 1", itemID = 78201, count = 3 } } },
+		{ sender = "AH",   subject = "Won", cod = 0,    hasItem = 1, attach = { [1] = { name = "Mail Herb 1", itemID = 78201, count = 3 } } },
+		{ sender = "AH",   subject = "Won", cod = 0,    hasItem = 1, attach = { [1] = { name = "Mail Herb 3", itemID = 78203, count = 2 } } },
+	}
+	mf:Show()
+	of.OnMailShow()
+
+	-- MailHelper.IsActive() guard
+	mailTakeCalls = {}
+	ns.MailHelper = { IsActive = function() return true end }
+	local mhOk, mhErr = of.CollectAllAtCurrentSource()
+	check(mhOk == false and mhErr == "mail_helper_active" and of.IsCollectAllActive() == false and #mailTakeCalls == 0,
+		"CollectAll Mail: Refuses cleanly when ns.MailHelper.IsActive() is true")
+
+	-- Multi-item Mail batch
+	ns.MailHelper = { IsActive = function() return false end }
+	scheduledTimers = {}
+	local mStartOk = of.CollectAllAtCurrentSource()
+	check(mStartOk == true and of.IsCollectAllActive() == true and #mailTakeCalls == 1 and mailTakeCalls[1].mailIdx == 2,
+		"CollectAll Mail: Starts batch and takes non-COD mail #2 (skipping COD mail #1)")
+	of.OnBagUpdateDelayed()
+	advanceTimers(0.2)
+	check(#mailTakeCalls == 2 and mailTakeCalls[2].mailIdx == 3 and of.IsCollectAllActive() == true,
+		"CollectAll Mail: Skips missing Mail Herb 2 and loots Mail Herb 3 from mail #3")
+	of.OnBagUpdateDelayed()
+	advanceTimers(0.2)
+	local mByID = {}
+	for _, it in ipairs(of.GetState().stages.collect.items) do mByID[it.itemID] = it end
+	check(mByID[78201].status == "done" and mByID[78203].status == "done" and mByID[78202].status ~= "done"
+		and of.IsCollectAllActive() == false
+		and of.GetState().notice == "Collected all needed items from Mailbox!"
+		and of.GetState().noticeKind == "positive",
+		"CollectAll Mail: Finishes batch with positive Mailbox completion notice")
+
+	-- Mail bags-full stop
+	clearCont(0); clearCont(1)
+	for b = 0, 1 do
+		for s = 1, mockBagMax[b] do setSlot(b, s, 99992, 1, false) end
+	end
+	mockInbox = {
+		{ sender = "AH", subject = "Won", cod = 0, hasItem = 1, attach = { [1] = { name = "Mail Herb Missing", itemID = 78202, count = 2 } } },
+	}
+	of.ScanOpenMailbox()
+	mailTakeCalls = {}
+	local mFullOk, mFullErr = of.CollectAllAtCurrentSource()
+	check(mFullOk == false and mFullErr == "bags_full" and of.IsCollectAllActive() == false and #mailTakeCalls == 0
+		and of.GetState().noticeKind == "warning",
+		"CollectAll Mail: Stops cleanly with bags_full warning when bags are full")
+	clearCont(0); clearCont(1)
+
+	-- User StopCollectAll("user_stop") mid-batch
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Stop Mail 1", itemID = 78211, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+		{ name = "Stop Mail 2", itemID = 78212, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+	}, {
+		title = "Collect All User Stop Test",
+		ownershipProvider = function(id)
+			if id == 78211 or id == 78212 then return { bags = 0, bank = 0, mail = 2, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	mockInbox = {
+		{ sender = "AH", subject = "Won", cod = 0, hasItem = 1, attach = { [1] = { name = "Stop Mail 1", itemID = 78211, count = 2 } } },
+		{ sender = "AH", subject = "Won", cod = 0, hasItem = 1, attach = { [1] = { name = "Stop Mail 2", itemID = 78212, count = 2 } } },
+	}
+	of.OnMailShow()
+	mailTakeCalls = {}
+	scheduledTimers = {}
+	of.CollectAllAtCurrentSource()
+	check(of.IsCollectAllActive() == true and #mailTakeCalls == 1, "CollectAll UserStop: active after first mail take")
+	local stopped = of.StopCollectAll("user_stop")
+	check(stopped == true and of.IsCollectAllActive() == false and of.GetState().notice == "Stopped Collect All.",
+		"CollectAll UserStop: StopCollectAll cancels loop cleanly")
+	of.OnBagUpdateDelayed()
+	advanceTimers(1.0)
+	check(#mailTakeCalls == 1, "CollectAll UserStop: Does not take second mail after user Stop")
+	mf:Hide()
+	of.OnMailClosed()
+
+	-- 7. UI Button Wiring & Layout Assertions on Collect Stage (Collect All / Stop / Mark Done / Skip)
+	if modal and modal.Render then
+		clearCont(0); clearCont(1); clearCont(-1)
+		of.ClearSavedState()
+		of.LoadFromShoppingRows({
+			{ name = "UI Bank Herb 1", itemID = 78301, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+			{ name = "UI Bank Herb 2", itemID = 78302, qty = 0, ownedUsed = 2, ahUnitPrice = 100 },
+		}, {
+			title = "Collect All UI Button Test",
+			ownershipProvider = function(id)
+				if id == 78301 or id == 78302 then return { bags = 0, bank = 2, mail = 0, alts = {} } end
+				return { bags = 0, bank = 0, mail = 0, alts = {} }
+			end,
+		})
+		of.SetActiveStage("collect")
+		-- Open Bank with 0 matching items -> spotlight renders with Collect All disabled, Mark Done enabled, Skip shown & enabled
+		bf:Show()
+		of.OnBankShow()
+		modal.Render()
+		check(modal.markBtn:GetText() == "Collect All" and not modal.markBtn:IsEnabled()
+			and modal.nextBtn:GetText() == "Mark Done" and modal.nextBtn:IsEnabled()
+			and modal.extraBtn:GetText() == "Skip" and modal.extraBtn:IsShown() and modal.extraBtn:IsEnabled(),
+			"CollectAll UI: Open Bank with 0 matches shows Collect All (disabled), Mark Done, and visible Skip")
+
+		-- Check 4-button row fits cleanly inside 332px span (no overlap!)
+		local totalW = (modal.buyBtn:GetWidth() or 0) + (modal.markBtn:GetWidth() or 0)
+			+ (modal.nextBtn:GetWidth() or 0) + (modal.extraBtn:GetWidth() or 0) + 18
+		check(totalW == 332, "CollectAll UI: 4-button Collect spotlight row spans exact 332px without overflow (got " .. tostring(totalW) .. ")")
+
+		-- Populate matching Bank items -> Collect All becomes enabled; clicking starts batch and flips label to Stop
+		setSlot(-1, 1, 78301, 2, false)
+		setSlot(-1, 2, 78302, 2, false)
+		of.OnBankShow()
+		modal.Render()
+		check(modal.markBtn:GetText() == "Collect All" and modal.markBtn:IsEnabled(),
+			"CollectAll UI: Collect All button enables when open Bank has matching items")
+
+		scheduledTimers = {}
+		modal.markBtn:Click("LeftButton")
+		modal.Render()
+		check(of.IsCollectAllActive() == true and modal.markBtn:GetText() == "Stop" and modal.markBtn:IsEnabled(),
+			"CollectAll UI: Clicking Collect All starts batch and flips button text to Stop")
+
+		modal.markBtn:Click("LeftButton")
+		modal.Render()
+		check(of.IsCollectAllActive() == false and modal.markBtn:GetText() == "Collect All",
+			"CollectAll UI: Clicking Stop cancels batch and restores Collect All label")
+
+		-- Clicking Mark Done (cbNextBtn) calls MarkCollected; clicking Skip (cbExtraBtn) calls SkipCollectItem
+		local activeBeforeDone = of.GetState().stages.collect.items[of.GetState().stages.collect.activeIndex]
+		modal.nextBtn:Click("LeftButton")
+		check(activeBeforeDone.status == "done" and activeBeforeDone.remaining == 0,
+			"CollectAll UI: Clicking Mark Done (cbNextBtn) marks active collect item done")
+
+		local activeBeforeSkip = of.GetState().stages.collect.items[of.GetState().stages.collect.activeIndex]
+		modal.extraBtn:Click("LeftButton")
+		check(activeBeforeSkip.status == "skipped",
+			"CollectAll UI: Clicking Skip (cbExtraBtn) marks active collect item skipped")
+
+		bf:Hide()
+		of.OnBankClosed()
+	end
+
+	-- Cleanup
+	of.ClearSavedState()
+	_G.C_Container = origCCont
+	_G.ClearCursor = origClearCursor
+	_G.BankFrame = origBF
+	_G.MailFrame = origMailF
+	_G.GetTime = origGetTime
+	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+	_G.GetInboxNumItems = origGetInboxNum
+	_G.GetInboxHeaderInfo = origGetInboxHeader
+	_G.GetInboxItem = origGetInboxItem
+	_G.GetInboxItemLink = origGetInboxLink
+	_G.TakeInboxItem = origTakeInbox
+	ns.MailHelper = origMailHelper
+	app.getBagCountByID = origGetBag
+end
+runCollectAllTests()
+
 print("PASS: test_cart_buyer (" .. n .. " assertions)")

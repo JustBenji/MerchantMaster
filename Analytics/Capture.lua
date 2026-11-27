@@ -1859,19 +1859,22 @@ local function destroyItems()
         local srcName=(Model and Model.ItemName and Model.ItemName(source.itemID)) or ("Item #"..tostring(source.itemID))
         local usedBasis,histOutputs=0,{}
         for idx,o in ipairs(deItems) do
-            local allocBasis
-            if totalMarketValue>0 then
-                allocBasis=o.marketValue
-            else
-                allocBasis=(idx==#deItems) and math.max(0,srcBasis-usedBasis)
-                    or math.floor(srcBasis*(totalWeight>0 and (o.weight/totalWeight) or (o.qty/math.max(1,totalUnits))))
+            local allocBasis=0
+            if srcBasis>0 then
+                if idx==#deItems then
+                    allocBasis=math.max(0,srcBasis-usedBasis)
+                else
+                    local ratio=(totalMarketValue>0) and (o.marketValue/totalMarketValue) or (o.qty/math.max(1,totalUnits))
+                    allocBasis=math.floor(srcBasis*ratio)
+                end
                 usedBasis=usedBasis+allocBasis
             end
             o.allocBasis=allocBasis
+            local unitBasis=math.floor(allocBasis/math.max(1,o.qty)+0.5)
             histOutputs[#histOutputs+1]={itemID=o.itemID,qty=o.qty,allocCost=allocBasis,marketValue=o.marketValue}
-            append("DISENCHANT_RECEIVE",o.itemID,o.qty,math.floor(o.unit+0.5),0,"From: "..srcName,{
+            append("DISENCHANT_RECEIVE",o.itemID,o.qty,unitBasis,0,"From: "..srcName,{
                 spellID=p.spellID,deGroup=deGroup,srcItemID=source.itemID,srcName=srcName,
-                srcQty=source.qty,allocBasis=allocBasis,marketValue=o.marketValue,nonCash=true,
+                srcQty=source.qty,allocBasis=allocBasis,marketValue=o.marketValue,costCarryover=true,nonCash=true,
             })
         end
         if row then

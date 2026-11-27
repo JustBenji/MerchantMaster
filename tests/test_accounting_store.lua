@@ -412,18 +412,89 @@ test('Store.craftYieldVersion advances only on RecordCraftYield and DB swap',fun
     S.Init()
     check(S.craftYieldVersion>yBeforeRebuild,'Store.Init DB swap advances craftYieldVersion')
 end)
-test('DISENCHANT_BROKEN attributes profit to broken item without double-counting on shard sale',function()
+test('DISENCHANT cost carryover books 0 at DE time, real profit on shard sale, and provenance survives pack/rebuild',function()
     local buy=add('AH_BUY',101,1,-10000,now-3)
-    local broken=add('DISENCHANT_BROKEN',101,1,0,now-2,{spellID=13262,deGroup='de:test:101',estValue=18992,outputs='102:1:18992',nonCash=true})
-    local recv=add('DISENCHANT_RECEIVE',102,1,18992,now-2,{spellID=13262,deGroup='de:test:101',srcItemID=101,srcQty=1,allocBasis=18992,marketValue=18992,nonCash=true})
-    check(broken.cogs==10000 and broken.profit==8992,'DISENCHANT_BROKEN records 8992c profit on broken item')
-    check(S.Basis(econ,101)==0 and S.Basis(econ,102)==1 and select(2,S.Basis(econ,102))==18992,'broken item basis cleared and shard basis set to estValue')
-    local sale=add('AH_SELL',102,1,18992,now-1,{gross=20000,fee=1008})
-    check(sale.cogs==18992,'selling shard at estValue yields zero duplicate profit on shard')
-    local packDay=S.DayKey(now)
-    local dayTbl=S.db.days[packDay]
+    local broken=add('DISENCHANT_BROKEN',101,1,0,now-2,{spellID=13262,deGroup='de:test:101',estValue=20000,outputs='102:1:20000',nonCash=true})
+    local recv=add('DISENCHANT_RECEIVE',102,1,10000,now-2,{spellID=13262,deGroup='de:test:101',srcItemID=101,srcName='Green Lens',srcQty=1,allocBasis=10000,marketValue=20000,costCarryover=true,nonCash=true})
+    local dayKey=S.DayKey(now)
+    local brokenRoll=S.db.roll[dayKey][char][101]
+    local dayStat=S.db.dayStats[dayKey][char]
+    check(broken.cogs==10000 and broken.profit==0 and broken.extra.deSrcCost==10000,'DISENCHANT_BROKEN carries 10000c basis with 0 paper profit')
+    check((brokenRoll.sold or 0)==0 and (brokenRoll.gross or 0)==0 and (brokenRoll.cogs or 0)==0,'DISENCHANT_BROKEN does not inflate roll sold/gross/cogs')
+    check((dayStat.profitDelta or 0)==0,'DISENCHANT_BROKEN books 0 daily profitDelta')
+    check(S.Basis(econ,101)==0 and S.Basis(econ,102)==1 and select(2,S.Basis(econ,102))==10000,'broken item basis cleared and shard basis set to carried-over 10000c')
+    local sale=add('AH_SELL',102,1,19000,now-1,{gross=20000,fee=1000})
+    check(sale.cogs==10000,'selling 2g shard (10s fee) uses carried-over 1g basis -> +90s profit')
+    check((S.db.dayStats[dayKey][char].profitDelta or 0)==9000,'daily profitDelta equals exact +9000c realized profit')
+    check(sale.extra.deOrigin and sale.extra.deOrigin.srcItemID==101 and sale.extra.deOrigin.srcName=='Green Lens' and sale.extra.deOrigin.qty==1 and sale.extra.deOrigin.srcCost==10000 and sale.extra.deOrigin.share==1,'AH_SELL stamps deOrigin for Green Lens')
+    local dayTbl=S.db.days[dayKey]
     dayTbl.s=S.PackRows(dayTbl.r); dayTbl.r=nil
+    local unpacked=S.UnpackDayString(dayTbl.s)
+    local unpackedSale=unpacked[#unpacked]
+    check(unpackedSale and unpackedSale.extra.deOrigin and unpackedSale.extra.deOrigin.srcItemID==101 and unpackedSale.extra.deOrigin.srcName=='Green Lens' and unpackedSale.extra.deOrigin.srcCost==10000,'packed day preserves deOrigin after unpack')
     S.Rebuild()
     check(S.Basis(econ,101)==0 and S.Basis(econ,102)==0,'Store.Rebuild replays packed DISENCHANT_BROKEN and DISENCHANT_RECEIVE cleanly')
+    check(S.db.dayStats[dayKey][char].profitDelta==9000,'Store.Rebuild preserves exact +9000c profitDelta')
+end)
+test('0-cost looted BoE DE carries 0 basis and mixed/multi-source DE provenance tracks exact shares',function()
+    -- Looted 0-cost BoE -> shard marketValue 20000c, allocBasis 0 -> sale at 19000c net yields +19000c profit
+    local broken0=add('DISENCHANT_BROKEN',201,1,0,now-5,{spellID=13262,deGroup='de:loot:1',estValue=20000,outputs='202:1:20000',nonCash=true})
+    local recv0=add('DISENCHANT_RECEIVE',202,1,0,now-5,{spellID=13262,deGroup='de:loot:1',srcItemID=201,srcName='Looted Bracers',srcQty=1,allocBasis=0,marketValue=20000,costCarryover=true,nonCash=true})
+    check(broken0.cogs==0 and broken0.profit==0,'0-cost looted BoE DE has 0 cogs and 0 profit')
+    check(S.Basis(econ,202)==1 and select(2,S.Basis(econ,202))==0,'0-cost looted BoE shard carries 0 basis (never marketValue fallback)')
+    local sale0=add('AH_SELL',202,1,19000,now-4,{gross=20000,fee=1000})
+    check(sale0.cogs==0 and sale0.extra.deOrigin and sale0.extra.deOrigin.srcItemID==201 and sale0.extra.deOrigin.srcCost==0,'0-cost looted BoE shard sale yields +19000c profit with deOrigin')
+    -- Mixed non-DE buy + two distinct DE sources
+    add('AH_BUY',301,1,-10000,now-3)
+    add('DISENCHANT_BROKEN',301,1,0,now-3,{spellID=13262,deGroup='de:m:1',estValue=20000,outputs='303:1:20000',nonCash=true})
+    add('DISENCHANT_RECEIVE',303,1,10000,now-3,{spellID=13262,deGroup='de:m:1',srcItemID=301,srcName='Green Lens',srcQty=1,allocBasis=10000,marketValue=20000,costCarryover=true,nonCash=true})
+    add('AH_BUY',302,1,-14000,now-3)
+    add('DISENCHANT_BROKEN',302,1,0,now-3,{spellID=13262,deGroup='de:m:2',estValue=20000,outputs='303:1:20000',nonCash=true})
+    add('DISENCHANT_RECEIVE',303,1,14000,now-3,{spellID=13262,deGroup='de:m:2',srcItemID=302,srcName='Blue Staff',srcQty=1,allocBasis=14000,marketValue=20000,costCarryover=true,nonCash=true})
+    add('AH_BUY',303,2,-36000,now-2) -- non-DE inventory stays srcItemID=0
+    local mixSale=add('AH_SELL',303,4,76000,now-1,{gross=80000,fee=4000})
+    check(mixSale.cogs==60000,'mixed 4-unit sale consumes exact 10k+14k+36k=60k basis')
+    check(mixSale.extra.deOrigin and mixSale.extra.deOrigin.qty==2 and mixSale.extra.deOrigin.share==0.5 and mixSale.extra.deOrigin.srcCost==24000,'mixed sale reports 50% DE share and 24000c DE cost')
+    check(type(mixSale.extra.deOrigins)=='table' and #mixSale.extra.deOrigins==2,'multi-source DE sale stamps deOrigins array of 2 sources')
+    local dayTbl=S.db.days[S.DayKey(now)]
+    dayTbl.s=S.PackRows(dayTbl.r); dayTbl.r=nil
+    local unpacked=S.UnpackDayString(dayTbl.s)
+    local uMix=unpacked[#unpacked]
+    check(uMix.extra.deOrigins and #uMix.extra.deOrigins==2 and uMix.extra.deOrigin.share==0.5,'multi-source deOrigins survives PackRows/UnpackDayString')
+end)
+test('Store.Init automatically repairs legacy v3.3.2 DE ledgers with negative shard sales and multi-output remainder split',function()
+    local dayKey=S.DayKey(now)
+    -- Craft a legacy v3.3.2 SavedVariables DB (no deBasisVersion, no costCarryover, inflated allocBasis=marketValue)
+    MerchantMasterLedgerDB={
+        schema=1,subSchema=2,rollupSchema=3,
+        stats={chars={[char]=true},firstLive={[char]=now-100},recon={},errors={},disabled={},zones={},tsmSyncedSales={},importedOrigins={},lastStanding={},favorCostSum=0,favorGainSum=0},
+        basis={[econ]={[401]={qty=0,avg=0},[402]={qty=0,avg=0},[403]={qty=0,avg=0},[404]={qty=0,avg=0}}},
+        roll={[dayKey]={[char]={[401]={sold=1,gross=25000,fee=0,cogs=10000,bought=1,spent=10000},[402]={sold=1,gross=20000,fee=1000,cogs=25000}}}},
+        dayStats={[dayKey]={[char]={salesGross=20000,buySpent=10000,profitDelta=9000}}},
+        days={[dayKey]={r={
+            -- Legacy 1g Green Lens -> DE into 2 outputs (15000 + 5000 market weights, 10001c source cost -> 7500 + 2501 remainder split!)
+            {time=now-10,char=char,econ=econ,type='AH_BUY',itemID=401,qty=1,unit=10001,total=-10001,where='Auction House',extra={eid='leg:1',replayOrder=1}},
+            {time=now-9,char=char,econ=econ,type='DISENCHANT_BROKEN',itemID=401,qty=1,unit=0,total=0,cogs=10001,profit=9999,where='Disenchanting',extra={eid='leg:2',replayOrder=2,spellID=13262,deGroup='de:v332:1',estValue=20000,outputs='402:1:15000;403:1:5000',nonCash=true}},
+            {time=now-9,char=char,econ=econ,type='DISENCHANT_RECEIVE',itemID=402,qty=1,unit=15000,total=0,where='From: Green Lens',extra={eid='leg:3',replayOrder=3,spellID=13262,deGroup='de:v332:1',srcItemID=401,srcQty=1,allocBasis=15000,marketValue=15000,nonCash=true}},
+            {time=now-9,char=char,econ=econ,type='DISENCHANT_RECEIVE',itemID=403,qty=1,unit=5000,total=0,where='From: Green Lens',extra={eid='leg:4',replayOrder=4,spellID=13262,deGroup='de:v332:1',srcItemID=401,srcQty=1,allocBasis=5000,marketValue=5000,nonCash=true}},
+            -- Shard sold at 14000c gross (-700c fee = 13300c net) -> under v3.3.2 this had cogs=15000 (-1700c fake loss!), should repair to cogs=7500 (+5800c profit!)
+            {time=now-8,char=char,econ=econ,type='AH_SELL',itemID=402,qty=1,unit=14000,total=13300,cogs=15000,where='Auction House',extra={eid='leg:5',replayOrder=5,gross=14000,fee=700,autoCost=true}},
+            -- Also legacy 0-cost looted BoE DE -> output 404 had allocBasis=20000, must repair to 0
+            {time=now-7,char=char,econ=econ,type='DISENCHANT_BROKEN',itemID=405,qty=1,unit=0,total=0,cogs=0,profit=20000,where='Disenchanting',extra={eid='leg:6',replayOrder=6,spellID=13262,deGroup='de:v332:2',estValue=20000,outputs='404:1:20000',nonCash=true}},
+            {time=now-7,char=char,econ=econ,type='DISENCHANT_RECEIVE',itemID=404,qty=1,unit=20000,total=0,where='From: Looted Helm',extra={eid='leg:7',replayOrder=7,spellID=13262,deGroup='de:v332:2',srcItemID=405,srcQty=1,allocBasis=20000,marketValue=20000,nonCash=true}},
+            {time=now-6,char=char,econ=econ,type='AH_SELL',itemID=404,qty=1,unit=20000,total=19000,cogs=20000,where='Auction House',extra={eid='leg:8',replayOrder=8,gross=20000,fee=1000,autoCost=true}},
+        }}},
+    }
+    S.Init()
+    check(S.db.deBasisVersion==2,'Store.Init bumps deBasisVersion to 2 after legacy migration')
+    local repaired=S.db.days[dayKey].r
+    check(repaired[2].profit==0 and repaired[2].cogs==10001,'legacy DISENCHANT_BROKEN profit repaired to 0')
+    check(repaired[3].extra.costCarryover==true and repaired[3].extra.allocBasis==7500,'legacy first output receives floor(10001*15000/20000)=7500c')
+    check(repaired[4].extra.costCarryover==true and repaired[4].extra.allocBasis==2501,'legacy final output receives remainder 2501c (7500+2501=10001)')
+    check(repaired[5].cogs==7500 and repaired[5].extra.deOrigin and repaired[5].extra.deOrigin.srcItemID==401 and repaired[5].extra.deOrigin.srcName=='Green Lens','legacy negative shard sale repaired from 15000c to 7500c COGS (+5800c profit) with deOrigin')
+    check(repaired[7].extra.costCarryover==true and repaired[7].extra.allocBasis==0,'legacy 0-cost looted BoE DE output repaired to 0 basis')
+    check(repaired[8].cogs==0 and repaired[8].extra.deOrigin and repaired[8].extra.deOrigin.srcItemID==405,'legacy 0-cost looted BoE shard sale repaired to 0 COGS (+19000c profit)')
+    check(S.db.dayStats[dayKey][char].profitDelta==(13300-7500)+(19000-0),'legacy dayStats profitDelta repaired to exact +24800c')
+    check(S.Basis(econ,403)==1 and select(2,S.Basis(econ,403))==2501,'unsold second output retains exact 2501c carried basis')
 end)
 print(string.format('Accounting store: %d cases, %d assertions, 0 failures',cases,assertions))

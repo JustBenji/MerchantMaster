@@ -2988,6 +2988,33 @@ if toolsBtn._mmIcon and toolsBtn._mmIcon.SetVertexColor then
 end
 app.ui.toolsBtn = toolsBtn
 
+app.ui._formatStatusAge = function(ts, now)
+	if type(ts) ~= "number" or ts <= 0 or type(now) ~= "number" then return nil end
+	local dt = math.max(0, now - ts)
+	if dt < 60 then
+		return "just now"
+	elseif dt < 3600 then
+		return tostring(math.floor(dt / 60)) .. "m"
+	else
+		return tostring(math.floor(dt / 3600)) .. "h"
+	end
+end
+
+app.ui._formatStatusStamp = function(ts, now)
+	if type(ts) ~= "number" or ts <= 0 then return "None" end
+	local dateFn = (type(_G.date) == "function" and _G.date) or (os and type(os.date) == "function" and os.date) or nil
+	local hhmm = dateFn and dateFn("%H:%M", ts) or nil
+	local age = app.ui._formatStatusAge(ts, now)
+	if hhmm and age then
+		return hhmm .. " \194\183 " .. age
+	elseif hhmm then
+		return hhmm
+	elseif age then
+		return age
+	end
+	return tostring(ts)
+end
+
 local statusCapsule = CreateFrame("Frame", nil, toolbar)
 statusCapsule:SetHeight(32)
 statusCapsule:SetWidth(212)
@@ -2999,9 +3026,16 @@ statusCapsule.surface = ns.Theme.NineApple(statusCapsule, "pill", getPal().glass
 statusCapsule:EnableMouse(true)
 statusCapsule:SetScript("OnEnter", function(self)
 	if not _G.GameTooltip then return end
+	local now = (type(_G.time) == "function") and _G.time() or nil
 	_G.GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
 	_G.GameTooltip:AddLine(app.ui._statusEconStr or "Active Economy", 1, 1, 1)
-	_G.GameTooltip:AddLine(app.ui._statusSyncStr or "AH Ready", 0.80, 0.85, 0.90)
+	_G.GameTooltip:AddLine("Active Source: " .. (app.ui._statusSyncStr or "AH Ready"), 0.85, 0.90, 0.96)
+	if app.ui._statusUsingTSM then
+		local tsmStamp = app.ui._statusTsmAt and app.ui._formatStatusStamp(app.ui._statusTsmAt, now) or "Hourly"
+		_G.GameTooltip:AddLine("TSM Light Mode: " .. tsmStamp, 0.60, 0.88, 0.68)
+	end
+	_G.GameTooltip:AddLine("Last Snapshot (Snap): " .. app.ui._formatStatusStamp(app.ui._statusSnapAt, now), 0.78, 0.82, 0.88)
+	_G.GameTooltip:AddLine("Last Manual AH Scan (AH): " .. app.ui._formatStatusStamp(app.ui._statusLiveAt, now), 0.78, 0.82, 0.88)
 	if app.ui._statusUsingTSM then
 		_G.GameTooltip:AddLine("TSM Light Mode supplies hourly refreshed prices without local snapshot files. 7x24 heatmaps and buyout depth stay off.", 0.60, 0.88, 0.68, true)
 	end
@@ -3118,23 +3152,62 @@ end
 -- Fixed chrome around the two labels: 12 pad + 6 dot + 7 gap | 8 + 1 divider + 8 | 12 gap + 24 refresh + 5 pad
 -- minSyncW / floorW hold the capsule steady during a scan (see app.updateScanChrome).
 local function updateStatusCapsuleWidth(econStr, syncStr, minSyncW, floorW)
+	local function measureFs(fs, text)
+		if not fs then return 0 end
+		local mw = (fs.GetUnboundedStringWidth and fs:GetUnboundedStringWidth())
+			or (fs.GetStringWidth and fs:GetStringWidth())
+			or 0
+		if mw < 16 and text and #text > 0 then
+			mw = 7.2 * #text
+		end
+		return mw
+	end
 	local STATUS_LEAD_W, STATUS_MID_W, STATUS_TAIL_W = 12 + 6 + 7, 8 + 1 + 8, 12 + 24 + 5
-	local w1 = (statusEconFs.GetStringWidth and statusEconFs:GetStringWidth()) or 0
-	local w2 = (statusSyncFs.GetStringWidth and statusSyncFs:GetStringWidth()) or 0
-	-- Pre-render FontStrings report ~0 width: fall back to a generous per-character estimate.
-	if w1 < 16 then w1 = 7.2 * #(econStr or "") end
-	if w2 < 16 then w2 = 7.2 * #(syncStr or "") end
+	local w1 = measureFs(statusEconFs, econStr)
+	local w2 = measureFs(statusSyncFs, syncStr)
 	if minSyncW and w2 < minSyncW then w2 = minSyncW end
-	-- +6 slack so sub-pixel glyph rounding never ellipsizes the right-clamped sync label
-	local w = math.ceil(STATUS_LEAD_W + w1 + STATUS_MID_W + w2 + STATUS_TAIL_W) + 6
+	-- +8 slack so sub-pixel glyph rounding never ellipsizes the right-clamped sync label
+	local w = math.ceil(STATUS_LEAD_W + w1 + STATUS_MID_W + w2 + STATUS_TAIL_W) + 8
+	local customSkin = (ns.Theme and ns.Theme.IsCustomSkin and ns.Theme.IsCustomSkin()) and true or false
 	local maxAvailW
-	if ns.Theme and ns.Theme.IsCustomSkin and ns.Theme.IsCustomSkin() then
-		maxAvailW = math.max(176, ((toolbar.GetWidth and toolbar:GetWidth()) or 320) - 52)
+	if customSkin then
+		local hdr = app.ui and app.ui.skinHeader
+		local titleFs = app.ui and app.ui.brandTitleFs
+		local subFs = app.ui and app.ui.brandSubFs
+		local subText = (subFs and subFs.GetText and subFs:GetText()) or ""
+		local subW = (subFs and subFs.IsShown and subFs:IsShown() and subText ~= "")
+			and math.min(268, measureFs(subFs, subText)) or 0
+		local toolsLeft = toolsBtn.GetLeft and toolsBtn:GetLeft() or nil
+		local hdrLeft = hdr and hdr.GetLeft and hdr:GetLeft() or nil
+		if type(toolsLeft) == "number" and type(hdrLeft) == "number" and (toolsLeft - hdrLeft) > 200 then
+			local capsuleRight = toolsLeft - 8
+			local titleText = (titleFs and titleFs.GetText and titleFs:GetText()) or "MerchantMaster"
+			local titleLeft = (titleFs and titleFs.GetLeft and titleFs:GetLeft()) or (hdrLeft + 86)
+			if titleLeft < hdrLeft then titleLeft = hdrLeft + 86 end
+			local titleW = math.min(226, measureFs(titleFs, titleText))
+			local safeLeft = titleLeft + titleW + 12
+			if subW > 0 then
+				local subLeft = (subFs and subFs.GetLeft and subFs:GetLeft()) or (hdrLeft + 316)
+				if subLeft < hdrLeft then subLeft = hdrLeft + 316 end
+				safeLeft = math.max(safeLeft, subLeft + subW + 12)
+			end
+			maxAvailW = math.max(300, math.floor(capsuleRight - safeLeft))
+		else
+			local tw = (toolbar.GetWidth and toolbar:GetWidth()) or 0
+			if tw <= 0 then
+				local pw = (panel and panel.GetWidth and panel:GetWidth()) or 1320
+				local cartW = (app.ui and app.ui.topCartBtn and app.ui.topCartBtn.GetWidth and app.ui.topCartBtn:GetWidth()) or 120
+				tw = math.max(200, pw - 588 - (342 + cartW))
+			end
+			local leftSlack = math.max(0, 588 - (316 + subW + 12))
+			maxAvailW = math.max(300, math.floor((tw - 46) + leftSlack))
+		end
 	else
 		local leftUsed = (app.ui and app.ui.charScopeSeg and app.ui.charScopeSeg.frame and app.ui.charScopeSeg.frame:IsShown()) and 648 or 486
 		maxAvailW = math.max(256, ((toolbar.GetWidth and toolbar:GetWidth()) or 760) - leftUsed)
 	end
-	local cap = math.min(440, maxAvailW)
+	local hardCap = customSkin and (minSyncW and 400 or 330) or 440
+	local cap = math.min(hardCap, maxAvailW)
 	if w < 176 then
 		w = 176
 	elseif w > cap then
@@ -3145,7 +3218,13 @@ local function updateStatusCapsuleWidth(econStr, syncStr, minSyncW, floorW)
 	return w
 end
 app.ui._updateStatusCapsuleWidth = updateStatusCapsuleWidth
-updateStatusCapsuleWidth("Normal · Horde", "AH Ready")
+updateStatusCapsuleWidth("Normal \194\183 Horde", "AH Ready")
+
+if toolbar.HookScript then
+	toolbar:HookScript("OnSizeChanged", function()
+		if app.updateScanChrome then app.updateScanChrome() end
+	end)
+end
 
 if winChrome and winChrome.ahRefresh and winChrome.ahRefresh.button then
 	local rb = winChrome.ahRefresh.button
@@ -3169,7 +3248,9 @@ end
 do
 	local function syncLabelWidth(str)
 		statusSyncFs:SetText(str)
-		local w = (statusSyncFs.GetStringWidth and statusSyncFs:GetStringWidth()) or 0
+		local w = (statusSyncFs.GetUnboundedStringWidth and statusSyncFs:GetUnboundedStringWidth())
+			or (statusSyncFs.GetStringWidth and statusSyncFs:GetStringWidth())
+			or 0
 		if w < 16 then w = 7.2 * #str end
 		return w
 	end
@@ -8936,7 +9017,13 @@ do
 		elseif sk == "vendor" then
 			if app.orderFlow then app.orderFlow.BuyAllAtCurrentVendor() end
 		elseif sk == "collect" then
-			if app.orderFlow then app.orderFlow.MarkCollected() end
+			if app.orderFlow then
+				if app.orderFlow.IsCollectAllActive and app.orderFlow.IsCollectAllActive() then
+					app.orderFlow.StopCollectAll("user_stop")
+				elseif app.orderFlow.CollectAllAtCurrentSource then
+					app.orderFlow.CollectAllAtCurrentSource()
+				end
+			end
 		elseif sk == "craft" then
 			if app.orderFlow then app.orderFlow.SelectCraftRecipe(nil, true) end
 		end
@@ -8951,7 +9038,10 @@ do
 		elseif sk == "vendor" then
 			return "Buy all stocked, affordable vendor items available at this NPC in one click."
 		elseif sk == "collect" then
-			return "Mark this owned item as collected into your bags."
+			if app.orderFlow and app.orderFlow.IsCollectAllActive and app.orderFlow.IsCollectAllActive() then
+				return "Stop the active Collect All batch."
+			end
+			return "Automatically collect all needed pending items from the open Bank or Mailbox."
 		elseif sk == "craft" then
 			return "Highlight and select this recipe in your open profession window."
 		end
@@ -8968,7 +9058,7 @@ do
 		elseif sk == "vendor" then
 			if app.orderFlow then app.orderFlow.MarkVendorBought() end
 		elseif sk == "collect" then
-			if app.orderFlow then app.orderFlow.SkipCollectItem() end
+			if app.orderFlow then app.orderFlow.MarkCollected() end
 		elseif sk == "craft" then
 			if app.orderFlow then app.orderFlow.MarkCraftDone() end
 		end
@@ -8981,6 +9071,8 @@ do
 		local sk = getFlowStage()
 		if sk == "vendor" then
 			if app.orderFlow then app.orderFlow.SkipVendorItem() end
+		elseif sk == "collect" then
+			if app.orderFlow then app.orderFlow.SkipCollectItem() end
 		elseif sk == "craft" then
 			if app.orderFlow then app.orderFlow.SkipCraftTask() end
 		end
@@ -8995,7 +9087,7 @@ do
 		elseif sk == "vendor" then
 			return "Mark this vendor item as Done and advance to the next item."
 		elseif sk == "collect" then
-			return "Skip this item for now and advance to the next owned item."
+			return "Mark this owned item as collected into your bags and advance to the next item."
 		elseif sk == "craft" then
 			return "Mark this craft task as Done and advance to the next task."
 		end
@@ -9005,6 +9097,8 @@ do
 		local sk = getFlowStage()
 		if sk == "vendor" then
 			return "Skip this vendor item for now without marking it bought."
+		elseif sk == "collect" then
+			return "Skip this owned item for now without marking it collected."
 		elseif sk == "craft" then
 			return "Skip this craft task for now without marking it crafted."
 		end
@@ -9679,7 +9773,7 @@ do
 		elseif mode == "vendor" then
 			w1, w2, w3, w4 = 116, 94, 58, 46
 		elseif mode == "collect" then
-			w1, w2, w3, w4 = 134, 106, 80, nil
+			w1, w2, w3, w4 = 126, 74, 70, 44
 		elseif mode == "craft" then
 			w1, w2, w3, w4 = 118, 68, 66, 62
 		end
@@ -10653,8 +10747,11 @@ do
 				ui.mColExp.lblFs:SetText("LOCATION")
 				ui.mColLive.lblFs:SetText("AVAILABLE")
 				ui.mColDiff.lblFs:SetText("REMAINING")
-				cbMarkBtn:SetText("Mark Collected")
-				cbNextBtn:SetText("Skip")
+				local isCollectAll = (app.orderFlow and app.orderFlow.IsCollectAllActive and app.orderFlow.IsCollectAllActive()) and true or false
+				local canCollectAll = isCollectAll or ((app.orderFlow and app.orderFlow.HasCollectableAtCurrentSource and app.orderFlow.HasCollectableAtCurrentSource()) and true or false)
+				cbMarkBtn:SetText(isCollectAll and "Stop" or "Collect All")
+				cbNextBtn:SetText("Mark Done")
+				cbExtraBtn:SetText("Skip")
 				if not cur then
 					cbActiveFs:SetText(palHex("hexMuted", "98989d") .. "No Owned items to collect|r")
 					ui.spotQtyPill:Hide()
@@ -10662,7 +10759,7 @@ do
 					ui.mColLive.valFs:SetText(palHex("hexMuted", "98989d") .. "-|r")
 					ui.mColDiff.valFs:SetText(palHex("hexMuted", "98989d") .. "-|r")
 					cbOpenAHBtn:SetText("Withdraw from Bank")
-					cbOpenAHBtn:SetEnabled(false); cbMarkBtn:SetEnabled(false); cbNextBtn:SetEnabled(false)
+					cbOpenAHBtn:SetEnabled(false); cbMarkBtn:SetEnabled(canCollectAll); cbNextBtn:SetEnabled(false); cbExtraBtn:SetEnabled(false)
 				else
 					positionSpotlightTitle(true)
 					local srcBadge = (cur.source == "bank" and "BANK") or (cur.source == "mail" and "MAIL") or (cur.source == "alt" and "ALT") or "BAGS"
@@ -10714,15 +10811,16 @@ do
 					if isCurDone then
 						cbActiveFs:SetText(palHex("hexPositive", "30d158") .. tostring(cur.name or "") .. " - Ready!|r")
 						ui.spotQtyPill:Show(); ui.spotQtyPill:Paint(qtyFill, qtyStroke, qtyHex, "[OK]")
-						cbOpenAHBtn:SetEnabled(false); cbMarkBtn:SetEnabled(false); cbNextBtn:SetEnabled(false)
+						cbOpenAHBtn:SetEnabled(false); cbMarkBtn:SetEnabled(canCollectAll); cbNextBtn:SetEnabled(false); cbExtraBtn:SetEnabled(false)
 					else
 						cbActiveFs:SetText(palHex("hexText", "ffffff") .. tostring(cur.name or "") .. "|r")
 						ui.spotQtyPill:Show(); ui.spotQtyPill:Paint(qtyFill, qtyStroke, qtyHex, string.format("%dx", cur.remaining or 0))
 						local canAct = (cur.source == "bank" and env.atBank and (cur.availableHere or 0) > 0)
 							or (cur.source == "mail" and env.atMail and (cur.availableHere or 0) > 0)
 						cbOpenAHBtn:SetEnabled(canAct)
-						cbMarkBtn:SetEnabled(cur.source ~= "alt")
-						cbNextBtn:SetEnabled(true)
+						cbMarkBtn:SetEnabled(canCollectAll)
+						cbNextBtn:SetEnabled(cur.source ~= "alt")
+						cbExtraBtn:SetEnabled(true)
 					end
 				end
 				if stageDonePrompt then
@@ -19348,7 +19446,7 @@ local function refreshPanelImpl()
 		econLabel = econLabel:gsub("%-(Horde)$", " · %1"):gsub("%-(Alliance)$", " · %1")
 		local now = (type(_G.time) == "function") and _G.time() or nil
 		local srcKey = (srcInfo and srcInfo.key) or (ns.GetEffectivePriceSource and ns.GetEffectivePriceSource()) or (db and db.priceSource) or "auto"
-		local srcTag = (srcInfo and srcKey ~= "auto" and (srcInfo.short or srcInfo.label)) or "AH"
+		local srcTag = "AH"
 		local ageLbl = "Ready"
 		local econKey = econInfo and econInfo.effectiveKey
 		local snapMeta = (ns.Pricing and type(ns.Pricing.GetSnapshotMeta) == "function") and ns.Pricing.GetSnapshotMeta(econKey) or nil
@@ -19364,48 +19462,61 @@ local function refreshPanelImpl()
 		local ts = nil
 		local useSnap = false
 		if srcKey == "snapshot" then
+			srcTag = "Snap"
 			ts = snapAt
 			if snapAt then useSnap = true end
 		elseif srcKey == "live_ah" then
+			srcTag = "AH"
 			ts = liveAt
 		elseif srcKey == "auto" then
-			if snapAt and (not liveAt or snapAt > liveAt) then
+			if snapAt and (not liveAt or snapAt >= liveAt) then
 				useSnap = true
+				srcTag = "Snap"
 				ts = snapAt
-			elseif liveAt then
+			else
 				srcTag = "AH"
 				ts = liveAt
-			else
-				srcTag = "AH"
-				ts = nil
 			end
 		else
+			srcTag = "AH"
 			ts = liveAt
 		end
-		if useSnap and snapMeta then
-			local snapSrc = (type(snapMeta.source) == "string") and snapMeta.source:lower() or ""
-			srcTag = snapSrc:find("blizzard", 1, true) and "Blizz" or "Snap"
+		if useSnap then
+			srcTag = "Snap"
 			ts = snapAt
 		end
+		local fmtAge = app.ui._formatStatusAge
 		if ts and now then
-			local dt = math.max(0, now - ts)
-			if dt < 60 then
-				ageLbl = "just now"
-			elseif dt < 3600 then
-				ageLbl = tostring(math.floor(dt / 60)) .. "m"
-			else
-				ageLbl = tostring(math.floor(dt / 3600)) .. "h"
-			end
+			ageLbl = (fmtAge and fmtAge(ts, now)) or "just now"
 		end
-		local econStr = (econInfo.selectedKey == "auto") and ("Auto · " .. econLabel) or econLabel
+		local econStr = (econInfo.selectedKey == "auto") and ("Auto \194\183 " .. econLabel) or econLabel
 		local hasSnaps = (ns.HasSnapshots and ns.HasSnapshots()) and true or false
 		local liveIsRecent = (liveAt ~= nil and now ~= nil and (now - liveAt) <= 1800) and true or false
 		local tsmAvail = (econInfo and econInfo.isActive and ns.IsTSMAvailable and ns.IsTSMAvailable()) and true or false
 		local usingTSM = tsmAvail and (srcKey == "tsm" or (srcKey == "auto" and not useSnap and not liveIsRecent))
+		local tsmTs = nil
+		if tsmAvail and type(ns.GetTSMLastUpdateTime) == "function" then
+			local rawTsm = ns.GetTSMLastUpdateTime()
+			if type(rawTsm) == "number" and rawTsm > 0 and (not now or rawTsm <= now) then
+				tsmTs = rawTsm
+			end
+		end
 		local noScanYet = (not usingTSM) and (ts == nil and liveAt == nil and not hasSnaps)
-		local syncStr = usingTSM and "TSM · Hourly" or (noScanYet and "No AH Scan Yet" or string.format("%s %s", srcTag, ageLbl))
+		local syncStr
+		if usingTSM then
+			local tsmAge = fmtAge and fmtAge(tsmTs, now) or nil
+			syncStr = tsmAge and ("TSM " .. tsmAge) or "TSM Hourly"
+		elseif noScanYet then
+			syncStr = "No AH Scan Yet"
+		else
+			syncStr = string.format("%s %s", srcTag, ageLbl)
+		end
 		app.ui._statusUsingTSM = usingTSM
 		app.ui._statusNoScanYet = noScanYet
+		app.ui._statusSource = usingTSM and "tsm" or (useSnap and "snap" or (liveAt and "ah" or nil))
+		app.ui._statusSnapAt = snapAt
+		app.ui._statusLiveAt = liveAt
+		app.ui._statusTsmAt = tsmTs
 		app.ui._statusEconStr, app.ui._statusSyncStr = econStr, syncStr
 		app.ui.statusEconFs:SetText(econStr)
 		if app.updateScanChrome then

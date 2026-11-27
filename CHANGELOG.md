@@ -2,6 +2,17 @@
 
 All notable player-facing changes to **MerchantMaster** are documented in this file.
 
+## [3.3.3] - 2026-11-27
+
+*   **Disenchant 1-to-1 Cost Carryover & Indirect Profit Tracking:** Disenchanting now transfers the broken item's cost directly onto its output shards, dust, or essence instead of stamping market value and recording false losses when you sell those materials. On load, MerchantMaster automatically replays legacy `v3.3.2` ledgers to repair past sales, tags entries with `via DE: <Item>` in the Ledger and Recent AH Sales feed, and reports indirect disenchant profits in **Deep Analysis** and Item details without double-counting.
+*   **24-Hour Ledger Total Wealth Chart:** Computes all 24 rolling hourly wealth points directly from timestamped ledger cashflows (`AH_SELL`, AH fees, lost deposits, writ and crate turn-ins, quest and loot gold, repairs, and postage) while keeping buys, crafts, and disenchants wealth-neutral, showing a full 24-hour curve even right after midnight or across quiet hours.
+*   **Unified 280px Right-Side Mailbox Dock:** Removed the obstructed bottom bar below `MailFrame`'s tabs, widened **Mail Recipients** to `280px` with a strictly bounded `Saved:` pill, and docked **Mail Helper** right alongside the Mailbox on both **Send Mail** and **Inbox**.
+*   **WoW Forever Professions Disenchant Helper Icon:** Anchored the **Disenchant Helper** launcher directly onto `ProfessionsFrame.BookPage` beside **Disenchant** at a high frame level so it renders visibly on top of Blizzard's Professions window.
+*   **Top Header Refresh Pill (`TSM` / `Snap` / `AH` + Age):** Widened the Goblin Baron header status capsule so full refresh tags (`TSM <age>`, `Snap <age>`, `AH <age>`) never truncate, and added both Snapshot and Manual AH timestamps to its hover tooltip.
+*   **TSM Light Mode Clarity & Local App Note:** Clarified the **TSM Light Mode** note to highlight its hourly table-refresh benefit with zero local snapshot files and to state that enabling it requires both the **TradeSkillMaster** addon and the **TSM Desktop App** installed locally (per TSM's setup guide).
+*   **Deep Analysis Hot/Cold Sales Heat Strip:** Displays a color-graded hot/cold sales heat line right above the fold inside the **Competition** card in both Snapshot mode (`24h` hourly strip) and Standalone / TSM mode (`Cold -> Hot` spectrum bar).
+*   **Auto-Refreshing `MM Sell` Workstation & Crafter `Collect All`:** `MM Sell` now refreshes live AH prices whenever you open the tab or load an item (with guarded retry if the AH is throttled or busy) and aligns its top panel into 3 balanced zones with larger `Deposit` and `Total Price` metrics plus side-by-side `[Match] [-1c] [-1s] [-1%]` rule toggles. **Crafter Helper** adds a **Collect All** / **Stop** workflow for batch looting needed craft items at the Bank and Mailbox.
+
 ## [3.3.2] - 2026-11-26
 
 *   **Morning Brief Dashboard, Hourly Wealth & 1440p Scaling:** Rebuilt Today's Overview around side-by-side Profit and Hourly/Daily Wealth charts (`24h`, `7d`, `14d`, `30d`), strict `AH_SELL` KPIs, Reagent Price-Drop Alerts (10%+ dips on reagents for your top crafts), a scrollable recent AH sales feed, and automatic wide-window scaling (`2240x1300`) on 1440p displays while keeping 1080p dimensions unchanged.

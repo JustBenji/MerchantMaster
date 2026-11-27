@@ -11,6 +11,12 @@ local SELL_TAB_LABEL = "MM Sell"
 local SELL_TAB_HEADER = "MerchantMaster - Sell"
 
 local SELL_UNDERCUT_LABELS = { match = "Match", ["1c"] = "-1c", ["1s"] = "-1s", pct = "-1%" }
+local SELL_UNDERCUT_SPECS = {
+	{ key = "match", label = "Match" },
+	{ key = "1c",    label = "-1c" },
+	{ key = "1s",    label = "-1s" },
+	{ key = "pct",   label = "-1%" },
+}
 local SELL_DUR_LABELS = { [1] = "2h", [2] = "8h", [3] = "24h" }
 local SELL_PRICES_VISIBLE_ROWS = 9
 local SELL_PRICES_ROW_H = 22
@@ -103,6 +109,16 @@ local function formatSellTitle(of, item)
 	return hex .. name .. "|r", sub
 end
 
+local function formatUnitSummaryText(effUnit)
+	if not effUnit or effUnit <= 0 then
+		return palHex("hexMuted", "98989d") .. "Enter unit price above|r"
+	end
+	local netUnit = math.max(1, math.floor(effUnit * 0.95 + 0.5))
+	return palHex("hexText", "ffffff") .. ns.FormatMoneyCompact(effUnit) .. "|r"
+		.. palHex("hexMuted", "98989d") .. "  |  Net (95%): |r"
+		.. palHex("hexPositive", "30d158") .. ns.FormatMoneyCompact(netUnit) .. "|r"
+end
+
 local function makeFramedBtn(parent, w, h, label, fontSize, opts)
 	opts = opts or {}
 	local b = CreateFrame("Button", opts.name, parent)
@@ -135,8 +151,8 @@ local function makeFramedBtn(parent, w, h, label, fontSize, opts)
 			fs:SetTextColor(t[1], t[2], t[3], t[4] or 1.0)
 		else
 			self.plate:SetFill(f[1] * 0.65, f[2] * 0.65, f[3] * 0.65, 0.60)
-			self.plate:SetStroke(s[1], s[2], s[3], 0.30)
-			fs:SetTextColor(t[1] * 0.65, t[2] * 0.65, t[3] * 0.65, 0.45)
+			self.plate:SetStroke(s[1], s[2], s[3], 0.34)
+			fs:SetTextColor(t[1] * 0.72, t[2] * 0.72, t[3] * 0.72, 0.58)
 		end
 	end
 	function b:PaintStyle(fill, stroke, textCol)
@@ -391,6 +407,22 @@ local bagScrollOffset = 0
 local bagLayoutCache = {}
 local bagScanCache = {}
 local activeSubTab = "prices"
+local lastAutoScanItemKey = nil
+local lastAutoScanAt = 0
+local lastTopBarLayoutW = -1
+local layoutTopBar
+
+local function nowAutoScanMono()
+	if type(_G.GetTime) == "function" then
+		local ok, t = pcall(_G.GetTime)
+		if ok and type(t) == "number" then return t end
+	end
+	if type(_G.time) == "function" then
+		local ok, t = pcall(_G.time)
+		if ok and type(t) == "number" then return t end
+	end
+	return 0
+end
 
 local function installBagPickupHook()
 	if pickupHooked then return end
@@ -584,41 +616,64 @@ local function buildUI()
 	app.ui = app.ui or {}
 	app.ui.ahSellTab = AHSellTab
 
-	-- Top Sale Bar (Spacious Auctionator-style item preview, Qty, Price, Bid, Duration, Rule, Deposit, Post)
+	-- Top Sale Bar (3-Zone Aligned Workstation: Selected Item | Qty & Price & Actions | Metrics & Rules)
 	local topBar = CreateFrame("Frame", nil, tabFrame)
-	topBar:SetHeight(144)
-	topBar:SetPoint("TOPLEFT", tabFrame, "TOPLEFT", 8, -8)
-	topBar:SetPoint("TOPRIGHT", tabFrame, "TOPRIGHT", -8, -8)
+	topBar:SetHeight(158)
+	topBar:SetPoint("TOPLEFT", tabFrame, "TOPLEFT", 10, -10)
+	topBar:SetPoint("TOPRIGHT", tabFrame, "TOPRIGHT", -10, -10)
 	topBar.plate = ns.Theme.NineApple(topBar, "glass_r10",
 		{ 0.04, 0.12, 0.08, 0.96 },
 		{ 0.83, 0.64, 0.24, 0.60 },
 		{ layer = "BACKGROUND", sub = 0, cornerSize = 8, noSpecular = true })
 	AHSellTab.topBar = topBar
+	if topBar.HookScript then
+		topBar:HookScript("OnSizeChanged", function()
+			lastTopBarLayoutW = -1
+			layoutTopBar()
+		end)
+	elseif topBar.SetScript then
+		topBar:SetScript("OnSizeChanged", function()
+			lastTopBarLayoutW = -1
+			layoutTopBar()
+		end)
+	end
 
-	-- Left preview + drag-and-drop socket (indented top header clears WoW AH circular portrait)
-	local activeFs = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	activeFs:SetPoint("TOPLEFT", topBar, "TOPLEFT", 52, -8)
-	activeFs:SetWidth(142)
-	activeFs:SetHeight(18)
-	activeFs:SetJustifyH("LEFT")
-	activeFs:SetJustifyV("MIDDLE")
-	activeFs:SetWordWrap(false)
-	applySafeFont(activeFs, 13, "semibold")
-	AHSellTab.activeFs = activeFs
+	-- Subtle vertical zone dividers
+	local topDiv1 = topBar:CreateTexture(nil, "ARTWORK")
+	topDiv1:SetWidth(1)
+	topDiv1:SetPoint("TOP", topBar, "TOPLEFT", 328, -14)
+	topDiv1:SetPoint("BOTTOM", topBar, "BOTTOMLEFT", 328, 14)
+	AHSellTab.topDiv1 = topDiv1
 
-	local spotSubFs = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	spotSubFs:SetPoint("TOPLEFT", activeFs, "BOTTOMLEFT", 0, -2)
-	spotSubFs:SetWidth(142)
-	spotSubFs:SetHeight(14)
-	spotSubFs:SetJustifyH("LEFT")
-	spotSubFs:SetJustifyV("MIDDLE")
-	spotSubFs:SetWordWrap(false)
-	applySafeFont(spotSubFs, 9.5, "regular")
-	AHSellTab.spotSubFs = spotSubFs
+	local topDiv2 = topBar:CreateTexture(nil, "ARTWORK")
+	topDiv2:SetWidth(1)
+	topDiv2:SetPoint("TOP", topBar, "TOPLEFT", 732, -14)
+	topDiv2:SetPoint("BOTTOM", topBar, "BOTTOMLEFT", 732, 14)
+	AHSellTab.topDiv2 = topDiv2
 
-	local iconDropBtn = CreateFrame("Button", nil, topBar)
+	-- Zone 1 (Left): Selected Item header, drag-and-drop icon socket, and drop hint
+	local zone1 = CreateFrame("Frame", nil, topBar)
+	zone1:SetPoint("TOPLEFT", topBar, "TOPLEFT", 12, -10)
+	zone1:SetPoint("BOTTOMLEFT", topBar, "BOTTOMLEFT", 12, 10)
+	zone1:SetWidth(304)
+	AHSellTab.sellZone1 = zone1
+
+	-- Eyebrow aligned above the text column (clear of WoW top-left AH portrait)
+	local zone1EyebrowFs = zone1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	zone1EyebrowFs:SetPoint("TOPLEFT", zone1, "TOPLEFT", 70, -2)
+	zone1EyebrowFs:SetWidth(232)
+	zone1EyebrowFs:SetHeight(14)
+	zone1EyebrowFs:SetJustifyH("LEFT")
+	zone1EyebrowFs:SetJustifyV("MIDDLE")
+	zone1EyebrowFs:SetWordWrap(false)
+	applySafeFont(zone1EyebrowFs, 9, "semibold")
+	zone1EyebrowFs:SetText("SELECTED ITEM")
+	AHSellTab.zone1EyebrowFs = zone1EyebrowFs
+
+	-- 56x56 icon drop socket sits at y=-20 in zone1 (y=-62 below AuctionHouseFrame top -> clear of circular portrait)
+	local iconDropBtn = CreateFrame("Button", nil, zone1)
 	iconDropBtn:SetSize(56, 56)
-	iconDropBtn:SetPoint("TOPLEFT", topBar, "TOPLEFT", 14, -50)
+	iconDropBtn:SetPoint("TOPLEFT", zone1, "TOPLEFT", 2, -20)
 	iconDropBtn.plate = ns.Theme.NineApple(iconDropBtn, "glass_r8",
 		{ 0.02, 0.07, 0.05, 0.98 },
 		{ 0.83, 0.64, 0.24, 0.90 },
@@ -631,19 +686,60 @@ local function buildUI()
 	iconDropBtn.tex = dropTex
 	local dropCountFs = iconDropBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	dropCountFs:SetPoint("BOTTOMRIGHT", iconDropBtn, "BOTTOMRIGHT", -5, 4)
-	applySafeFont(dropCountFs, 10, "bold")
+	applySafeFont(dropCountFs, 10.5, "bold")
+	if dropCountFs.SetShadowOffset then dropCountFs:SetShadowOffset(1, -1) end
+	if dropCountFs.SetShadowColor then dropCountFs:SetShadowColor(0, 0, 0, 0.95) end
 	iconDropBtn.countFs = dropCountFs
 	AHSellTab.iconDropBtn = iconDropBtn
 
-	local dropHintFs = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	dropHintFs:SetPoint("TOPLEFT", iconDropBtn, "TOPRIGHT", 8, -4)
-	dropHintFs:SetWidth(116)
-	dropHintFs:SetHeight(48)
-	dropHintFs:SetJustifyH("LEFT")
-	dropHintFs:SetJustifyV("TOP")
-	dropHintFs:SetWordWrap(true)
-	applySafeFont(dropHintFs, 9, "regular")
-	dropHintFs:SetText(palHex("hexMuted", "98989d") .. "Drop bag item here or click from Bags below.|r")
+	local activeFs = zone1:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	activeFs:SetPoint("TOPLEFT", zone1, "TOPLEFT", 70, -20)
+	activeFs:SetWidth(232)
+	activeFs:SetHeight(20)
+	activeFs:SetJustifyH("LEFT")
+	activeFs:SetJustifyV("MIDDLE")
+	activeFs:SetWordWrap(false)
+	applySafeFont(activeFs, 13, "semibold")
+	AHSellTab.activeFs = activeFs
+
+	local spotSubFs = zone1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	spotSubFs:SetPoint("TOPLEFT", activeFs, "BOTTOMLEFT", 0, -4)
+	spotSubFs:SetWidth(232)
+	spotSubFs:SetHeight(15)
+	spotSubFs:SetJustifyH("LEFT")
+	spotSubFs:SetJustifyV("MIDDLE")
+	spotSubFs:SetWordWrap(false)
+	applySafeFont(spotSubFs, 10, "regular")
+	AHSellTab.spotSubFs = spotSubFs
+
+	local spotMetaFs = zone1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	spotMetaFs:SetPoint("TOPLEFT", spotSubFs, "BOTTOMLEFT", 0, -4)
+	spotMetaFs:SetWidth(232)
+	spotMetaFs:SetHeight(15)
+	spotMetaFs:SetJustifyH("LEFT")
+	spotMetaFs:SetJustifyV("MIDDLE")
+	spotMetaFs:SetWordWrap(false)
+	applySafeFont(spotMetaFs, 9.5, "semibold")
+	AHSellTab.spotMetaFs = spotMetaFs
+
+	local dropHintBox = CreateFrame("Frame", nil, zone1)
+	dropHintBox:SetPoint("BOTTOMLEFT", zone1, "BOTTOMLEFT", 2, 4)
+	dropHintBox:SetPoint("BOTTOMRIGHT", zone1, "BOTTOMRIGHT", -2, 4)
+	dropHintBox:SetHeight(30)
+	dropHintBox.plate = ns.Theme.NineApple(dropHintBox, "glass_r8",
+		{ 0.02, 0.07, 0.04, 0.78 },
+		{ 0.83, 0.64, 0.24, 0.26 },
+		{ layer = "BACKGROUND", sub = 0, cornerSize = 6, noSpecular = true })
+	AHSellTab.dropHintBox = dropHintBox
+
+	local dropHintFs = dropHintBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	dropHintFs:SetPoint("LEFT", dropHintBox, "LEFT", 8, 0)
+	dropHintFs:SetPoint("RIGHT", dropHintBox, "RIGHT", -8, 0)
+	dropHintFs:SetJustifyH("CENTER")
+	dropHintFs:SetJustifyV("MIDDLE")
+	dropHintFs:SetWordWrap(false)
+	applySafeFont(dropHintFs, 9.5, "regular")
+	dropHintFs:SetText(palHex("hexMuted", "98989d") .. "Drop item here or click from Bags|r")
 	AHSellTab.dropHintFs = dropHintFs
 
 	if iconDropBtn.SetScript then
@@ -678,6 +774,11 @@ local function buildUI()
 			if GameTooltip and GameTooltip.Hide then GameTooltip:Hide() end
 		end)
 	end
+	if dropHintBox.SetScript then
+		dropHintBox:SetScript("OnReceiveDrag", function()
+			AHSellTab.HandleBagDrop()
+		end)
+	end
 	if topBar.SetScript then
 		topBar:SetScript("OnReceiveDrag", function()
 			AHSellTab.HandleBagDrop()
@@ -699,7 +800,24 @@ local function buildUI()
 		local of = getOrderFlow()
 		local sl = of and of.GetState and of.GetState().stages.sell
 		local cur = sl and sl.items and sl.items[sl.activeIndex]
-		if not (cur and cur.channel ~= "vendor") then return end
+		if not cur then return end
+		if cur.channel == "vendor" then
+			local vUnit = (of.IsSellItemVendorable) and select(2, of.IsSellItemVendorable(cur)) or (cur.vendorSell or 0)
+			local vLim = (of.GetSellPostLimit and of.GetSellPostLimit(cur)) or (cur.inBags or 0)
+			local rawQ = math.max(0, math.floor(tonumber(vQtyBox and vQtyBox:GetText() or "0") or 0))
+			local totV = vUnit * rawQ
+			if AHSellTab.sellTotalValFs then
+				AHSellTab.sellTotalValFs:SetText(palHex("hexGold", "f7d57c") .. ((totV > 0) and ns.FormatMoneyCompact(totV) or "0c") .. "|r")
+			end
+			if AHSellTab.vendInfoFs then
+				AHSellTab.vendInfoFs:SetText(palHex("hexMuted", "98989d") .. string.format("In Bags: %d  |  Unit: %s  |  Total: %s|r",
+					vLim, ns.FormatMoneyCompact(vUnit), (totV > 0) and ns.FormatMoneyCompact(totV) or "0c"))
+			end
+			if AHSellTab.vendMaxBtn then
+				AHSellTab.vendMaxBtn:SetEnabled(vLim > 0 and rawQ ~= vLim)
+			end
+			return
+		end
 		local isComm = of.IsSellItemCommodity and of.IsSellItemCommodity(cur) or false
 		local limit = of.GetSellPostLimit and of.GetSellPostLimit(cur) or 0
 		local rawQ = math.max(0, math.floor(tonumber(qtyBox and qtyBox:GetText() or "0") or 0))
@@ -711,14 +829,17 @@ local function buildUI()
 		local tot = qty * effUnit
 		local playerMoney = (type(_G.GetMoney) == "function") and tonumber(_G.GetMoney()) or nil
 		local lowMoney = (playerMoney ~= nil and dep > playerMoney)
-		if AHSellTab.sellDepFs then
+		if AHSellTab.sellDepValFs then
 			local depCol = lowMoney and palHex("hexDanger", "ff453a") or palHex("hexText", "ffffff")
 			local depVal = (dep > 0) and ns.FormatMoneyCompact(dep) or "0c"
-			AHSellTab.sellDepFs:SetText(palHex("hexMuted", "98989d") .. "Deposit: |r" .. depCol .. depVal .. "|r")
+			AHSellTab.sellDepValFs:SetText(depCol .. depVal .. "|r")
 		end
-		if AHSellTab.sellTotalFs then
+		if AHSellTab.sellTotalValFs then
 			local totVal = (tot > 0) and ns.FormatMoneyCompact(tot) or "0c"
-			AHSellTab.sellTotalFs:SetText(palHex("hexMuted", "98989d") .. "Total Price: |r" .. palHex("hexGold", "f7d57c") .. totVal .. "|r")
+			AHSellTab.sellTotalValFs:SetText(palHex("hexGold", "f7d57c") .. totVal .. "|r")
+		end
+		if AHSellTab.sellUnitSummaryFs and isComm then
+			AHSellTab.sellUnitSummaryFs:SetText(formatUnitSummaryText(effUnit))
 		end
 		if AHSellTab.sellMaxBtn then
 			AHSellTab.sellMaxBtn:SetEnabled(limit > 0 and rawQ ~= limit)
@@ -878,26 +999,28 @@ local function buildUI()
 		return box
 	end
 
-	-- Center Sell Form (spacious Qty, Buyout, Bid, and action row)
+	-- Zone 2 (Center): Aligned Vertical Stack (Qty, Unit Price, Bid / Price-per-Item, Action Row)
 	local form = CreateFrame("Frame", nil, topBar)
-	form:SetPoint("TOPLEFT", topBar, "TOPLEFT", 198, -8)
-	form:SetSize(336, 126)
+	form:SetPoint("TOPLEFT", topBar, "TOPLEFT", 314, -10)
+	form:SetSize(396, 136)
 	AHSellTab.sellForm = form
 
 	local qtyRow = CreateFrame("Frame", nil, form)
 	qtyRow:SetHeight(24)
-	qtyRow:SetPoint("TOPLEFT", form, "TOPLEFT", 0, 0)
-	qtyRow:SetPoint("TOPRIGHT", form, "TOPRIGHT", 0, 0)
+	qtyRow:SetPoint("TOPLEFT", form, "TOPLEFT", 0, -2)
+	qtyRow:SetPoint("TOPRIGHT", form, "TOPRIGHT", 0, -2)
+	AHSellTab.sellQtyRow = qtyRow
 
 	local qtyLbl = qtyRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	qtyLbl:SetPoint("LEFT", qtyRow, "LEFT", 0, 0)
 	qtyLbl:SetWidth(82)
 	qtyLbl:SetJustifyH("LEFT")
+	qtyLbl:SetWordWrap(false)
 	applySafeFont(qtyLbl, 10.5, "semibold")
 	AHSellTab.sellQtyLbl = qtyLbl
 
 	local qtyMinus = makeFramedBtn(qtyRow, 24, 24, "-", 12)
-	qtyMinus:SetPoint("LEFT", qtyLbl, "RIGHT", 4, 0)
+	qtyMinus:SetPoint("LEFT", qtyLbl, "RIGHT", 8, 0)
 	qtyMinus:SetScript("OnClick", function()
 		clearSellInputFocus()
 		local of = getOrderFlow()
@@ -929,8 +1052,8 @@ local function buildUI()
 	end)
 	AHSellTab.sellQtyPlus = qtyPlus
 
-	local maxBtn = makeFramedBtn(qtyRow, 52, 24, "Max", 10)
-	maxBtn:SetPoint("LEFT", qtyPlus, "RIGHT", 6, 0)
+	local maxBtn = makeFramedBtn(qtyRow, 50, 24, "Max", 10)
+	maxBtn:SetPoint("LEFT", qtyPlus, "RIGHT", 8, 0)
 	maxBtn:SetScript("OnClick", function()
 		clearSellInputFocus()
 		local of = getOrderFlow()
@@ -940,27 +1063,30 @@ local function buildUI()
 	AHSellTab.sellMaxBtn = maxBtn
 
 	local maxInfoFs = qtyRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	maxInfoFs:SetPoint("LEFT", maxBtn, "RIGHT", 8, 0)
+	maxInfoFs:SetPoint("LEFT", maxBtn, "RIGHT", 10, 0)
 	maxInfoFs:SetJustifyH("LEFT")
+	maxInfoFs:SetWordWrap(false)
 	applySafeFont(maxInfoFs, 10, "regular")
 	AHSellTab.sellMaxInfoFs = maxInfoFs
 
-	-- Buyout / Unit Price row
+	-- Row 2: Buyout / Unit Price row on identical rail
 	local priceRow = CreateFrame("Frame", nil, form)
 	priceRow:SetHeight(24)
-	priceRow:SetPoint("TOPLEFT", form, "TOPLEFT", 0, -30)
-	priceRow:SetPoint("TOPRIGHT", form, "TOPRIGHT", 0, -30)
+	priceRow:SetPoint("TOPLEFT", form, "TOPLEFT", 0, -34)
+	priceRow:SetPoint("TOPRIGHT", form, "TOPRIGHT", 0, -34)
+	AHSellTab.sellPriceRow = priceRow
 
 	local priceLbl = priceRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	priceLbl:SetPoint("LEFT", priceRow, "LEFT", 0, 0)
 	priceLbl:SetWidth(82)
 	priceLbl:SetJustifyH("LEFT")
+	priceLbl:SetWordWrap(false)
 	applySafeFont(priceLbl, 10.5, "semibold")
 	AHSellTab.sellPriceLbl = priceLbl
 
-	priceGBox = makeSellEditBox(priceRow, 64, 6, commitPrimaryPrice, triggerSellPostFromEnter,
+	priceGBox = makeSellEditBox(priceRow, 66, 6, commitPrimaryPrice, triggerSellPostFromEnter,
 		function() return priceSBox end, function() return qtyBox end)
-	priceGBox:SetPoint("LEFT", priceLbl, "RIGHT", 4, 0)
+	priceGBox:SetPoint("LEFT", priceLbl, "RIGHT", 8, 0)
 	local pGTag = priceRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	pGTag:SetPoint("LEFT", priceGBox, "RIGHT", 3, 0)
 	applySafeFont(pGTag, 10, "bold")
@@ -986,29 +1112,42 @@ local function buildUI()
 	AHSellTab.sellPriceCBox = priceCBox
 	AHSellTab.sellPriceCTag = pCTag
 
-	local priceSrcFs = priceRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	priceSrcFs:SetPoint("LEFT", pCTag, "RIGHT", 8, 0)
-	priceSrcFs:SetJustifyH("LEFT")
-	applySafeFont(priceSrcFs, 9.5, "semibold")
+	local priceSrcPill = CreateFrame("Frame", nil, priceRow)
+	priceSrcPill:SetSize(64, 20)
+	priceSrcPill:SetPoint("LEFT", pCTag, "RIGHT", 10, 0)
+	priceSrcPill.plate = ns.Theme.NineApple(priceSrcPill, "pill",
+		{ 0.06, 0.17, 0.22, 0.90 },
+		{ 0.34, 0.83, 0.91, 0.65 },
+		{ layer = "BACKGROUND", sub = 0, cornerSize = 6, noSpecular = true })
+	AHSellTab.sellPriceSrcPill = priceSrcPill
+
+	local priceSrcFs = priceSrcPill:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	priceSrcFs:SetPoint("LEFT", priceSrcPill, "LEFT", 4, 0)
+	priceSrcFs:SetPoint("RIGHT", priceSrcPill, "RIGHT", -4, 0)
+	priceSrcFs:SetJustifyH("CENTER")
+	priceSrcFs:SetJustifyV("MIDDLE")
+	priceSrcFs:SetWordWrap(false)
+	applySafeFont(priceSrcFs, 9, "semibold")
 	AHSellTab.sellPriceSrcFs = priceSrcFs
 
-	-- Optional Bid Price row (non-commodities only)
+	-- Row 3A: Optional Starting Bid row (non-commodities only) on identical rail
 	bidRow = CreateFrame("Frame", nil, form)
 	bidRow:SetHeight(24)
-	bidRow:SetPoint("TOPLEFT", form, "TOPLEFT", 0, -60)
-	bidRow:SetPoint("TOPRIGHT", form, "TOPRIGHT", 0, -60)
+	bidRow:SetPoint("TOPLEFT", form, "TOPLEFT", 0, -66)
+	bidRow:SetPoint("TOPRIGHT", form, "TOPRIGHT", 0, -66)
 	AHSellTab.sellBidRow = bidRow
 
 	local bidLbl = bidRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	bidLbl:SetPoint("LEFT", bidRow, "LEFT", 0, 0)
 	bidLbl:SetWidth(82)
 	bidLbl:SetJustifyH("LEFT")
+	bidLbl:SetWordWrap(false)
 	applySafeFont(bidLbl, 10.5, "semibold")
 	AHSellTab.sellBidLbl = bidLbl
 
-	bidGBox = makeSellEditBox(bidRow, 64, 6, commitBidPrice, triggerSellPostFromEnter,
+	bidGBox = makeSellEditBox(bidRow, 66, 6, commitBidPrice, triggerSellPostFromEnter,
 		function() return bidSBox end, function() return priceCBox end)
-	bidGBox:SetPoint("LEFT", bidLbl, "RIGHT", 4, 0)
+	bidGBox:SetPoint("LEFT", bidLbl, "RIGHT", 8, 0)
 	local bGTag = bidRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	bGTag:SetPoint("LEFT", bidGBox, "RIGHT", 3, 0)
 	applySafeFont(bGTag, 10, "bold")
@@ -1034,27 +1173,55 @@ local function buildUI()
 	AHSellTab.sellBidCTag = bCTag
 
 	local bidHintFs = bidRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	bidHintFs:SetPoint("LEFT", bCTag, "RIGHT", 8, 0)
+	bidHintFs:SetPoint("LEFT", bCTag, "RIGHT", 10, 0)
 	bidHintFs:SetJustifyH("LEFT")
+	bidHintFs:SetWordWrap(false)
 	applySafeFont(bidHintFs, 9.5, "regular")
 	AHSellTab.sellBidHintFs = bidHintFs
 
-	-- Vendor Bar (shown ONLY when active item is routed to Vendor)
+	-- Row 3B: Price / Item unit summary row (commodities only) on identical rail
+	local unitRow = CreateFrame("Frame", nil, form)
+	unitRow:SetHeight(24)
+	unitRow:SetPoint("TOPLEFT", form, "TOPLEFT", 0, -66)
+	unitRow:SetPoint("TOPRIGHT", form, "TOPRIGHT", 0, -66)
+	AHSellTab.sellUnitRow = unitRow
+
+	local unitLbl = unitRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	unitLbl:SetPoint("LEFT", unitRow, "LEFT", 0, 0)
+	unitLbl:SetWidth(82)
+	unitLbl:SetJustifyH("LEFT")
+	unitLbl:SetWordWrap(false)
+	applySafeFont(unitLbl, 10.5, "semibold")
+	AHSellTab.sellUnitLbl = unitLbl
+
+	local unitSummaryFs = unitRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	unitSummaryFs:SetPoint("LEFT", unitLbl, "RIGHT", 8, 0)
+	unitSummaryFs:SetPoint("RIGHT", unitRow, "RIGHT", 0, 0)
+	unitSummaryFs:SetJustifyH("LEFT")
+	unitSummaryFs:SetWordWrap(false)
+	applySafeFont(unitSummaryFs, 10, "semibold")
+	AHSellTab.sellUnitSummaryFs = unitSummaryFs
+
+	-- Vendor Bar (shown ONLY when active item is routed to Vendor; shares exact Zone 2 bounds)
 	local vendBar = CreateFrame("Frame", nil, topBar)
-	vendBar:SetPoint("TOPLEFT", topBar, "TOPLEFT", 198, -12)
-	vendBar:SetSize(336, 122)
+	vendBar:SetPoint("TOPLEFT", form, "TOPLEFT", 0, 0)
+	vendBar:SetPoint("BOTTOMRIGHT", form, "BOTTOMRIGHT", 0, 0)
 	vendBar:Hide()
 	AHSellTab.sellVendorBar = vendBar
 
 	local vQtyLbl = vendBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	vQtyLbl:SetPoint("TOPLEFT", vendBar, "TOPLEFT", 0, -6)
+	vQtyLbl:SetPoint("TOPLEFT", vendBar, "TOPLEFT", 0, -2)
 	vQtyLbl:SetWidth(82)
+	vQtyLbl:SetHeight(24)
 	vQtyLbl:SetJustifyH("LEFT")
+	vQtyLbl:SetJustifyV("MIDDLE")
+	vQtyLbl:SetWordWrap(false)
 	applySafeFont(vQtyLbl, 10.5, "semibold")
 	vQtyLbl:SetText("Vendor Qty")
+	AHSellTab.vendQtyLbl = vQtyLbl
 
 	vQtyBox = makeSellEditBox(vendBar, 56, 5, commitVendorQty, nil, nil, nil)
-	vQtyBox:SetPoint("LEFT", vQtyLbl, "RIGHT", 4, 0)
+	vQtyBox:SetPoint("LEFT", vQtyLbl, "RIGHT", 8, 0)
 	AHSellTab.vendQtyBox = vQtyBox
 
 	local vMaxBtn = makeFramedBtn(vendBar, 52, 24, "Max", 10)
@@ -1072,14 +1239,15 @@ local function buildUI()
 	AHSellTab.vendMaxBtn = vMaxBtn
 
 	local vendInfoFs = vendBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	vendInfoFs:SetPoint("TOPLEFT", vendBar, "TOPLEFT", 0, -40)
-	vendInfoFs:SetPoint("TOPRIGHT", vendBar, "TOPRIGHT", 0, -40)
+	vendInfoFs:SetPoint("TOPLEFT", vendBar, "TOPLEFT", 0, -44)
+	vendInfoFs:SetPoint("TOPRIGHT", vendBar, "TOPRIGHT", 0, -44)
 	vendInfoFs:SetJustifyH("LEFT")
+	vendInfoFs:SetWordWrap(false)
 	applySafeFont(vendInfoFs, 10, "regular")
 	AHSellTab.vendInfoFs = vendInfoFs
 
-	local vendSellBtn = makeFramedBtn(vendBar, 120, 28, "Sell to Vendor", 10.5)
-	vendSellBtn:SetPoint("TOPLEFT", vendBar, "TOPLEFT", 0, -78)
+	local vendSellBtn = makeFramedBtn(vendBar, 134, 30, "Sell to Vendor", 10.5)
+	vendSellBtn:SetPoint("BOTTOMLEFT", vendBar, "BOTTOMLEFT", 0, 4)
 	vendSellBtn:SetScript("OnClick", function()
 		commitSellInputsAndClearFocus()
 		local of = getOrderFlow()
@@ -1087,7 +1255,7 @@ local function buildUI()
 	end)
 	AHSellTab.vendSellBtn = vendSellBtn
 
-	local vendSellAllBtn = makeFramedBtn(vendBar, 120, 28, "Sell All Vendor", 10.5)
+	local vendSellAllBtn = makeFramedBtn(vendBar, 134, 30, "Sell All Vendor", 10.5)
 	vendSellAllBtn:SetPoint("LEFT", vendSellBtn, "RIGHT", 8, 0)
 	vendSellAllBtn:SetScript("OnClick", function()
 		commitSellInputsAndClearFocus()
@@ -1096,9 +1264,9 @@ local function buildUI()
 	end)
 	AHSellTab.vendSellAllBtn = vendSellAllBtn
 
-	-- Action buttons row (Post / Post All / Done / Skip) directly inside Center area
-	local postBtn = makeFramedBtn(topBar, 122, 28, "Post", 11, { name = "MerchantMasterSellPostBtn" })
-	postBtn:SetPoint("TOPLEFT", topBar, "TOPLEFT", 198, -102)
+	-- Row 4: Aligned action bar (Post / Post All / Done / Skip) flush with Zone 2 left rail
+	local postBtn = makeFramedBtn(topBar, 134, 30, "Post", 11.5, { name = "MerchantMasterSellPostBtn" })
+	postBtn:SetPoint("BOTTOMLEFT", form, "BOTTOMLEFT", 0, 4)
 	postBtn:SetScript("OnClick", function()
 		commitSellInputsAndClearFocus()
 		local of = getOrderFlow()
@@ -1121,8 +1289,8 @@ local function buildUI()
 	addTip(postBtn, "Post Auction (Space)", "Post the selected Quantity at the displayed price. Pressing Spacebar while this tab is open also posts.")
 	AHSellTab.postBtn = postBtn
 
-	local postAllBtn = makeFramedBtn(topBar, 82, 28, "Post All", 10.5)
-	postAllBtn:SetPoint("LEFT", postBtn, "RIGHT", 6, 0)
+	local postAllBtn = makeFramedBtn(topBar, 86, 30, "Post All", 10.5)
+	postAllBtn:SetPoint("LEFT", postBtn, "RIGHT", 8, 0)
 	postAllBtn:SetScript("OnClick", function()
 		commitSellInputsAndClearFocus()
 		local of = getOrderFlow()
@@ -1146,8 +1314,8 @@ local function buildUI()
 	addTip(postAllBtn, "Post All / Cancel", "Post remaining pending AH items in the Sell Queue one after another, or cancel an active post.")
 	AHSellTab.postAllBtn = postAllBtn
 
-	local doneBtn = makeFramedBtn(topBar, 58, 28, "Done", 10)
-	doneBtn:SetPoint("LEFT", postAllBtn, "RIGHT", 6, 0)
+	local doneBtn = makeFramedBtn(topBar, 68, 30, "Done", 10)
+	doneBtn:SetPoint("LEFT", postAllBtn, "RIGHT", 8, 0)
 	doneBtn:SetScript("OnClick", function()
 		clearSellInputFocus()
 		local of = getOrderFlow()
@@ -1155,8 +1323,8 @@ local function buildUI()
 	end)
 	AHSellTab.doneBtn = doneBtn
 
-	local skipBtn = makeFramedBtn(topBar, 56, 28, "Skip", 10)
-	skipBtn:SetPoint("LEFT", doneBtn, "RIGHT", 6, 0)
+	local skipBtn = makeFramedBtn(topBar, 68, 30, "Skip", 10)
+	skipBtn:SetPoint("LEFT", doneBtn, "RIGHT", 8, 0)
 	skipBtn:SetScript("OnClick", function()
 		clearSellInputFocus()
 		local of = getOrderFlow()
@@ -1164,9 +1332,25 @@ local function buildUI()
 	end)
 	AHSellTab.skipBtn = skipBtn
 
-	-- Right column of Top Sale Bar: Refresh, Duration (2h/8h/24h), Rule, Channel, Deposit, Total Price
-	local refreshBtn = makeFramedBtn(topBar, 64, 20, "Refresh", 9.5)
-	refreshBtn:SetPoint("TOPRIGHT", topBar, "TOPRIGHT", -10, -8)
+	-- Zone 3 (Right): Utility Row, Bigger Deposit & Total Price Card, Duration, Side-by-Side Rules
+	local zone3 = CreateFrame("Frame", nil, topBar)
+	zone3:SetPoint("TOPRIGHT", topBar, "TOPRIGHT", -12, -10)
+	zone3:SetPoint("BOTTOMRIGHT", topBar, "BOTTOMRIGHT", -12, 10)
+	zone3:SetWidth(296)
+	AHSellTab.sellZone3 = zone3
+
+	local chBtn = makeFramedBtn(zone3, 162, 24, "Sell: AH", 9.5)
+	chBtn:SetPoint("TOPLEFT", zone3, "TOPLEFT", 0, -2)
+	chBtn:SetScript("OnClick", function()
+		clearSellInputFocus()
+		local of = getOrderFlow()
+		if of and of.ToggleSellItemChannel then of.ToggleSellItemChannel() end
+	end)
+	addTip(chBtn, "Switch Channel", "Toggle the selected item between posting on the Auction House and selling to a Vendor.")
+	AHSellTab.sellChBtn = chBtn
+
+	local refreshBtn = makeFramedBtn(zone3, 128, 24, "Refresh", 9.5)
+	refreshBtn:SetPoint("TOPRIGHT", zone3, "TOPRIGHT", 0, -2)
 	refreshBtn:SetScript("OnClick", function()
 		clearSellInputFocus()
 		local of = getOrderFlow()
@@ -1175,19 +1359,103 @@ local function buildUI()
 	addTip(refreshBtn, "Refresh Live Prices", "Re-scan live Auction House prices for the selected or last posted item.")
 	AHSellTab.sellRefreshBtn = refreshBtn
 
-	local durLbl = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	durLbl:SetPoint("TOPLEFT", topBar, "TOPRIGHT", -222, -10)
+	-- Recessed Summary Metrics Card (Deposit 12pt + Total Price 14pt Gold)
+	local summaryCard = CreateFrame("Frame", nil, zone3)
+	summaryCard:SetPoint("TOPLEFT", zone3, "TOPLEFT", 0, -31)
+	summaryCard:SetPoint("TOPRIGHT", zone3, "TOPRIGHT", 0, -31)
+	summaryCard:SetHeight(50)
+	summaryCard.plate = ns.Theme.NineApple(summaryCard, "glass_r8",
+		{ 0.02, 0.08, 0.05, 0.88 },
+		{ 0.83, 0.64, 0.24, 0.32 },
+		{ layer = "BACKGROUND", sub = 0, cornerSize = 6, noSpecular = true })
+	AHSellTab.sellSummaryCard = summaryCard
+
+	local summarySep = summaryCard:CreateTexture(nil, "ARTWORK")
+	summarySep:SetHeight(1)
+	summarySep:SetPoint("TOPLEFT", summaryCard, "TOPLEFT", 8, -24)
+	summarySep:SetPoint("TOPRIGHT", summaryCard, "TOPRIGHT", -8, -24)
+	AHSellTab.sellSummarySep = summarySep
+
+	local depLbl = summaryCard:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	depLbl:SetPoint("TOPLEFT", summaryCard, "TOPLEFT", 10, -4)
+	depLbl:SetHeight(18)
+	depLbl:SetJustifyH("LEFT")
+	depLbl:SetJustifyV("MIDDLE")
+	depLbl:SetWordWrap(false)
+	applySafeFont(depLbl, 10, "semibold")
+	AHSellTab.sellDepLbl = depLbl
+
+	local depValFs = summaryCard:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	depValFs:SetPoint("TOPRIGHT", summaryCard, "TOPRIGHT", -10, -4)
+	depValFs:SetHeight(18)
+	depValFs:SetJustifyH("RIGHT")
+	depValFs:SetJustifyV("MIDDLE")
+	depValFs:SetWordWrap(false)
+	applySafeFont(depValFs, 12, "semibold")
+	AHSellTab.sellDepValFs = depValFs
+
+	local totalLbl = summaryCard:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	totalLbl:SetPoint("BOTTOMLEFT", summaryCard, "BOTTOMLEFT", 10, 4)
+	totalLbl:SetHeight(20)
+	totalLbl:SetJustifyH("LEFT")
+	totalLbl:SetJustifyV("MIDDLE")
+	totalLbl:SetWordWrap(false)
+	applySafeFont(totalLbl, 10.5, "semibold")
+	AHSellTab.sellTotalLbl = totalLbl
+
+	local totalValFs = summaryCard:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+	totalValFs:SetPoint("BOTTOMRIGHT", summaryCard, "BOTTOMRIGHT", -10, 4)
+	totalValFs:SetHeight(20)
+	totalValFs:SetJustifyH("RIGHT")
+	totalValFs:SetJustifyV("MIDDLE")
+	totalValFs:SetWordWrap(false)
+	applySafeFont(totalValFs, 14, "bold")
+	AHSellTab.sellTotalValFs = totalValFs
+
+	-- Compatibility proxies for tests reading sellDepFs / sellTotalFs text directly
+	AHSellTab.sellDepFs = {
+		GetText = function()
+			return "Deposit: " .. tostring(depValFs:GetText() or "")
+		end,
+		IsShown = function() return depValFs:IsShown() end,
+	}
+	AHSellTab.sellTotalFs = {
+		GetText = function()
+			local lbl = tostring(totalLbl:GetText() or "Total Price")
+			return lbl .. ": " .. tostring(totalValFs:GetText() or "")
+		end,
+		IsShown = function() return totalValFs:IsShown() end,
+	}
+
+	-- Side-by-side Undercut Rule row locked to Zone 3 bottom baseline (matches dropHintBox & Post row)
+	local ruleLbl = zone3:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	ruleLbl:SetPoint("BOTTOMLEFT", zone3, "BOTTOMLEFT", 0, 4)
+	ruleLbl:SetWidth(56)
+	ruleLbl:SetHeight(22)
+	ruleLbl:SetJustifyH("LEFT")
+	ruleLbl:SetJustifyV("MIDDLE")
+	ruleLbl:SetWordWrap(false)
+	applySafeFont(ruleLbl, 10, "semibold")
+	AHSellTab.sellRuleLbl = ruleLbl
+
+	-- Duration row (2h / 8h / 24h) stacked 4px directly above Rule row
+	local durLbl = zone3:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	durLbl:SetPoint("BOTTOMLEFT", ruleLbl, "TOPLEFT", 0, 4)
+	durLbl:SetWidth(56)
+	durLbl:SetHeight(22)
 	durLbl:SetJustifyH("LEFT")
+	durLbl:SetJustifyV("MIDDLE")
+	durLbl:SetWordWrap(false)
 	applySafeFont(durLbl, 10, "semibold")
 	AHSellTab.sellDurLbl = durLbl
 
 	local durBtns = {}
 	for dIdx = 1, 3 do
-		local db = makeFramedBtn(topBar, 38, 22, SELL_DUR_LABELS[dIdx], 9.5)
+		local db = makeFramedBtn(zone3, 76, 22, SELL_DUR_LABELS[dIdx], 9.5)
 		if dIdx == 1 then
-			db:SetPoint("TOPLEFT", topBar, "TOPRIGHT", -222, -34)
+			db:SetPoint("LEFT", durLbl, "RIGHT", 4, 0)
 		else
-			db:SetPoint("LEFT", durBtns[dIdx - 1], "RIGHT", 4, 0)
+			db:SetPoint("LEFT", durBtns[dIdx - 1], "RIGHT", 5, 0)
 		end
 		db:SetScript("OnClick", function()
 			clearSellInputFocus()
@@ -1198,39 +1466,49 @@ local function buildUI()
 	end
 	AHSellTab.sellDurBtns = durBtns
 
-	local chBtn = makeFramedBtn(topBar, 82, 22, "Sell: AH", 9.5)
-	chBtn:SetPoint("LEFT", durBtns[3], "RIGHT", 8, 0)
-	chBtn:SetScript("OnClick", function()
-		clearSellInputFocus()
-		local of = getOrderFlow()
-		if of and of.ToggleSellItemChannel then of.ToggleSellItemChannel() end
-	end)
-	addTip(chBtn, "Switch Channel", "Toggle the selected item between posting on the Auction House and selling to a Vendor.")
-	AHSellTab.sellChBtn = chBtn
+	local ucBtns = {}
+	for uIdx, spec in ipairs(SELL_UNDERCUT_SPECS) do
+		local bw = (uIdx == 1) and 64 or 54
+		local ub = makeFramedBtn(zone3, bw, 22, spec.label, 9.5)
+		ub._ucKey = spec.key
+		if uIdx == 1 then
+			ub:SetPoint("LEFT", ruleLbl, "RIGHT", 4, 0)
+		else
+			ub:SetPoint("LEFT", ucBtns[uIdx - 1], "RIGHT", 4, 0)
+		end
+		ub:SetScript("OnClick", function()
+			clearSellInputFocus()
+			local of = getOrderFlow()
+			if of and of.SetSellUndercutMode then of.SetSellUndercutMode(spec.key) end
+		end)
+		addTip(ub, "Undercut Rule: " .. spec.label, "Set pricing rule to " .. spec.label .. " against lowest competitor listing.")
+		ucBtns[uIdx] = ub
+	end
+	AHSellTab.sellUcBtns = ucBtns
 
-	local ucBtn = makeFramedBtn(topBar, 104, 22, "Rule: Match", 9.5)
-	ucBtn:SetPoint("TOPLEFT", durBtns[1], "BOTTOMLEFT", 0, -6)
-	ucBtn:SetScript("OnClick", function()
-		clearSellInputFocus()
-		local of = getOrderFlow()
-		if of and of.CycleSellUndercutMode then of.CycleSellUndercutMode() end
-	end)
-	addTip(ucBtn, "Undercut Rule", "Cycle pricing rule: Match (0% LIFO), -1c, -1s, or -1%.")
-	AHSellTab.sellUcBtn = ucBtn
-
-	local depFs = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	depFs:SetPoint("TOPLEFT", ucBtn, "BOTTOMLEFT", 0, -8)
-	depFs:SetPoint("TOPRIGHT", topBar, "TOPRIGHT", -10, -92)
-	depFs:SetJustifyH("LEFT")
-	applySafeFont(depFs, 10, "semibold")
-	AHSellTab.sellDepFs = depFs
-
-	local totalFs = topBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	totalFs:SetPoint("TOPLEFT", depFs, "BOTTOMLEFT", 0, -4)
-	totalFs:SetPoint("TOPRIGHT", topBar, "TOPRIGHT", -10, -112)
-	totalFs:SetJustifyH("LEFT")
-	applySafeFont(totalFs, 10.5, "semibold")
-	AHSellTab.sellTotalFs = totalFs
+	-- Backward-compatible cycle proxy for existing tests referencing AHSellTab.sellUcBtn
+	AHSellTab.sellUcBtn = {
+		Click = function()
+			clearSellInputFocus()
+			local of = getOrderFlow()
+			if of and of.CycleSellUndercutMode then of.CycleSellUndercutMode() end
+		end,
+		GetText = function()
+			local of = getOrderFlow()
+			local sl = of and of.GetState and of.GetState().stages.sell
+			local mode = (sl and sl.undercutMode) or "match"
+			return "Rule: " .. (SELL_UNDERCUT_LABELS[mode] or "Match")
+		end,
+		IsEnabled = function()
+			return ucBtns[1] and ucBtns[1]:IsEnabled() or false
+		end,
+		SetEnabled = function(_, en)
+			for _, ub in ipairs(ucBtns) do ub:SetEnabled(en) end
+		end,
+		IsShown = function()
+			return ucBtns[1] and ucBtns[1]:IsShown() or false
+		end,
+	}
 
 	-- Notice Banner directly under Top Sale Bar
 	local noticeBar = CreateFrame("Frame", nil, tabFrame)
@@ -1746,6 +2024,250 @@ function AHSellTab.HandleBagDrop(bag, slot)
 	return ok, res
 end
 
+local function triggerOpenSellAutoScan(of)
+	if not (of and of.ScanSellItemMarket and isAHOpensafe()) then return false end
+	local sl = of.GetState and of.GetState().stages.sell
+	if not (sl and sl.items) then return false end
+	local cur = sl.items[sl.activeIndex]
+	if not (cur and cur.channel == "ah" and (cur.remaining or 0) > 0
+		and cur.status ~= "done" and cur.status ~= "skipped") then
+		return false
+	end
+	if sl.pendingSearch and sl.pendingSearch.itemID == cur.itemID then
+		return false
+	end
+	local itemKey = tostring(cur.itemID or 0) .. ":" .. tostring(cur.itemLink or "") .. ":" .. tostring(sl.activeIndex or 1)
+	local now = nowAutoScanMono()
+	if lastAutoScanItemKey == itemKey and now > 0 and lastAutoScanAt > 0 and (now - lastAutoScanAt) < 2.0 then
+		return false
+	end
+	local ok, err = of.ScanSellItemMarket(sl.activeIndex, "select")
+	if ok or err == "throttled" or err == "channel_busy" then
+		lastAutoScanItemKey = itemKey
+		lastAutoScanAt = now
+	end
+	return ok, err
+end
+
+layoutTopBar = function()
+	if not (AHSellTab.topBar and AHSellTab.sellZone1 and AHSellTab.sellForm and AHSellTab.sellZone3) then return end
+	local w = (AHSellTab.topBar.GetWidth and AHSellTab.topBar:GetWidth()) or 0
+	if w < 600 then
+		local ahf = _G.AuctionHouseFrame
+		local ahfW = (ahf and ahf.GetWidth and ahf:GetWidth()) or 0
+		if ahfW >= 640 then
+			w = ahfW - 32
+		else
+			local tw = (tabFrame and tabFrame.GetWidth and tabFrame:GetWidth()) or 784
+			w = math.max(764, tw - 20)
+		end
+	end
+	w = math.floor(w + 0.5)
+	if w == lastTopBarLayoutW then return end
+	lastTopBarLayoutW = w
+
+	local wide = (w >= 940)
+	local pad = wide and 12 or 8
+	local gap = wide and 12 or 6
+	local z1W = wide and 304 or 186
+	local z3W = wide and 296 or 220
+	local div1X = pad + z1W + gap
+	local z2X = div1X + gap
+	local div2X = w - pad - z3W - gap
+	local z2W = math.max(200, div2X - z2X - gap)
+
+	AHSellTab.sellZone1:ClearAllPoints()
+	AHSellTab.sellZone1:SetPoint("TOPLEFT", AHSellTab.topBar, "TOPLEFT", pad, -10)
+	AHSellTab.sellZone1:SetPoint("BOTTOMLEFT", AHSellTab.topBar, "BOTTOMLEFT", pad, 10)
+	AHSellTab.sellZone1:SetWidth(z1W)
+
+	local iconSz = wide and 56 or 44
+	local txtX = wide and 70 or 54
+	local txtW = math.max(110, z1W - txtX - 2)
+	AHSellTab.iconDropBtn:SetSize(iconSz, iconSz)
+	AHSellTab.zone1EyebrowFs:ClearAllPoints()
+	AHSellTab.zone1EyebrowFs:SetPoint("TOPLEFT", AHSellTab.sellZone1, "TOPLEFT", txtX, -2)
+	AHSellTab.zone1EyebrowFs:SetWidth(txtW)
+	AHSellTab.activeFs:ClearAllPoints()
+	AHSellTab.activeFs:SetPoint("TOPLEFT", AHSellTab.sellZone1, "TOPLEFT", txtX, -20)
+	AHSellTab.activeFs:SetWidth(txtW)
+	AHSellTab.spotSubFs:SetWidth(txtW)
+	AHSellTab.spotMetaFs:SetWidth(txtW)
+
+	AHSellTab.topDiv1:ClearAllPoints()
+	AHSellTab.topDiv1:SetPoint("TOP", AHSellTab.topBar, "TOPLEFT", div1X, -14)
+	AHSellTab.topDiv1:SetPoint("BOTTOM", AHSellTab.topBar, "BOTTOMLEFT", div1X, 14)
+
+	AHSellTab.topDiv2:ClearAllPoints()
+	AHSellTab.topDiv2:SetPoint("TOP", AHSellTab.topBar, "TOPLEFT", div2X, -14)
+	AHSellTab.topDiv2:SetPoint("BOTTOM", AHSellTab.topBar, "BOTTOMLEFT", div2X, 14)
+
+	AHSellTab.sellForm:ClearAllPoints()
+	AHSellTab.sellForm:SetPoint("TOPLEFT", AHSellTab.topBar, "TOPLEFT", z2X, -10)
+	AHSellTab.sellForm:SetSize(z2W, 138)
+
+	local lblW = wide and 82 or 70
+	local railGap = wide and 8 or 4
+	local qtyBtnW = wide and 24 or 22
+	local qtyGap = wide and 4 or 3
+	local qtyBoxW = wide and 56 or 48
+	local maxBtnW = wide and 50 or 42
+	local maxGap = wide and 8 or 5
+	local maxInfoGap = wide and 10 or 6
+
+	AHSellTab.sellQtyLbl:SetWidth(lblW)
+	AHSellTab.sellPriceLbl:SetWidth(lblW)
+	AHSellTab.sellBidLbl:SetWidth(lblW)
+	AHSellTab.sellUnitLbl:SetWidth(lblW)
+	if AHSellTab.vendQtyLbl then AHSellTab.vendQtyLbl:SetWidth(lblW) end
+
+	AHSellTab.sellQtyMinus:SetSize(qtyBtnW, 24)
+	AHSellTab.sellQtyMinus:ClearAllPoints()
+	AHSellTab.sellQtyMinus:SetPoint("LEFT", AHSellTab.sellQtyLbl, "RIGHT", railGap, 0)
+	AHSellTab.sellQtyBox:SetWidth(qtyBoxW)
+	AHSellTab.sellQtyBox:ClearAllPoints()
+	AHSellTab.sellQtyBox:SetPoint("LEFT", AHSellTab.sellQtyMinus, "RIGHT", qtyGap, 0)
+	AHSellTab.sellQtyPlus:SetSize(qtyBtnW, 24)
+	AHSellTab.sellQtyPlus:ClearAllPoints()
+	AHSellTab.sellQtyPlus:SetPoint("LEFT", AHSellTab.sellQtyBox, "RIGHT", qtyGap, 0)
+	AHSellTab.sellMaxBtn:SetSize(maxBtnW, 24)
+	AHSellTab.sellMaxBtn:ClearAllPoints()
+	AHSellTab.sellMaxBtn:SetPoint("LEFT", AHSellTab.sellQtyPlus, "RIGHT", maxGap, 0)
+	AHSellTab.sellMaxInfoFs:ClearAllPoints()
+	AHSellTab.sellMaxInfoFs:SetPoint("LEFT", AHSellTab.sellMaxBtn, "RIGHT", maxInfoGap, 0)
+
+	local gW = wide and 66 or 50
+	local scW = wide and 36 or 30
+	local tagGap = wide and 3 or 2
+	local segGap = wide and 6 or 4
+	local pillGap = wide and 10 or 6
+
+	AHSellTab.sellPriceGBox:SetWidth(gW)
+	AHSellTab.sellPriceGBox:ClearAllPoints()
+	AHSellTab.sellPriceGBox:SetPoint("LEFT", AHSellTab.sellPriceLbl, "RIGHT", railGap, 0)
+	AHSellTab.sellPriceGTag:ClearAllPoints()
+	AHSellTab.sellPriceGTag:SetPoint("LEFT", AHSellTab.sellPriceGBox, "RIGHT", tagGap, 0)
+	AHSellTab.sellPriceSBox:SetWidth(scW)
+	AHSellTab.sellPriceSBox:ClearAllPoints()
+	AHSellTab.sellPriceSBox:SetPoint("LEFT", AHSellTab.sellPriceGTag, "RIGHT", segGap, 0)
+	AHSellTab.sellPriceSTag:ClearAllPoints()
+	AHSellTab.sellPriceSTag:SetPoint("LEFT", AHSellTab.sellPriceSBox, "RIGHT", tagGap, 0)
+	AHSellTab.sellPriceCBox:SetWidth(scW)
+	AHSellTab.sellPriceCBox:ClearAllPoints()
+	AHSellTab.sellPriceCBox:SetPoint("LEFT", AHSellTab.sellPriceSTag, "RIGHT", segGap, 0)
+	AHSellTab.sellPriceCTag:ClearAllPoints()
+	AHSellTab.sellPriceCTag:SetPoint("LEFT", AHSellTab.sellPriceCBox, "RIGHT", tagGap, 0)
+	AHSellTab.sellPriceSrcPill:SetWidth(wide and 64 or 50)
+	AHSellTab.sellPriceSrcPill:ClearAllPoints()
+	AHSellTab.sellPriceSrcPill:SetPoint("LEFT", AHSellTab.sellPriceCTag, "RIGHT", pillGap, 0)
+
+	AHSellTab.sellBidGBox:SetWidth(gW)
+	AHSellTab.sellBidGBox:ClearAllPoints()
+	AHSellTab.sellBidGBox:SetPoint("LEFT", AHSellTab.sellBidLbl, "RIGHT", railGap, 0)
+	AHSellTab.sellBidGTag:ClearAllPoints()
+	AHSellTab.sellBidGTag:SetPoint("LEFT", AHSellTab.sellBidGBox, "RIGHT", tagGap, 0)
+	AHSellTab.sellBidSBox:SetWidth(scW)
+	AHSellTab.sellBidSBox:ClearAllPoints()
+	AHSellTab.sellBidSBox:SetPoint("LEFT", AHSellTab.sellBidGTag, "RIGHT", segGap, 0)
+	AHSellTab.sellBidSTag:ClearAllPoints()
+	AHSellTab.sellBidSTag:SetPoint("LEFT", AHSellTab.sellBidSBox, "RIGHT", tagGap, 0)
+	AHSellTab.sellBidCBox:SetWidth(scW)
+	AHSellTab.sellBidCBox:ClearAllPoints()
+	AHSellTab.sellBidCBox:SetPoint("LEFT", AHSellTab.sellBidSTag, "RIGHT", segGap, 0)
+	AHSellTab.sellBidCTag:ClearAllPoints()
+	AHSellTab.sellBidCTag:SetPoint("LEFT", AHSellTab.sellBidCBox, "RIGHT", tagGap, 0)
+	AHSellTab.sellBidHintFs:ClearAllPoints()
+	AHSellTab.sellBidHintFs:SetPoint("LEFT", AHSellTab.sellBidCTag, "RIGHT", pillGap, 0)
+
+	AHSellTab.sellUnitSummaryFs:ClearAllPoints()
+	AHSellTab.sellUnitSummaryFs:SetPoint("LEFT", AHSellTab.sellUnitLbl, "RIGHT", railGap, 0)
+	AHSellTab.sellUnitSummaryFs:SetPoint("RIGHT", AHSellTab.sellUnitRow, "RIGHT", 0, 0)
+
+	local actGap = wide and 8 or 5
+	local actSpan = math.min(z2W, wide and 376 or 318)
+	local pW = wide and 132 or 104
+	local paW = wide and 86 or 74
+	local remW = math.max(96, actSpan - pW - paW - actGap * 3)
+	local dW = math.floor(remW / 2)
+	local sW = remW - dW
+	AHSellTab.postBtn:SetSize(pW, 30)
+	AHSellTab.postAllBtn:SetSize(paW, 30)
+	AHSellTab.postAllBtn:ClearAllPoints()
+	AHSellTab.postAllBtn:SetPoint("LEFT", AHSellTab.postBtn, "RIGHT", actGap, 0)
+	AHSellTab.doneBtn:SetSize(dW, 30)
+	AHSellTab.doneBtn:ClearAllPoints()
+	AHSellTab.doneBtn:SetPoint("LEFT", AHSellTab.postAllBtn, "RIGHT", actGap, 0)
+	AHSellTab.skipBtn:SetSize(sW, 30)
+	AHSellTab.skipBtn:ClearAllPoints()
+	AHSellTab.skipBtn:SetPoint("LEFT", AHSellTab.doneBtn, "RIGHT", actGap, 0)
+
+	if AHSellTab.vendQtyBox and AHSellTab.vendQtyLbl then
+		AHSellTab.vendQtyBox:SetWidth(qtyBoxW)
+		AHSellTab.vendQtyBox:ClearAllPoints()
+		AHSellTab.vendQtyBox:SetPoint("LEFT", AHSellTab.vendQtyLbl, "RIGHT", railGap, 0)
+	end
+	if AHSellTab.vendMaxBtn and AHSellTab.vendQtyBox then
+		AHSellTab.vendMaxBtn:SetSize(maxBtnW, 24)
+		AHSellTab.vendMaxBtn:ClearAllPoints()
+		AHSellTab.vendMaxBtn:SetPoint("LEFT", AHSellTab.vendQtyBox, "RIGHT", maxGap, 0)
+	end
+	if AHSellTab.vendSellBtn and AHSellTab.vendSellAllBtn then
+		local vSpan = math.min(z2W, wide and 276 or 256)
+		local vBtnW = math.floor((vSpan - actGap) / 2)
+		AHSellTab.vendSellBtn:SetSize(vBtnW, 30)
+		AHSellTab.vendSellAllBtn:SetSize(vSpan - actGap - vBtnW, 30)
+		AHSellTab.vendSellAllBtn:ClearAllPoints()
+		AHSellTab.vendSellAllBtn:SetPoint("LEFT", AHSellTab.vendSellBtn, "RIGHT", actGap, 0)
+	end
+
+	AHSellTab.sellZone3:ClearAllPoints()
+	AHSellTab.sellZone3:SetPoint("TOPRIGHT", AHSellTab.topBar, "TOPRIGHT", -pad, -10)
+	AHSellTab.sellZone3:SetPoint("BOTTOMRIGHT", AHSellTab.topBar, "BOTTOMRIGHT", -pad, 10)
+	AHSellTab.sellZone3:SetWidth(z3W)
+
+	local utilGap = 6
+	local chW = math.floor((z3W - utilGap) * 0.56)
+	local refW = z3W - utilGap - chW
+	AHSellTab.sellChBtn:SetSize(chW, 24)
+	AHSellTab.sellRefreshBtn:SetSize(refW, 24)
+
+	local z3LblW = wide and 56 or 48
+	local z3Gap = 4
+	local z3RailW = z3W - z3LblW - z3Gap
+	AHSellTab.sellDurLbl:SetWidth(z3LblW)
+	AHSellTab.sellRuleLbl:SetWidth(z3LblW)
+
+	local durGap = wide and 5 or 3
+	local durW = math.floor((z3RailW - durGap * 2) / 3)
+	local durLastW = z3RailW - durW * 2 - durGap * 2
+	for dIdx = 1, 3 do
+		local db = AHSellTab.sellDurBtns[dIdx]
+		db:SetWidth(dIdx == 3 and durLastW or durW)
+		db:ClearAllPoints()
+		if dIdx == 1 then
+			db:SetPoint("LEFT", AHSellTab.sellDurLbl, "RIGHT", z3Gap, 0)
+		else
+			db:SetPoint("LEFT", AHSellTab.sellDurBtns[dIdx - 1], "RIGHT", durGap, 0)
+		end
+	end
+
+	local ucGap = wide and 4 or 3
+	local matchW = wide and 64 or 45
+	local otherW = math.floor((z3RailW - matchW - ucGap * 3) / 3)
+	local lastW = z3RailW - matchW - otherW * 2 - ucGap * 3
+	for uIdx = 1, #AHSellTab.sellUcBtns do
+		local ub = AHSellTab.sellUcBtns[uIdx]
+		local uw = (uIdx == 1) and matchW or ((uIdx == #AHSellTab.sellUcBtns) and lastW or otherW)
+		ub:SetWidth(uw)
+		ub:ClearAllPoints()
+		if uIdx == 1 then
+			ub:SetPoint("LEFT", AHSellTab.sellRuleLbl, "RIGHT", z3Gap, 0)
+		else
+			ub:SetPoint("LEFT", AHSellTab.sellUcBtns[uIdx - 1], "RIGHT", ucGap, 0)
+		end
+	end
+end
+
 function AHSellTab.EnsureAttached()
 	if not initialized then buildUI() end
 	local ahf = _G.AuctionHouseFrame
@@ -1779,18 +2301,14 @@ function AHSellTab.EnsureAttached()
 					tabFrame:HookScript("OnShow", function()
 						local of = getOrderFlow()
 						if of then
-							local sl = of.GetState and of.GetState().stages.sell
-							local cur = sl and sl.items and sl.items[sl.activeIndex]
-							if cur and cur.channel == "ah" and (cur.remaining or 0) > 0
-								and cur.status ~= "done" and cur.status ~= "skipped"
-								and not cur.listingsScanned and of.ScanSellItemMarket then
-								of.ScanSellItemMarket(sl.activeIndex, "select")
-							end
+							triggerOpenSellAutoScan(of)
 						end
 						AHSellTab.Render()
 						AHSellTab.SyncSpaceBinding()
 					end)
 					tabFrame:HookScript("OnHide", function()
+						lastAutoScanItemKey = nil
+						lastAutoScanAt = 0
 						AHSellTab.SyncSpaceBinding(true)
 					end)
 				end
@@ -1832,15 +2350,7 @@ function AHSellTab.SelectTab()
 	end
 	local of = getOrderFlow()
 	if of then
-		local sl = of.GetState and of.GetState().stages.sell
-		if sl and sl.items then
-			local cur = sl.items[sl.activeIndex]
-			if cur and cur.channel == "ah" and (cur.remaining or 0) > 0
-				and cur.status ~= "done" and cur.status ~= "skipped"
-				and not cur.listingsScanned and of.ScanSellItemMarket then
-				of.ScanSellItemMarket(sl.activeIndex, "select")
-			end
-		end
+		triggerOpenSellAutoScan(of)
 	end
 	AHSellTab.Render()
 	AHSellTab.SyncSpaceBinding()
@@ -1848,6 +2358,8 @@ function AHSellTab.SelectTab()
 end
 
 function AHSellTab.HideTab()
+	lastAutoScanItemKey = nil
+	lastAutoScanAt = 0
 	if tabFrame and tabFrame:IsShown() then
 		tabFrame:Hide()
 	end
@@ -1898,6 +2410,26 @@ function AHSellTab.Render()
 	AHSellTab.topBar.plate:SetFill(topFill[1], topFill[2], topFill[3], topFill[4])
 	AHSellTab.sellBagPane.plate:SetFill(paneFill[1], paneFill[2], paneFill[3], paneFill[4])
 	AHSellTab.sellPricesPlate:SetFill(paneFill[1], paneFill[2], paneFill[3], paneFill[4])
+	layoutTopBar()
+
+	local divAlpha = isLight and 0.16 or 0.34
+	if AHSellTab.topDiv1 then AHSellTab.topDiv1:SetColorTexture(sepCol[1], sepCol[2], sepCol[3], divAlpha) end
+	if AHSellTab.topDiv2 then AHSellTab.topDiv2:SetColorTexture(sepCol[1], sepCol[2], sepCol[3], divAlpha) end
+	if AHSellTab.sellSummarySep then AHSellTab.sellSummarySep:SetColorTexture(sepCol[1], sepCol[2], sepCol[3], isLight and 0.10 or 0.18) end
+	if AHSellTab.dropHintBox and AHSellTab.dropHintBox.plate then
+		AHSellTab.dropHintBox.plate:SetFill(isLight and 0.91 or 0.02, isLight and 0.93 or 0.07, isLight and 0.96 or 0.04, isLight and 0.90 or 0.78)
+		AHSellTab.dropHintBox.plate:SetStroke(sepCol[1], sepCol[2], sepCol[3], isLight and 0.14 or 0.28)
+	end
+	if AHSellTab.dropHintFs then
+		AHSellTab.dropHintFs:SetText(palHex("hexMuted", "98989d") .. "Drop item here or click from Bags|r")
+	end
+	if AHSellTab.sellSummaryCard and AHSellTab.sellSummaryCard.plate then
+		AHSellTab.sellSummaryCard.plate:SetFill(isLight and 0.91 or 0.02, isLight and 0.93 or 0.08, isLight and 0.96 or 0.05, isLight and 0.95 or 0.88)
+		AHSellTab.sellSummaryCard.plate:SetStroke(sepCol[1], sepCol[2], sepCol[3], isLight and 0.18 or 0.34)
+	end
+	if AHSellTab.zone1EyebrowFs then
+		AHSellTab.zone1EyebrowFs:SetText(palHex("hexGold", "d4b26a") .. "SELECTED ITEM|r")
+	end
 
 	-- Notice Banner & dynamic top anchor for bottom panes
 	local hasNotice = (type(st.notice) == "string" and st.notice ~= "")
@@ -1932,10 +2464,25 @@ function AHSellTab.Render()
 		AHSellTab.iconDropBtn.plate:SetStroke(r, g, b, 0.95)
 		local qDisp = (cur.channel == "vendor") and (cur.remaining or 0) or (of and of.GetSellPostQty and of.GetSellPostQty(cur) or cur.remaining or 0)
 		AHSellTab.iconDropBtn.countFs:SetText((qDisp and qDisp > 1) and tostring(qDisp) or "")
+		if AHSellTab.spotMetaFs then
+			local isCommMeta = (of and of.IsSellItemCommodity and of.IsSellItemCommodity(cur)) and true or false
+			if cur.channel == "vendor" then
+				AHSellTab.spotMetaFs:SetText(palHex("hexGold", "f7d57c") .. "Vendor Channel|r")
+			else
+				local kindTag = isCommMeta and "Commodity" or "Equipment"
+				local scanTag = (sl.pendingSearch and sl.pendingSearch.itemID == cur.itemID)
+					and (palHex("hexInfo", "56d4e8") .. "Scanning AH...|r")
+					or (palHex("hexPositive", "30d158") .. "AH Ready|r")
+				AHSellTab.spotMetaFs:SetText(palHex("hexSecondary", "c8d0ca") .. kindTag .. "  |  |r" .. scanTag)
+			end
+		end
 	else
 		AHSellTab.iconDropBtn.tex:SetTexture(ns.QUESTION_ICON or "Interface\\Icons\\INV_Misc_QuestionMark")
 		AHSellTab.iconDropBtn.plate:SetStroke(goldBorder[1], goldBorder[2], goldBorder[3], 0.65)
 		AHSellTab.iconDropBtn.countFs:SetText("")
+		if AHSellTab.spotMetaFs then
+			AHSellTab.spotMetaFs:SetText(palHex("hexMuted", "98989d") .. "Waiting for item|r")
+		end
 	end
 
 	-- Channel & Refresh header controls
@@ -1945,7 +2492,9 @@ function AHSellTab.Render()
 	local isVend = (cur ~= nil and cur.channel == "vendor")
 	AHSellTab.sellChBtn:SetEnabled(cur ~= nil)
 	AHSellTab.sellChBtn:SetText(isVend and "Sell: Vendor" or "Sell: AH")
-	AHSellTab.sellChBtn:PaintStyle(isVend and { 0.36, 0.24, 0.06, 0.92 } or btnActFill, goldBorder, btnInactText)
+	AHSellTab.sellChBtn:PaintStyle(isVend and { 0.36, 0.24, 0.06, 0.92 } or btnActFill,
+		isVend and goldBorder or btnActStroke,
+		btnActText)
 
 	AHSellTab.sellDurLbl:SetText(palHex("hexSecondary", "ebebf5") .. "Duration|r")
 	local curDur = sl.duration or 2
@@ -1957,9 +2506,18 @@ function AHSellTab.Render()
 			activeD and btnActStroke or subtleBorder,
 			activeD and btnActText or btnInactText)
 	end
-	AHSellTab.sellUcBtn:SetEnabled(cur ~= nil and not isVend)
-	AHSellTab.sellUcBtn:SetText("Rule: " .. (SELL_UNDERCUT_LABELS[sl.undercutMode or "match"] or "Match"))
-	AHSellTab.sellUcBtn:PaintStyle(btnInactFill, goldBorder, btnInactText)
+
+	AHSellTab.sellRuleLbl:SetText(palHex("hexSecondary", "ebebf5") .. "Rule|r")
+	local curRule = sl.undercutMode or "match"
+	for _, ub in ipairs(AHSellTab.sellUcBtns or {}) do
+		local activeR = (ub._ucKey == curRule)
+		ub:SetEnabled(cur ~= nil and not isVend)
+		ub:PaintStyle(activeR and btnActFill or btnInactFill,
+			activeR and btnActStroke or subtleBorder,
+			activeR and btnActText or btnInactText)
+	end
+
+	AHSellTab.sellDepLbl:SetText(palHex("hexMuted", "98989d") .. "Deposit|r")
 
 	if isVend then
 		AHSellTab.sellForm:Hide()
@@ -1968,18 +2526,39 @@ function AHSellTab.Render()
 		AHSellTab.postAllBtn:Hide()
 		AHSellTab.doneBtn:Hide()
 		AHSellTab.skipBtn:Hide()
+		AHSellTab.sellDurLbl:Hide()
+		for _, db in ipairs(AHSellTab.sellDurBtns or {}) do db:Hide() end
+		AHSellTab.sellRuleLbl:Hide()
+		for _, ub in ipairs(AHSellTab.sellUcBtns or {}) do ub:Hide() end
+		if AHSellTab.vendQtyLbl then
+			AHSellTab.vendQtyLbl:SetText(palHex("hexSecondary", "ebebf5") .. "Vendor Qty|r")
+		end
 		if AHSellTab.vendQtyBox then
+			if AHSellTab.vendQtyBox.plate then
+				AHSellTab.vendQtyBox.plate:SetFill(boxFill[1], boxFill[2], boxFill[3], boxFill[4])
+				AHSellTab.vendQtyBox.plate:SetStroke(boxStroke[1], boxStroke[2], boxStroke[3], boxStroke[4])
+			end
+			if AHSellTab.vendQtyBox.SetTextColor then
+				AHSellTab.vendQtyBox:SetTextColor(boxInk[1], boxInk[2], boxInk[3], boxInk[4])
+			end
 			local focused = AHSellTab.vendQtyBox.HasFocus and AHSellTab.vendQtyBox:HasFocus()
 			if not focused then AHSellTab.vendQtyBox:SetText(tostring(cur.remaining or 1)) end
 		end
 		local vUnit = (of and of.IsSellItemVendorable) and select(2, of.IsSellItemVendorable(cur)) or (cur.vendorSell or 0)
 		local vLim = (of and of.GetSellPostLimit and of.GetSellPostLimit(cur)) or (cur.inBags or 0)
-		AHSellTab.vendInfoFs:SetText(string.format("In Bags: %d  |  Unit Value: %s  |  Total: %s",
+		AHSellTab.vendInfoFs:SetText(palHex("hexMuted", "98989d") .. string.format("In Bags: %d  |  Unit: %s  |  Total: %s|r",
 			vLim, ns.FormatMoneyCompact(vUnit), ns.FormatMoneyCompact(vUnit * (cur.remaining or 0))))
-		AHSellTab.sellDepFs:SetText(palHex("hexMuted", "98989d") .. "Deposit: |r0c")
-		AHSellTab.sellTotalFs:SetText(palHex("hexMuted", "98989d") .. "Vendor Value: |r" .. palHex("hexGold", "f7d57c") .. ns.FormatMoneyCompact(vUnit * (cur.remaining or 0)) .. "|r")
+		AHSellTab.sellDepValFs:SetText(palHex("hexText", "ffffff") .. "0c|r")
+		AHSellTab.sellTotalLbl:SetText(palHex("hexSecondary", "ebebf5") .. "Vendor Value|r")
+		AHSellTab.sellTotalValFs:SetText(palHex("hexGold", "f7d57c") .. ns.FormatMoneyCompact(vUnit * (cur.remaining or 0)) .. "|r")
+		if AHSellTab.vendMaxBtn then
+			AHSellTab.vendMaxBtn:SetEnabled(vLim > 0)
+			AHSellTab.vendMaxBtn:PaintStyle(btnInactFill, goldBorder, btnInactText)
+		end
 		AHSellTab.vendSellBtn:SetEnabled(vLim > 0)
+		AHSellTab.vendSellBtn:PaintStyle({ 0.42, 0.28, 0.06, 0.96 }, goldBorder, { 1.0, 0.96, 0.88, 1.0 })
 		AHSellTab.vendSellAllBtn:SetEnabled(true)
+		AHSellTab.vendSellAllBtn:PaintStyle(btnInactFill, goldBorder, btnInactText)
 	else
 		AHSellTab.sellVendorBar:Hide()
 		AHSellTab.sellForm:Show()
@@ -1987,6 +2566,10 @@ function AHSellTab.Render()
 		AHSellTab.postAllBtn:Show()
 		AHSellTab.doneBtn:Show()
 		AHSellTab.skipBtn:Show()
+		AHSellTab.sellDurLbl:Show()
+		for _, db in ipairs(AHSellTab.sellDurBtns or {}) do db:Show() end
+		AHSellTab.sellRuleLbl:Show()
+		for _, ub in ipairs(AHSellTab.sellUcBtns or {}) do ub:Show() end
 
 		local isCommItem = (cur ~= nil and of and of.IsSellItemCommodity and of.IsSellItemCommodity(cur)) and true or false
 		local postQty = cur and of.GetSellPostQty(cur) or 0
@@ -2003,7 +2586,8 @@ function AHSellTab.Render()
 
 		AHSellTab.sellQtyLbl:SetText(palHex("hexSecondary", "ebebf5") .. "Quantity|r")
 		AHSellTab.sellPriceLbl:SetText(palHex("hexSecondary", "ebebf5") .. (isCommItem and "Unit Price|r" or "Buyout Price|r"))
-		AHSellTab.sellBidLbl:SetText(palHex("hexSecondary", "ebebf5") .. "Bid Price|r")
+		AHSellTab.sellBidLbl:SetText(palHex("hexSecondary", "ebebf5") .. "Starting Bid|r")
+		AHSellTab.sellUnitLbl:SetText(palHex("hexSecondary", "ebebf5") .. "Price / Item|r")
 		AHSellTab.sellPriceGTag:SetText(palHex("hexGold", "ffd60a") .. "g|r")
 		AHSellTab.sellPriceSTag:SetText(palHex("hexSilver", "c7c7cc") .. "s|r")
 		AHSellTab.sellPriceCTag:SetText(palHex("hexCopper", "e08a5e") .. "c|r")
@@ -2017,21 +2601,41 @@ function AHSellTab.Render()
 		AHSellTab.sellQtyPlus:PaintStyle(btnInactFill, goldBorder, btnInactText)
 		AHSellTab.sellMaxBtn:SetEnabled(cur ~= nil and postLimit > 0 and postQty ~= postLimit)
 		AHSellTab.sellMaxBtn:PaintStyle(btnInactFill, goldBorder, btnInactText)
-		AHSellTab.sellMaxInfoFs:SetText(palHex("hexMuted", "98989d") .. string.format("Max: %d|r", postLimit))
+		AHSellTab.sellMaxInfoFs:SetText(palHex("hexMuted", "98989d") .. string.format("(max %d)|r", postLimit))
 
+		local isTSMSrc = (ns.IsTSMOptInEnabled and ns.IsTSMOptInEnabled()
+			and ns.IsTSMAvailable and ns.IsTSMAvailable()
+			and not (ns.HasSnapshots and ns.HasSnapshots())) and true or false
 		local srcTagMap = {
-			custom = palHex("hexGold", "f7d57c") .. "Custom|r",
-			live_own = palHex("hexPositive", "30d158") .. "Own Top|r",
-			live_ah = palHex("hexInfo", "56d4e8") .. "Live AH|r",
-			market_db = palHex("hexMuted", "98989d") .. "DB Price|r",
-			vendor_fallback = palHex("hexMuted", "98989d") .. "Est|r",
-			none = "",
+			custom = { txt = palHex("hexGold", "f7d57c") .. "Custom|r", fill = { 0.24, 0.18, 0.05, 0.90 }, stroke = { 0.88, 0.70, 0.26, 0.75 } },
+			live_own = { txt = palHex("hexPositive", "30d158") .. "Own Top|r", fill = { 0.05, 0.22, 0.12, 0.90 }, stroke = { 0.24, 0.90, 0.50, 0.72 } },
+			live_ah = { txt = palHex("hexInfo", "56d4e8") .. "Live AH|r", fill = { 0.06, 0.18, 0.24, 0.90 }, stroke = { 0.34, 0.83, 0.91, 0.72 } },
+			market_db = isTSMSrc
+				and { txt = palHex("hexGold", "f7d57c") .. "TSM|r", fill = { 0.22, 0.17, 0.06, 0.88 }, stroke = { 0.83, 0.64, 0.24, 0.68 } }
+				or { txt = palHex("hexMuted", "b8c0c8") .. "Snap|r", fill = { 0.10, 0.14, 0.16, 0.85 }, stroke = { 0.55, 0.62, 0.68, 0.55 } },
+			vendor_fallback = { txt = palHex("hexMuted", "b8c0c8") .. "Est|r", fill = { 0.10, 0.14, 0.16, 0.85 }, stroke = { 0.55, 0.62, 0.68, 0.55 } },
 		}
-		AHSellTab.sellPriceSrcFs:SetText(srcTagMap[priceSrc or "none"] or "")
+		local srcInfo = srcTagMap[priceSrc or "none"]
+		if srcInfo then
+			AHSellTab.sellPriceSrcFs:SetText(srcInfo.txt)
+			if AHSellTab.sellPriceSrcPill then
+				AHSellTab.sellPriceSrcPill.plate:SetFill(srcInfo.fill[1], srcInfo.fill[2], srcInfo.fill[3], srcInfo.fill[4])
+				AHSellTab.sellPriceSrcPill.plate:SetStroke(srcInfo.stroke[1], srcInfo.stroke[2], srcInfo.stroke[3], srcInfo.stroke[4])
+				AHSellTab.sellPriceSrcPill:Show()
+			end
+		else
+			AHSellTab.sellPriceSrcFs:SetText("")
+			if AHSellTab.sellPriceSrcPill then AHSellTab.sellPriceSrcPill:Hide() end
+		end
 
 		if isCommItem or cur == nil then
 			AHSellTab.sellBidRow:Hide()
+			if AHSellTab.sellUnitRow then
+				AHSellTab.sellUnitRow:Show()
+				AHSellTab.sellUnitSummaryFs:SetText(cur and formatUnitSummaryText(effUnit) or (palHex("hexMuted", "98989d") .. "Select an item to price|r"))
+			end
 		else
+			if AHSellTab.sellUnitRow then AHSellTab.sellUnitRow:Hide() end
 			AHSellTab.sellBidRow:Show()
 			if buyoutP > 0 and bidP >= buyoutP then
 				AHSellTab.sellBidHintFs:SetText(palHex("hexDanger", "ff453a") .. "Bid >= BO!|r")
@@ -2041,8 +2645,9 @@ function AHSellTab.Render()
 		end
 
 		local depCol = lowMoney and palHex("hexDanger", "ff453a") or palHex("hexText", "ffffff")
-		AHSellTab.sellDepFs:SetText(palHex("hexMuted", "98989d") .. "Deposit: |r" .. depCol .. ((dep > 0) and ns.FormatMoneyCompact(dep) or "0c") .. "|r")
-		AHSellTab.sellTotalFs:SetText(palHex("hexMuted", "98989d") .. "Total Price: |r" .. palHex("hexGold", "f7d57c") .. ((totP > 0) and ns.FormatMoneyCompact(totP) or "0c") .. "|r")
+		AHSellTab.sellDepValFs:SetText(depCol .. ((dep > 0) and ns.FormatMoneyCompact(dep) or "0c") .. "|r")
+		AHSellTab.sellTotalLbl:SetText(palHex("hexSecondary", "ebebf5") .. "Total Price|r")
+		AHSellTab.sellTotalValFs:SetText(palHex("hexGold", "f7d57c") .. ((totP > 0) and ns.FormatMoneyCompact(totP) or "0c") .. "|r")
 
 		for _, bx in ipairs({ AHSellTab.sellQtyBox, AHSellTab.sellPriceGBox, AHSellTab.sellPriceSBox, AHSellTab.sellPriceCBox, AHSellTab.sellBidGBox, AHSellTab.sellBidSBox, AHSellTab.sellBidCBox }) do
 			if bx then

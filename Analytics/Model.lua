@@ -227,7 +227,15 @@ local function richItemRows(f,from,to)
     local baseFilters={}; for k,v in pairs(f) do baseFilters[k]=v end
     local needle=strlower(f.search or ""); baseFilters.search=""
     local old=baseItemRows(baseFilters,from,to); local out,totals={}, {qtySold=0,qtyBought=0,gross=0,spent=0,fee=0,cogs=0,depLost=0,profit=0}
-    local details={}; local now=nowSec(); local d180=Store.DayKey(now-179*86400); local scanFrom=from<d180 and from or d180
+    local details,deIndirect={},{}; local now=nowSec(); local d180=Store.DayKey(now-179*86400); local scanFrom=from<d180 and from or d180
+    local function ensureDE(srcID)
+        local rec=deIndirect[srcID]
+        if not rec then
+            rec={deBrokenQty=0,deBrokenCost=0,deSoldMatsQty=0,deIndirectGross=0,deIndirectFee=0,deIndirectCogs=0,deIndirectProfit=0,byOutput={}}
+            deIndirect[srcID]=rec
+        end
+        return rec
+    end
     local last7,prev7,today=Store.DayKey(now-6*86400),Store.DayKey(now-13*86400),Store.DayKey(now)
     local sourceFiltered=(f.source and f.source~="all") or f.sources~=nil
     local sources=f.sources or {}; local ahOnly=f.source=="AH" or (sources.AH==true or sources[1]=="AH")
@@ -278,14 +286,48 @@ local function richItemRows(f,from,to)
                             elseif typ=="AH_CANCEL" then d.cancelledPeriod=(d.cancelledPeriod or 0)+qty
                             elseif typ=="AH_POST" then d.postedPeriod=(d.postedPeriod or 0)+qty end
                             if typ=="AH_SELL" or typ=="VENDOR_SELL" or typ=="COD_SELL" or typ=="TRADE_SELL" then
-                                local gross=tonumber(r.extra and r.extra.gross) or (tonumber(r.total) or 0)+(tonumber(r.extra and r.extra.fee) or 0)
-                                d.sold=d.sold+qty; d.gross=d.gross+gross; d.fee=d.fee+(tonumber(r.extra and r.extra.fee) or 0)
+                                local feeVal=tonumber(r.extra and r.extra.fee) or 0
+                                local gross=tonumber(r.extra and r.extra.gross) or (tonumber(r.total) or 0)+feeVal
+                                d.sold=d.sold+qty; d.gross=d.gross+gross; d.fee=d.fee+feeVal
                                 d.cogs=d.cogs+(tonumber(r.cogs) or 0); d.depLost=d.depLost+(tonumber(r.depLost) or 0)
-                                v.sold=v.sold+qty; v.gross=v.gross+gross; v.fee=v.fee+(tonumber(r.extra and r.extra.fee) or 0); v.cogs=v.cogs+(tonumber(r.cogs) or 0); v.depLost=v.depLost+(tonumber(r.depLost) or 0)
+                                v.sold=v.sold+qty; v.gross=v.gross+gross; v.fee=v.fee+feeVal; v.cogs=v.cogs+(tonumber(r.cogs) or 0); v.depLost=v.depLost+(tonumber(r.depLost) or 0)
                                 local unit=qty>0 and gross/qty or (tonumber(r.unit) or 0); d.minSell=min(d.minSell or unit,unit); d.maxSell=max(d.maxSell or unit,unit)
                                 if r.time>=d.lastSoldTs then d.lastSoldTs=r.time; d.lastSoldUnit=qty>0 and gross/qty or r.unit; d.lastSoldTo=r.extra and (r.extra.buyer or r.extra.counterparty) end
                                 if r.time>=(d.lastSoldTs or 0) then d.expSinceSale=0; d.canSinceSale=0 end
                                 local buyer=r.extra and (r.extra.buyer or r.extra.counterparty); if buyer then local b=d.buyers[buyer] or {name=buyer,qty=0,total=0}; d.buyers[buyer]=b; b.qty=b.qty+qty; b.total=b.total+gross end
+                                local origList=(type(extra.deOrigins)=="table" and #extra.deOrigins>0 and extra.deOrigins)
+                                    or (type(extra.deOrigin)=="table" and (tonumber(extra.deOrigin.srcItemID) or 0)>0 and {extra.deOrigin} or nil)
+                                if origList and qty>0 then
+                                    local outName=Model.ItemName(id)
+                                    for _,orig in ipairs(origList) do
+                                        local srcID=tonumber(orig.srcItemID) or 0
+                                        local oQty=tonumber(orig.qty) or 0
+                                        if srcID>0 and oQty>0 then
+                                            local ratio=min(1,max(0,oQty/qty))
+                                            local pGross=floor(gross*ratio+0.5)
+                                            local pFee=floor(feeVal*ratio+0.5)
+                                            local pCogs=tonumber(orig.srcCost)
+                                            if pCogs==nil then pCogs=floor((tonumber(r.cogs) or 0)*ratio+0.5) else pCogs=floor(pCogs+0.5) end
+                                            local pProfit=pGross-pFee-pCogs
+                                            local de=ensureDE(srcID)
+                                            de.deSoldMatsQty=de.deSoldMatsQty+oQty
+                                            de.deIndirectGross=de.deIndirectGross+pGross
+                                            de.deIndirectFee=de.deIndirectFee+pFee
+                                            de.deIndirectCogs=de.deIndirectCogs+pCogs
+                                            de.deIndirectProfit=de.deIndirectProfit+pProfit
+                                            local outRec=de.byOutput[id]
+                                            if not outRec then
+                                                outRec={itemID=id,name=outName,qty=0,gross=0,fee=0,cogs=0,profit=0}
+                                                de.byOutput[id]=outRec
+                                            end
+                                            outRec.qty=outRec.qty+oQty
+                                            outRec.gross=outRec.gross+pGross
+                                            outRec.fee=outRec.fee+pFee
+                                            outRec.cogs=outRec.cogs+pCogs
+                                            outRec.profit=outRec.profit+pProfit
+                                        end
+                                    end
+                                end
                             elseif typ=="AH_BUY" or typ=="VENDOR_BUY" or typ=="COD_BUY" or typ=="TRADE_BUY" or typ=="VENDOR_BUYBACK" then
                                 local spent=abs(tonumber(r.total) or 0); d.bought=d.bought+qty; d.spent=d.spent+spent; d.cogs=d.cogs+(tonumber(r.cogs) or 0)
                                 v.bought=v.bought+qty; v.spent=v.spent+spent
@@ -297,11 +339,9 @@ local function richItemRows(f,from,to)
                                 local depLost=tonumber(r.depLost) or tonumber(extra.depLost) or 0
                                 d.depLost=d.depLost+depLost; v.depLost=v.depLost+depLost
                             elseif typ=="DISENCHANT_BROKEN" then
-                                local estVal=tonumber(extra.estValue) or 0
-                                if estVal>0 then
-                                    d.sold=d.sold+qty; d.gross=d.gross+estVal; d.cogs=d.cogs+(tonumber(r.cogs) or 0)
-                                    v.sold=v.sold+qty; v.gross=v.gross+estVal; v.cogs=v.cogs+(tonumber(r.cogs) or 0)
-                                end
+                                local de=ensureDE(id)
+                                de.deBrokenQty=de.deBrokenQty+qty
+                                de.deBrokenCost=de.deBrokenCost+(tonumber(r.cogs) or tonumber(extra.deSrcCost) or 0)
                             end
                         elseif typ=="AH_BUY" or typ=="VENDOR_BUY" or typ=="COD_BUY" or typ=="TRADE_BUY" or typ=="VENDOR_BUYBACK" then
                             local spent=abs(tonumber(r.total) or 0)
@@ -319,8 +359,33 @@ local function richItemRows(f,from,to)
                 end
             end end)
     local byID={}; for _,r in ipairs(old.rows or {}) do byID[tonumber(r.itemID)]=r end
+    for srcID in pairs(deIndirect) do
+        if not byID[srcID] then
+            local synth={itemID=srcID,name=Model.ItemName(srcID),icon=Model.ItemIcon(srcID),profit=0,est=false,knownRankTier=0,closedTotal=0,n=0,ahSold=0,soldLast7=0,soldPrev7=0,velocity=0,prevVelocity=0,isSlowing=false,ahSoldLast7=0,ahSoldPrev7=0,ahVelocity=0,ahPrevVelocity=0,ahIsSlowing=false,relists=0,reprices=0}
+            for _,key in ipairs(Store.ROLL_FIELDS) do synth[key]=0 end
+            byID[srcID]=synth
+        end
+    end
     for id,r in pairs(byID) do checkpoint();
         local d=details[id] or {}; local meta=rowMeta(id,f)
+        local de=deIndirect[id]
+        if de then
+            r.deBrokenQty=de.deBrokenQty; r.deBrokenCost=de.deBrokenCost; r.deSoldMatsQty=de.deSoldMatsQty
+            r.deIndirectGross=de.deIndirectGross; r.deIndirectFee=de.deIndirectFee; r.deIndirectCogs=de.deIndirectCogs
+            r.deIndirectProfit=de.deIndirectProfit
+            local outs={}
+            for _,o in pairs(de.byOutput) do outs[#outs+1]=o end
+            tsort(outs,function(a,b)
+                if a.profit~=b.profit then return a.profit>b.profit end
+                if a.qty~=b.qty then return a.qty>b.qty end
+                return (a.itemID or 0)<(b.itemID or 0)
+            end)
+            r.deSoldOutputs=outs
+        else
+            r.deBrokenQty=0; r.deBrokenCost=0; r.deSoldMatsQty=0
+            r.deIndirectGross=0; r.deIndirectFee=0; r.deIndirectCogs=0; r.deIndirectProfit=0
+            r.deSoldOutputs={}
+        end
         if sourceFiltered then
             r.sold=d.sold or 0; r.gross=d.gross or 0; r.fee=d.fee or 0; r.cogs=d.cogs or 0; r.depLost=d.depLost or 0; r.bought=d.bought or 0; r.spent=d.spent or 0
             r.profit=r.gross-r.fee-r.cogs-r.depLost
@@ -386,7 +451,7 @@ local function richItemRows(f,from,to)
         if f.groupBy=="level" then r.groupKey=tostring(id)..":"..tostring(meta.itemLevel or 0)
         elseif f.groupBy=="specific" then r.groupKey=meta.variant or tostring(id)
         else r.groupKey=tostring(id) end
-        if (f.source and f.source~="all" or f.sources) and not details[id] then r._excluded=true end
+        if (f.source and f.source~="all" or f.sources) and not details[id] and not deIndirect[id] then r._excluded=true end
         local prof=tostring(f.prof or f.group or "")
         if prof~="" and prof~="all" then
             if not professionMatches(id,strlower(prof)) then r._excluded=true end
@@ -1212,7 +1277,7 @@ local function ledgerRows(filters)
         local typeOK=not filters.types or filters.types[r.type]==true or isTradeGold
         local match=selectedChar(r.char,filters) and (not filters.econ or (r.econ or Store.DeriveEcon(r.char))==filters.econ)
             and typeGroupOK and (not filters.zone or filters.zone=="all" or r.zone==filters.zone or r.where==filters.zone)
-            and typeOK and sourceOK and (needle=="" or contains(Model.ItemName(r.itemID),needle) or contains(r.where,needle) or contains(r.type,needle) or contains(Model.TYPE_LABELS[r.type] or "",needle) or contains(r.char,needle) or contains(cp,needle))
+            and typeOK and sourceOK and (needle=="" or contains(Model.ItemName(r.itemID),needle) or contains(r.where,needle) or contains(r.type,needle) or contains(Model.TYPE_LABELS[r.type] or "",needle) or contains(r.char,needle) or contains(cp,needle) or contains(type(extra.deOrigin)=="table" and extra.deOrigin.srcName or "",needle))
         local prof=tostring(filters.prof or filters.group or "")
         if match and prof~="" and prof~="all" then
             if not professionMatches(r.itemID,strlower(prof)) then match=false end
@@ -1221,7 +1286,18 @@ local function ledgerRows(filters)
         if filters.minRarity or filters.rarities then quality=_G.C_Item and _G.C_Item.GetItemQualityByID and _G.C_Item.GetItemQualityByID(r.itemID); if not quality and _G.GetItemInfo then local _,_,q=_G.GetItemInfo(r.itemID); quality=q end end
         if match and filters.minRarity and (tonumber(quality) or -1)<tonumber(filters.minRarity) then match=false end
         if match and filters.rarities and not filters.rarities[tonumber(quality) or 0] then match=false end
-        if match then local c={}; for k,v in pairs(r) do c[k]=v end; c.extra=extra; c.typeLabel=Model.TYPE_LABELS[r.type] or r.type; c.counterparty=cp; c.charShort=Model.CharShort(r.char); c.itemName=r.itemID>0 and Model.ItemName(r.itemID) or ""; c.name=c.itemName; c.icon=r.itemID>0 and Model.ItemIcon(r.itemID) or nil; c.eid=extra.eid or r.eid; c.stackSize=extra.stackSize or r.qty; c.auctionsCount=extra.auctionsCount; if r.type=="DISENCHANT_BROKEN" and c.profit==nil then local ev=tonumber(extra.estValue) or 0; c.profit=ev>0 and (ev-(tonumber(r.cogs) or 0)) or 0 end; rows[#rows+1]=c end
+        if match then
+            local c={}; for k,v in pairs(r) do c[k]=v end
+            c.extra=extra; c.typeLabel=Model.TYPE_LABELS[r.type] or r.type; c.counterparty=cp; c.charShort=Model.CharShort(r.char)
+            c.itemName=r.itemID>0 and Model.ItemName(r.itemID) or ""; c.name=c.itemName
+            c.icon=r.itemID>0 and Model.ItemIcon(r.itemID) or nil; c.eid=extra.eid or r.eid; c.stackSize=extra.stackSize or r.qty; c.auctionsCount=extra.auctionsCount
+            if r.type=="DISENCHANT_BROKEN" or r.type=="DISENCHANT_RECEIVE" then
+                c.profit=0
+            elseif c.profit==nil and (r.type=="AH_SELL" or r.type=="VENDOR_SELL" or r.type=="COD_SELL" or r.type=="TRADE_SELL") then
+                c.profit=(tonumber(r.total) or 0)-(tonumber(r.cogs) or 0)-(tonumber(r.depLost) or 0)
+            end
+            rows[#rows+1]=c
+        end
     end
     Store.IterDays(from,to,function(_,list) for _,r in ipairs(list) do add(r) end end,{desc=true})
     if not filters.type or filters.type=="all" or filters.type=="loot" then
@@ -1264,14 +1340,16 @@ function Model.QueryLedger(filters,cursor,limit)
         totals.cogs=totals.cogs+(tonumber(r.cogs) or 0)
         if amount>0 then totals.inflow=totals.inflow+amount else totals.outflow=totals.outflow-min(0,amount) end
         local sale=r.type=="AH_SELL" or r.type=="VENDOR_SELL" or r.type=="COD_SELL" or r.type=="TRADE_SELL"
-        local rowProfit=tonumber(r.profit)
-        if rowProfit==nil then
-            if sale then rowProfit=amount-(tonumber(r.cogs) or 0)-(tonumber(r.depLost) or 0)
-            elseif r.type=="DISENCHANT_BROKEN" then
-                local estVal=tonumber(r.extra and r.extra.estValue) or 0
-                rowProfit=estVal>0 and (estVal-(tonumber(r.cogs) or 0)) or 0
-            elseif r.type=="AH_EXPIRE" or r.type=="AH_CANCEL" then rowProfit=-(tonumber(r.extra and r.extra.depLost) or tonumber(r.depLost) or 0)
-            else rowProfit=0 end
+        local rowProfit
+        if r.type=="DISENCHANT_BROKEN" or r.type=="DISENCHANT_RECEIVE" then
+            rowProfit=0
+        else
+            rowProfit=tonumber(r.profit)
+            if rowProfit==nil then
+                if sale then rowProfit=amount-(tonumber(r.cogs) or 0)-(tonumber(r.depLost) or 0)
+                elseif r.type=="AH_EXPIRE" or r.type=="AH_CANCEL" then rowProfit=-(tonumber(r.extra and r.extra.depLost) or tonumber(r.depLost) or 0)
+                else rowProfit=0 end
+            end
         end
         totals.profit=totals.profit+rowProfit
         if r.auctionsCount==nil and r.extra then r.auctionsCount=r.extra.auctionsCount end
@@ -1350,7 +1428,11 @@ function Model.GetItemDetail(itemKey,filters)
     if not s then s={itemID=id} end
     local detail={itemID=id,name=Model.ItemName(id),icon=Model.ItemIcon(id),curBasis=s.curBasis,basisQty=s.curBasisQty,smartAvgBuy=s.smartAvgBuy,
         expSinceSale=s.expSinceSale or 0,canSinceSale=s.canSinceSale or 0,saleRate=s.saleRate,sellThrough=s.sellThrough,lastSoldTs=s.lastSoldTs,lastSoldUnit=s.lastSoldUnit,
-        lastBuyTs=s.lastBuyTs,lastBuyUnit=s.lastBuyUnit,minBuy=s.minBuy,maxBuy=s.maxBuy,minSell=s.minSell,maxSell=s.maxSell,topBuyers={},topSellers={},transactions={}}
+        lastBuyTs=s.lastBuyTs,lastBuyUnit=s.lastBuyUnit,minBuy=s.minBuy,maxBuy=s.maxBuy,minSell=s.minSell,maxSell=s.maxSell,
+        deBrokenQty=s.deBrokenQty or 0,deBrokenCost=s.deBrokenCost or 0,deSoldMatsQty=s.deSoldMatsQty or 0,
+        deIndirectGross=s.deIndirectGross or 0,deIndirectFee=s.deIndirectFee or 0,deIndirectCogs=s.deIndirectCogs or 0,
+        deIndirectProfit=s.deIndirectProfit or 0,deSoldOutputs=s.deSoldOutputs or {},
+        topBuyers={},topSellers={},transactions={}}
     detail.windows={}
     for _,period in ipairs({"7d","30d","all"}) do
         local windowFilters={}; for k,v in pairs(statsFilters) do windowFilters[k]=v end; windowFilters.period=period
@@ -1358,7 +1440,7 @@ function Model.GetItemDetail(itemKey,filters)
         if itemLevel then for _,candidate in ipairs((Model.Compute("items",windowFilters).rows or {})) do if tonumber(candidate.itemID)==id and levelMatches(candidate) then rows=candidate; break end end
         elseif variant then for _,candidate in ipairs((Model.Compute("items",windowFilters).rows or {})) do if tonumber(candidate.itemID)==id and candidate.variant==variant then rows=candidate; break end end end
         if not rows then if itemLevel or variant then rows={} else rows=Model.GetItemStats(id,windowFilters) or {} end end
-        detail.windows[period=="7d" and "d7" or period=="30d" and "d30" or "all"]={sold=rows.sold or 0,avgSell=rows.avgSell,totalSales=rows.gross or 0,bought=rows.bought or 0,avgBuy=rows.avgBuy,totalSpent=rows.spent or 0,profit=rows.profit or 0,avgProfit=rows.avgProfit}
+        detail.windows[period=="7d" and "d7" or period=="30d" and "d30" or "all"]={sold=rows.sold or 0,avgSell=rows.avgSell,totalSales=rows.gross or 0,bought=rows.bought or 0,avgBuy=rows.avgBuy,totalSpent=rows.spent or 0,profit=rows.profit or 0,avgProfit=rows.avgProfit,deBrokenQty=rows.deBrokenQty or 0,deSoldMatsQty=rows.deSoldMatsQty or 0,deIndirectProfit=rows.deIndirectProfit or 0}
     end
     local buyers,sellers={},{}; local txFilters={}; for k,v in pairs(filters) do txFilters[k]=v end; txFilters.period=filters.period or "all"; txFilters.type="all"
     local all=ledgerRows(txFilters)
@@ -1372,7 +1454,7 @@ function Model.GetItemDetail(itemKey,filters)
         else
         if buyer then local b=buyers[buyer] or {name=buyer,qty=0,total=0}; buyers[buyer]=b; b.qty=b.qty+(r.qty or 0); b.total=b.total+(r.total or 0) end
         if seller then local b=sellers[seller] or {name=seller,qty=0,total=0}; sellers[seller]=b; b.qty=b.qty+(r.qty or 0); b.total=b.total+abs(r.total or 0) end
-        detail.transactions[#detail.transactions+1]={eid=r.eid,time=r.time,type=r.type,charShort=r.charShort,counterparty=r.counterparty,qty=r.qty,unit=r.unit,total=r.total,profit=r.profit}
+        detail.transactions[#detail.transactions+1]={eid=r.eid,time=r.time,type=r.type,charShort=r.charShort,counterparty=r.counterparty,qty=r.qty,unit=r.unit,total=r.total,cogs=r.cogs,profit=r.profit,where=r.where,extra=r.extra}
         end
     end end
     local function top(map,target) for _,v in pairs(map) do target[#target+1]=v end; tsort(target,function(a,b)return a.qty>b.qty end); while #target>3 do table.remove(target) end end

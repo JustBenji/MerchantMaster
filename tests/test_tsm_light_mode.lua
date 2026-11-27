@@ -17,6 +17,8 @@ local ITEM_NONE = 99988 -- No TSM data
 -- Install strict spy proxy on _G.TSM_API BEFORE testing default OFF behavior
 local tsmSpyHits = 0
 local tsmSpyEnabled = false
+local tsmMockLastUpdateFn = nil
+local tsmMockAltLastUpdateFn = nil
 local tsmMockData = {
     ["i:" .. tostring(ITEM_MIN)] = {
         DBMinBuyout = 650,
@@ -37,10 +39,16 @@ local tsmMockData = {
 local spyProxy = setmetatable({}, {
     __index = function(_, key)
         tsmSpyHits = tsmSpyHits + 1
-        if tsmSpyEnabled and key == "GetCustomPriceValue" then
-            return function(expr, itemStr)
-                local rec = tsmMockData[itemStr]
-                return rec and rec[expr] or nil
+        if tsmSpyEnabled then
+            if key == "GetCustomPriceValue" then
+                return function(expr, itemStr)
+                    local rec = tsmMockData[itemStr]
+                    return rec and rec[expr] or nil
+                end
+            elseif key == "GetAuctionDBLastUpdate" then
+                return tsmMockLastUpdateFn
+            elseif key == "GetLastUpdate" then
+                return tsmMockAltLastUpdateFn
             end
         end
         return nil
@@ -80,7 +88,9 @@ do
     local p3 = ns.QueryTSMPrice(ITEM_MIN)
     local b3 = ns.QueryTSMMarketBundle(ITEM_MIN)
     local d1 = ns.GetMultiSourceDemand(ITEM_MIN, ECON_ACTIVE)
+    local tOff = ns.GetTSMLastUpdateTime()
     local _ = p1, s1, p2, s2, p3, b3, d1
+    check(tOff == nil, "GetTSMLastUpdateTime() returns nil when TSM Light Mode is OFF")
 
     app.panel:Show()
     app.setTab("dashboard")
@@ -127,6 +137,34 @@ do
     local pMin2 = ns.QueryTSMPrice(ITEM_MIN)
     check(pMin2 == 650 and tsmSpyHits == hitsBeforeMemo, "QueryTSMMarketBundle memoizes per priceCacheEpoch")
 
+    -- ns.GetTSMLastUpdateTime(): _tsmLastSeenAt fallback when TSM_API has no timestamp API,
+    -- and direct GetAuctionDBLastUpdate() / GetLastUpdate() when exposed
+    local now = hostEnv.getFixtureNow()
+    tsmMockLastUpdateFn = nil
+    tsmMockAltLastUpdateFn = nil
+    local fallbackTs = ns.GetTSMLastUpdateTime()
+    check(type(fallbackTs) == "number" and fallbackTs > 0 and fallbackTs <= now and fallbackTs == ns._tsmLastSeenAt,
+        "GetTSMLastUpdateTime() falls back to valid _tsmLastSeenAt timestamp when TSM exposes no update API (got "
+            .. tostring(fallbackTs) .. ")")
+
+    local mockUpdatedAt = now - 900
+    tsmMockLastUpdateFn = function() return mockUpdatedAt end
+    local apiTs = ns.GetTSMLastUpdateTime()
+    check(apiTs == mockUpdatedAt,
+        "GetTSMLastUpdateTime() returns mocked GetAuctionDBLastUpdate() timestamp (got " .. tostring(apiTs) .. ")")
+
+    -- Future or throwing GetAuctionDBLastUpdate safely falls back to GetLastUpdate / _tsmLastSeenAt
+    tsmMockLastUpdateFn = function() return now + 7200 end
+    tsmMockAltLastUpdateFn = function() return now - 1200 end
+    check(ns.GetTSMLastUpdateTime() == (now - 1200),
+        "GetTSMLastUpdateTime() rejects future timestamp and falls back to GetLastUpdate()")
+    tsmMockLastUpdateFn = function() error("boom") end
+    tsmMockAltLastUpdateFn = nil
+    check(ns.GetTSMLastUpdateTime() == ns._tsmLastSeenAt,
+        "GetTSMLastUpdateTime() catches pcall error and falls back to _tsmLastSeenAt")
+    tsmMockLastUpdateFn = nil
+    tsmMockAltLastUpdateFn = nil
+
     -- DBRegionSoldPerDay fallback in GetMultiSourceDemand (active economy)
     local dem = ns.GetMultiSourceDemand(ITEM_MIN, ECON_ACTIVE)
     check(type(dem) == "table" and dem.dailySold == 42.5 and dem.demandSource == "TSM",
@@ -157,22 +195,35 @@ do
         check(ns.Pricing.GetItemSnapshotVelocity(ITEM_MIN, ECON_ACTIVE) == nil, "GetItemSnapshotVelocity stays nil in TSM Light Mode")
     end
 
-    -- Top status capsule displays TSM hourly status with fresh green indicator (NOT "No AH Scan Yet")
+    -- Top status capsule displays TSM <age> with fresh green indicator (NOT "No AH Scan Yet")
     app.setTab("dashboard")
     app.refresh()
     check(app.ui._statusUsingTSM == true, "status capsule flags _statusUsingTSM=true")
     check(app.ui._statusNoScanYet == false, "status capsule clears _statusNoScanYet when TSM Light Mode active")
+    check(app.ui._statusTsmAt == ns._tsmLastSeenAt,
+        "status capsule stores _statusTsmAt from GetTSMLastUpdateTime() fallback")
     local syncTxt = app.ui.statusSyncFs and app.ui.statusSyncFs:GetText() or ""
-    check(syncTxt:find("TSM", 1, true) ~= nil and syncTxt:find("Hourly", 1, true) ~= nil,
-        "status capsule displays TSM Hourly (got '" .. tostring(syncTxt) .. "')")
+    check(syncTxt:find("TSM", 1, true) ~= nil and syncTxt:find("just now", 1, true) ~= nil,
+        "status capsule displays TSM <age> (got '" .. tostring(syncTxt) .. "')")
+
+    -- With mocked GetAuctionDBLastUpdate (15m ago), status capsule shows "TSM 15m" and tooltip reflects it
+    local ts15m = hostEnv.getFixtureNow() - 900
+    tsmMockLastUpdateFn = function() return ts15m end
+    app.refresh()
+    local syncTxt15m = app.ui.statusSyncFs and app.ui.statusSyncFs:GetText() or ""
+    check(app.ui._statusTsmAt == ts15m, "status capsule updates _statusTsmAt from GetAuctionDBLastUpdate()")
+    check(syncTxt15m:find("TSM", 1, true) ~= nil and syncTxt15m:find("15m", 1, true) ~= nil,
+        "status capsule displays 'TSM 15m' when TSM last update was 15m ago (got '" .. tostring(syncTxt15m) .. "')")
     GameTooltip:Hide()
     if app.ui.statusCapsule and app.ui.statusCapsule:GetScript("OnEnter") then
         app.ui.statusCapsule:GetScript("OnEnter")(app.ui.statusCapsule)
         local joined = table.concat(GameTooltip._lines or {}, "\n")
-        check(joined:find("TSM Light Mode", 1, true) ~= nil and joined:find("heatmaps", 1, true) ~= nil,
-            "status capsule tooltip notes TSM Light Mode without heatmaps/depth")
+        check(joined:find("TSM Light Mode", 1, true) ~= nil and joined:find("heatmaps", 1, true) ~= nil
+            and joined:find("15m", 1, true) ~= nil,
+            "status capsule tooltip notes TSM Light Mode timestamp and without heatmaps/depth")
         GameTooltip:Hide()
     end
+    tsmMockLastUpdateFn = nil
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -238,7 +289,9 @@ do
     local pOff = ns.GetItemMarketPrice(ITEM_MIN)
     local pOffFb = ns.GetFallbackMarketPrice(ITEM_MIN)
     local dOff = ns.GetMultiSourceDemand(ITEM_MIN, ECON_ACTIVE)
+    local tOff2 = ns.GetTSMLastUpdateTime()
     local _ = pOff, pOffFb, dOff
+    check(tOff2 == nil, "GetTSMLastUpdateTime() returns nil after toggling TSM Light Mode OFF")
     app.refresh()
 
     check(tsmSpyHits == 0, "Zero _G.TSM_API reads after toggling TSM Light Mode OFF (got " .. tostring(tsmSpyHits) .. ")")

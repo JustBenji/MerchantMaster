@@ -82,13 +82,16 @@ do
     local bytesWithIntraday = Store.EstimateBytes()
     check(bytesWithIntraday > bytesEmpty + 200, "EstimateBytes accounts for intradaySnaps")
 
-    -- Hourly wealth series filters by econ (excludes PvP-Alliance!) and sums Main + Alt
+    -- Hourly wealth series is ledger-derived across all 24 rolling hours and excludes PvP-Alliance
+    check(Brief.ComputeWealthSeries == Brief.BuildWealthChartSeries, "Brief.ComputeWealthSeries alias exposed")
     local wHourly = Brief.BuildWealthChartSeries("hourly", "24h", ECON, nil, tDay0H14)
-    check(wHourly.mode == "hourly" and wHourly.usedFallback == false, "uses real intradaySnaps hourly series")
-    check(#wHourly.points == 3, "3 hourly points recorded across 08/10/14 (got " .. tostring(#wHourly.points) .. ")")
-    check(wHourly.points[1].value == 1000000, "08:00 total = 100g (Main only before Alt logged)")
-    check(wHourly.points[2].value == 1400000, "10:00 total = 140g (Main 100g + Alt 40g, excluding PvP-Alliance)")
-    check(wHourly.points[3].value == 1600000, "14:00 total = 160g (Main 120g + Alt 40g)")
+    check(wHourly.mode == "hourly" and wHourly.usedFallback == false and wHourly.isLedgerDerived == true,
+        "hourly series uses strict 24-slot ledger cashflow math")
+    check(#wHourly.points == 24, "hourly wealth always emits all 24 rolling hourly points (got " .. tostring(#wHourly.points) .. ")")
+    check(wHourly.latestTotal == 1600000, "latestTotal = 160g (Main 120g + Alt 40g, excluding PvP-Alliance)")
+    check(wHourly.points[24].value == 1600000, "slot 24 pinned to latestTotal (160g)")
+    check(wHourly.points[1].value == 1600000, "with zero ledger deltas, slot 1 equals latestTotal (160g)")
+    check(wHourly.change24h == 0, "zero ledger deltas -> change24h == 0")
 
     -- 7-day pruning: save 10 distinct days -> only newest 7 survive
     for dIdx = 1, 9 do
@@ -117,25 +120,102 @@ do
 end
 
 ---------------------------------------------------------------------------------------------------
--- 2. Day-1 Hourly Wealth Reconstruction Fallback vs Daily Wealth Mode
+-- 2. 24-Slot Ledger-Derived Hourly Wealth (Mid-Day + 00:30 Midnight + Asset Swaps) vs Daily Mode
 ---------------------------------------------------------------------------------------------------
 do
     resetLedger()
-    local tNow = dayOffset(0, 15)
-    hostEnv.setFixtureNow(tNow)
-    -- Seed today's ledger cashflows without intradaySnaps (simulating fresh install on Day 1)
-    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "AH_SELL", itemID = 4304, qty = 5, total = 50000, cogs = 20000, time = dayOffset(0, 11), extra = { gross = 52632, fee = 2632, name = "Thick Leather" } })
-    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "AH_SELL", itemID = 10504, qty = 1, total = 150000, cogs = 50000, time = dayOffset(0, 14), extra = { gross = 157895, fee = 7895, name = "Green Lens" } })
+    local function localTime(y, m, d, hr, mn)
+        return os.time({ year = y, month = m, day = d, hour = hr, min = mn or 0, sec = 0 })
+    end
+
+    -- 2a. Mid-day (15:30): verify asset swaps (AH_BUY/CRAFT/DISENCHANT_BROKEN/AH_POST) = 0 delta
+    -- while AH_SELL profit, AH_EXPIRE depLost, QUEST_MONEY, and POSTAGE shift hourly wealth accurately
+    local tMid = localTime(2026, 11, 12, 15, 30)
+    hostEnv.setFixtureNow(tMid)
+
+    -- +12,000c (+1g 20s) quest gold at 10:10 (slot 19)
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "QUEST_MONEY", itemID = 0, qty = 1, total = 12000, time = localTime(2026, 11, 12, 10, 10) })
+    -- +30,000c (+3g) AH_SELL net profit (gross 52632 - fee 2632 - cogs 20000) at 11:15 (slot 20)
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "AH_SELL", itemID = 4304, qty = 5, total = 50000, cogs = 20000, time = localTime(2026, 11, 12, 11, 15), extra = { gross = 52632, fee = 2632, name = "Thick Leather" } })
+    -- Balance-sheet asset swaps at 12:00..12:45 (slot 21) -> MUST leave wealth delta == 0!
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "AH_BUY", itemID = 4304, qty = 20, total = -80000, time = localTime(2026, 11, 12, 12, 5), extra = { name = "Thick Leather" } })
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "CRAFT", itemID = 10504, qty = 1, total = 0, cogs = 40000, time = localTime(2026, 11, 12, 12, 25), extra = { spellID = 12717, name = "Green Lens" } })
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "DISENCHANT_BROKEN", itemID = 10504, qty = 1, total = 0, cogs = 10000, time = localTime(2026, 11, 12, 12, 40), extra = { estValue = 20000, nonCash = true, name = "Green Lens" } })
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "DISENCHANT_RECEIVE", itemID = 11178, qty = 1, total = 0, time = localTime(2026, 11, 12, 12, 41), extra = { allocBasis = 10000, srcItemID = 10504, srcName = "Green Lens", nonCash = true } })
+    -- AH_POST (-1500c deposit, 0 wealth delta) at 13:05, then AH_EXPIRE (-1500c depLost) at 13:30 (slot 22)
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "AH_POST", itemID = 4304, qty = 1, unit = 10000, total = -1500, time = localTime(2026, 11, 12, 13, 5), extra = { auctionID = 7771, name = "Thick Leather" } })
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "AH_EXPIRE", itemID = 4304, qty = 1, unit = 10000, total = 0, time = localTime(2026, 11, 12, 13, 30), extra = { auctionID = 7771, name = "Thick Leather" } })
+    -- +100,000c (+10g) AH_SELL net profit (gross 157895 - fee 7895 - cogs 50000) at 14:20 (slot 23)
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "AH_SELL", itemID = 10504, qty = 1, total = 150000, cogs = 50000, time = localTime(2026, 11, 12, 14, 20), extra = { gross = 157895, fee = 7895, name = "Green Lens" } })
+    -- -500c (-5s) postage at 15:05 (slot 24)
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "POSTAGE", itemID = 0, qty = 0, total = -500, time = localTime(2026, 11, 12, 15, 5) })
+    -- Different economy noise at 14:15 -> MUST be ignored!
+    Store.Append({ char = CHAR_OTHER_ECON, econ = "PvP-Alliance", type = "AH_SELL", itemID = 10504, qty = 1, total = 900000, cogs = 0, time = localTime(2026, 11, 12, 14, 15), extra = { gross = 947368, fee = 47368, name = "Green Lens" } })
 
     local portfolio1 = { series = {}, latestTotal = 500000, latestGold = 500000, latestItems = 0, latestListed = 0 }
-    local recon = Brief.BuildWealthChartSeries("auto", "7d", ECON, portfolio1, tNow)
-    check(recon.mode == "hourly", "auto selects hourly when < 2 daily snapshots")
-    check(recon.usedFallback == true, "Day-1 fallback reconstruction activated")
-    check(#recon.points >= 2, "Day-1 fallback produces >= 2 hourly points")
-    check(recon.points[#recon.points].value == 500000, "Day-1 reconstructed series ends at latestTotal (50g)")
-    check(recon.points[1].value == 300000, "Day-1 backward reconstruction removes +5g and +15g today cashflows -> 30g start (got " .. tostring(recon.points[1].value) .. ")")
+    local midSeries = Brief.BuildWealthChartSeries("auto", "7d", ECON, portfolio1, tMid)
+    check(midSeries.mode == "hourly" and midSeries.isLedgerDerived == true, "auto selects ledger-derived hourly when < 2 daily snapshots")
+    check(#midSeries.points == 24, "mid-day hourly series emits all 24 rolling hourly slots (got " .. tostring(#midSeries.points) .. ")")
+    for idx = 1, 24 do
+        check(midSeries.points[idx].isLedgerDerived == true, "mid-day slot " .. idx .. " marked isLedgerDerived")
+        if idx > 1 then
+            check(midSeries.points[idx].sortKey - midSeries.points[idx - 1].sortKey == 3600, "hourly slots step by exact 3600s")
+        end
+    end
+    check(midSeries.points[24].label == "15:00" and midSeries.points[24].value == 500000 and midSeries.points[24].delta == -500,
+        "slot 24 (15:00) pinned to 50g with -5s postage delta (got val=" .. tostring(midSeries.points[24].value) .. ", d=" .. tostring(midSeries.points[24].delta) .. ")")
+    check(midSeries.points[23].label == "14:00" and midSeries.points[23].value == 500500 and midSeries.points[23].delta == 100000,
+        "slot 23 (14:00) = 50g 5s with +10g AH_SELL profit delta")
+    check(midSeries.points[22].label == "13:00" and midSeries.points[22].value == 400500 and midSeries.points[22].delta == -1500,
+        "slot 22 (13:00) = 40g 5s with -15s AH_EXPIRE depLost delta")
+    check(midSeries.points[21].label == "12:00" and midSeries.points[21].value == 402000 and midSeries.points[21].delta == 0,
+        "slot 21 (12:00) has 0 delta across AH_BUY, CRAFT, DISENCHANT_BROKEN, and DISENCHANT_RECEIVE")
+    check(midSeries.points[20].label == "11:00" and midSeries.points[20].value == 402000 and midSeries.points[20].delta == 30000,
+        "slot 20 (11:00) records +3g AH_SELL profit delta")
+    check(midSeries.points[19].label == "10:00" and midSeries.points[19].value == 372000 and midSeries.points[19].delta == 12000,
+        "slot 19 (10:00) records +1g 20s QUEST_MONEY delta")
+    check(midSeries.points[1].value == 360000,
+        "slot 1 removes +14g net 24h deltas -> 36g start (got " .. tostring(midSeries.points[1].value) .. ")")
+    check(midSeries.change24h == midSeries.points[24].value - midSeries.points[1].value and midSeries.change24h == 140000,
+        "change24h equals exact wealth[24] - wealth[1] (+14g)")
 
-    -- Multi-day portfolio -> auto selects daily for 7d, hourly for 24h
+    -- 2b. Right after midnight (00:30): MUST emit all 24 rolling hours spanning yesterday 01:00 .. today 00:00
+    resetLedger()
+    local tMidnight = localTime(2026, 11, 12, 0, 30)
+    hostEnv.setFixtureNow(tMidnight)
+    -- Outside 24h rolling window (yesterday 00:15 < yesterday 01:00) -> MUST be excluded!
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "QUEST_MONEY", itemID = 0, qty = 1, total = 999999, time = localTime(2026, 11, 11, 0, 15) })
+    -- Yesterday 14:20 (slot 14): AH_SELL profit +60,000c
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "AH_SELL", itemID = 10504, qty = 1, total = 90000, cogs = 30000, time = localTime(2026, 11, 11, 14, 20), extra = { gross = 94737, fee = 4737, name = "Green Lens" } })
+    -- Yesterday 23:15 (slot 23): REPAIR -5,000c
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "REPAIR", itemID = 0, qty = 0, total = -5000, time = localTime(2026, 11, 11, 23, 15) })
+    -- Today 00:10 (slot 24): QUEST_MONEY +15,000c
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "QUEST_MONEY", itemID = 0, qty = 1, total = 15000, time = localTime(2026, 11, 12, 0, 10) })
+    -- Yesterday 16:00 (slot 16): WRIT_TURNIN total 8,000c - cogs 3,000c = +5,000c
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "WRIT_TURNIN", itemID = 248701, qty = 1, total = 8000, cogs = 3000, time = localTime(2026, 11, 11, 16, 0) })
+    -- Yesterday 18:00 (slot 18): AH_POST (-1,000c, 0 delta) + AH_CANCEL (-1,000c depLost)
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "AH_POST", itemID = 4304, qty = 1, unit = 5000, total = -1000, time = localTime(2026, 11, 11, 18, 0), extra = { auctionID = 8881, name = "Thick Leather" } })
+    Store.Append({ char = CHAR_MAIN, econ = ECON, type = "AH_CANCEL", itemID = 4304, qty = 1, unit = 5000, total = 0, time = localTime(2026, 11, 11, 18, 20), extra = { auctionID = 8881, name = "Thick Leather" } })
+    -- Untimestamped (time == 0) row on todayKey -> maps into slot 24 (+2,000c ADJUST)
+    local todayBucket = Store.db.days[Store.DayKey(tMidnight)]
+    todayBucket.r[#todayBucket.r + 1] = { char = CHAR_MAIN, econ = ECON, type = "ADJUST", itemID = 0, qty = 1, total = 2000, time = 0, extra = {} }
+
+    local midnightSeries = Brief.ComputeWealthSeries("hourly", "24h", ECON, portfolio1, tMidnight)
+    check(midnightSeries.mode == "hourly" and midnightSeries.isLedgerDerived == true, "00:30 midnight hourly series is ledger-derived")
+    check(#midnightSeries.points == 24, "00:30 right after midnight emits all 24 hourly points (no 2-point stub; got " .. tostring(#midnightSeries.points) .. ")")
+    check(midnightSeries.points[1].label == "01:00" and midnightSeries.points[24].label == "00:00",
+        "00:30 rolling window spans yesterday 01:00 .. today 00:00 (got " .. tostring(midnightSeries.points[1].label) .. " .. " .. tostring(midnightSeries.points[24].label) .. ")")
+    check(midnightSeries.points[24].value == 500000 and midnightSeries.points[24].delta == 17000, "00:00 slot pinned to 50g with +1g 50s quest + 20s untimestamped ADJUST")
+    check(midnightSeries.points[23].value == 483000 and midnightSeries.points[23].delta == -5000, "23:00 slot = 48g 30s with -50s repair delta")
+    check(midnightSeries.points[22].value == 488000, "22:00 slot = 48g 80s before 23:00 repair")
+    check(midnightSeries.points[18].value == 488000 and midnightSeries.points[18].delta == -1000, "18:00 slot records -10s AH_CANCEL depLost")
+    check(midnightSeries.points[16].value == 489000 and midnightSeries.points[16].delta == 5000, "16:00 slot records +50s WRIT_TURNIN net (total - cogs)")
+    check(midnightSeries.points[14].value == 484000 and midnightSeries.points[14].delta == 60000, "14:00 slot records +6g AH_SELL profit")
+    check(midnightSeries.points[13].value == 424000 and midnightSeries.points[1].value == 424000, "pre-14:00 slots = 42g 40s (yesterday 00:15 noise excluded)")
+    check(midnightSeries.change24h == midnightSeries.points[24].value - midnightSeries.points[1].value and midnightSeries.change24h == 76000,
+        "00:30 change24h == wealth[24] - wealth[1] (+7g 60s)")
+
+    -- 2c. Multi-day portfolio -> auto selects daily for 7d, hourly (24 slots) for 24h, Daily click stays daily
     local portfolioMulti = {
         series = {
             { day = "2026-11-10", total = 400000, gold = 300000, items = 50000, listed = 50000 },
@@ -144,13 +224,17 @@ do
         },
         latestTotal = 500000, latestGold = 350000, latestItems = 80000, latestListed = 70000,
     }
-    local dailySeries = Brief.BuildWealthChartSeries("auto", "7d", ECON, portfolioMulti, tNow)
+    local dailySeries = Brief.BuildWealthChartSeries("auto", "7d", ECON, portfolioMulti, tMid)
     check(dailySeries.mode == "daily", "auto selects daily when >= 2 daily snapshots and range=7d")
     check(#dailySeries.points == 3 and dailySeries.points[3].value == 500000, "daily series maps explicit .value fields")
     check(dailySeries.change24h == 40000, "daily 24h change = 50g - 46g = +4g")
 
-    local auto24h = Brief.BuildWealthChartSeries("auto", "24h", ECON, portfolioMulti, tNow)
-    check(auto24h.mode == "hourly", "auto selects hourly when range=24h even with multi-day snapshots")
+    local explicitDaily = Brief.BuildWealthChartSeries("daily", "7d", ECON, portfolioMulti, tMid)
+    check(explicitDaily.mode == "daily" and #explicitDaily.points == 3, "explicit daily mode stays intact when >= 2 snapshots exist")
+
+    local auto24h = Brief.BuildWealthChartSeries("auto", "24h", ECON, portfolioMulti, tMid)
+    check(auto24h.mode == "hourly" and #auto24h.points == 24 and auto24h.isLedgerDerived == true,
+        "auto selects 24-slot ledger-derived hourly when range=24h even with multi-day snapshots")
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -281,13 +365,13 @@ do
     -----------------------------------------------------------------------------------------------
     -- 5. Full View Rendering, Virtual Scroll (60 -> 50 cap), Interactions, Layout Non-Overlap, & Skins
     -----------------------------------------------------------------------------------------------
-    -- Seed 60 AH_SELL rows to test 50-row cap + virtual scroll pagination
-    for idx = 1, 60 do
+    -- Seed 60 AH_SELL rows (plus newest DE-origin shard sale) to test 50-row cap + virtual scroll + via DE tag
+    for idx = 1, 59 do
         Store.Append({
             char = CHAR_MAIN,
             econ = ECON,
             type = "AH_SELL",
-            itemID = (idx == 60) and 10504 or (10000 + idx),
+            itemID = (idx == 59) and 10504 or (10000 + idx),
             qty = (idx % 3) + 1,
             total = 20000 + idx * 1000,
             cogs = 10000,
@@ -295,6 +379,22 @@ do
             extra = { gross = 21053 + idx * 1053, fee = 1053 + idx * 53, name = "Auction Item " .. tostring(idx) },
         })
     end
+    Store.Append({
+        char = CHAR_MAIN,
+        econ = ECON,
+        type = "AH_SELL",
+        itemID = 11178,
+        qty = 1,
+        total = 19000,
+        cogs = 10000,
+        time = dayOffset(0, 8) + 60 * 120,
+        extra = {
+            gross = 20000,
+            fee = 1000,
+            name = "Large Radiant Shard",
+            deOrigin = { srcItemID = 10504, srcName = "Green Lens", qty = 1, srcCost = 10000, share = 1.0 },
+        },
+    })
     Store.SaveSnapshot(CHAR_MAIN, Store.DayKey(tNow), { gold = 700000, items = 200000, listed = 100000, econ = ECON, time = tNow })
 
     local modeChanges, deepOpens, cartAdds = {}, {}, {}
@@ -335,10 +435,28 @@ do
     _G.IsShiftKeyDown = origShift
     check(#cartAdds == 1 and cartAdds[1].id == 4304 and cartAdds[1].qty == 8, "alert shift-click adds Thick Leather x8 to cart")
 
-    -- Virtual scroll pagination on Recent AH Sales (capped at 50)
+    -- Virtual scroll pagination on Recent AH Sales (capped at 50) + via DE origin tag & tooltip
     local st = view:GetState()
     check(#st.summary.recentSales == 50, "recentSales capped at 50 entries")
-    local firstBeforeScroll = view.salesPanel.rows[1]._sale.name
+    local topSale = st.summary.recentSales[1]
+    check(topSale and topSale.name == "Large Radiant Shard" and type(topSale.deOrigin) == "table" and topSale.deOrigin.srcName == "Green Lens",
+        "recentSales captures extra.deOrigin on AH_SELL rows")
+    local salesRow1 = view.salesPanel.rows[1]
+    local row1Text = salesRow1.nameFs:GetText() or ""
+    check(row1Text:find("Large Radiant Shard", 1, true) ~= nil and row1Text:find("via DE: Green Lens", 1, true) ~= nil,
+        "Recent AH Sales row displays muted 'via DE: Green Lens' suffix (got " .. tostring(row1Text) .. ")")
+    check(salesRow1.profitFs:GetText() == "+90s", "Recent AH Sales profit remains intact alongside via DE suffix")
+    salesRow1:GetScript("OnEnter")(salesRow1)
+    local foundDeTip = false
+    for _, ln in ipairs((_G.GameTooltip and _G.GameTooltip._lines) or {}) do
+        if tostring(ln):find("Disenchanted from Green Lens", 1, true) and tostring(ln):find("Cost 1g", 1, true) then
+            foundDeTip = true
+            break
+        end
+    end
+    check(foundDeTip, "Recent AH Sales hover tooltip shows Disenchanted from Green Lens + Cost 1g carryover")
+    salesRow1:GetScript("OnLeave")(salesRow1)
+    local firstBeforeScroll = salesRow1._sale.name
     view.salesPanel:ScrollBy(5)
     check(view.salesPanel:GetScrollOffset() == 5, "salesPanel scrolled by 5")
     check(view.salesPanel.rows[1]._sale.name ~= firstBeforeScroll, "virtual scroll updates visible row bindings")

@@ -688,5 +688,81 @@ do
     box:Hide()
 end
 
+-- Disenchant ledger rendering, via DE origin tags, Item Detail indirect DE summary, and Items tooltip
+do
+    local ui = ns.UI
+    local function strip(s) return tostring(s or ""):gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""):gsub("|T.-|t", "") end
+    local ledgerCols = ui.Columns and ui.Columns.an_ledger or {}
+    local totalCol, whereCol
+    for _, col in ipairs(ledgerCols) do
+        if col.key == "total" then totalCol = col
+        elseif col.key == "where" then whereCol = col end
+    end
+    check(totalCol and type(totalCol.render) == "function", "an_ledger total column exposes renderer")
+    check(whereCol and type(whereCol.render) == "function", "an_ledger where column exposes renderer")
+
+    local brokenTxt = strip(totalCol.render({ type = "DISENCHANT_BROKEN", cogs = 10000, profit = 0, extra = { deSrcCost = 10000, estValue = 20000 } }))
+    local recvTxt = strip(totalCol.render({ type = "DISENCHANT_RECEIVE", extra = { allocBasis = 10000, marketValue = 20000, costCarryover = true } }))
+    check(brokenTxt:find("Cost", 1, true) ~= nil and brokenTxt:find("1g", 1, true) ~= nil,
+        "DISENCHANT_BROKEN renders muted transferred Cost 1g (got: " .. brokenTxt .. ")")
+    check(recvTxt:find("Cost", 1, true) ~= nil and recvTxt:find("1g", 1, true) ~= nil,
+        "DISENCHANT_RECEIVE renders carried-over Cost 1g (got: " .. recvTxt .. ")")
+
+    local whereTxt = strip(whereCol.render({ type = "AH_SELL", where = "Auction House", extra = { deOrigin = { srcItemID = 10504, srcName = "Green Lens", qty = 1, srcCost = 10000, share = 1 } } }))
+    check(whereTxt:find("via DE: Green Lens", 1, true) ~= nil,
+        "AH_SELL carrying extra.deOrigin renders 'via DE: Green Lens' in Where column (got: " .. whereTxt .. ")")
+
+    -- ShowItemDetail renders Indirect via DE + top sold outputs without double-counting
+    local oldGetDetail = ns.Model.GetItemDetail
+    ns.Model.GetItemDetail = function()
+        return {
+            itemID = 10504, name = "Green Lens", curBasis = 10000, smartAvgBuy = 10000,
+            minBuy = 10000, maxBuy = 10000, minSell = 0, maxSell = 0, saleRate = 0,
+            expSinceSale = 0, canSinceSale = 0,
+            deBrokenQty = 12, deBrokenCost = 120000, deSoldMatsQty = 11, deIndirectProfit = 99000,
+            deSoldOutputs = { { itemID = 11178, name = "Large Radiant Shard", qty = 11, profit = 99000 } },
+            windows = { d7 = { profit = 0 }, d30 = { profit = 0 }, all = { bought = 12, sold = 0, profit = 0 } },
+            inventory = { bags = 0, bank = 0, mail = 0, inTransit = 0, ah = 0, total = 0, byChar = {} },
+            transactions = {},
+        }
+    end
+    ui.ShowItemDetail(10504)
+    local detailBody = strip(ui.views.an_items.detail.body:GetText())
+    check(detailBody:find("Indirect via DE:", 1, true) ~= nil and detailBody:find("not double-counted", 1, true) ~= nil,
+        "Item Detail body shows Indirect via DE summary with non-double-counting note")
+    check(detailBody:find("Large Radiant Shard x11", 1, true) ~= nil,
+        "Item Detail body lists top sold DE output Large Radiant Shard x11")
+    ui.views.an_items.detail:Hide()
+    ns.Model.GetItemDetail = oldGetDetail
+
+    -- Items row hover tooltip displays Indirect via DE + top sold output
+    local oldCompute = ns.Model.Compute
+    ns.Model.Compute = function(view)
+        if view == "items" then
+            return {
+                rows = { {
+                    itemID = 10504, name = "Green Lens", profit = 0, bought = 12, sold = 0,
+                    deBrokenQty = 12, deSoldMatsQty = 11, deIndirectProfit = 99000,
+                    deSoldOutputs = { { itemID = 11178, name = "Large Radiant Shard", qty = 11, profit = 99000 } },
+                } },
+                totals = { qtySold = 0, qtyBought = 12, gross = 0, spent = 120000, fee = 0, cogs = 0, depLost = 0, profit = 0 },
+            }
+        end
+        return oldCompute(view)
+    end
+    ui.Refresh("an_items", ui.content)
+    local itemRow = ui.views.an_items.table and ui.views.an_items.table.rows and ui.views.an_items.table.rows[1]
+    local nameCell = itemRow and itemRow.cells and itemRow.cells[1]
+    local onEnter = nameCell and nameCell.GetScript and nameCell:GetScript("OnEnter")
+    if onEnter and GameTooltip then
+        GameTooltip:ClearLines()
+        onEnter(nameCell)
+        local tipText = strip(table.concat(GameTooltip._lines or {}, "\n"))
+        check(tipText:find("Indirect via DE", 1, true) ~= nil and tipText:find("Large Radiant Shard x11", 1, true) ~= nil,
+            "Items row tooltip shows Indirect via DE and top sold output")
+    end
+    ns.Model.Compute = oldCompute
+end
+
 print("Accounting UI suite: " .. assertions .. " chart, tooltip, and UI assertions")
 if priorFailures > 0 then error("Existing analytics suite failures: " .. priorFailures) end

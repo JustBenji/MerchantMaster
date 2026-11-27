@@ -881,7 +881,16 @@ do
 	local su = UI._state.setupView
 	assertCheck(su ~= nil and su.tsmCard ~= nil and su.tsmSwitch ~= nil and su.tsmStatusFs ~= nil,
 		"Console -> Snapshot Settings exposes tsmCard, tsmSwitch, and tsmStatusFs")
-	assertCheck(su.tsmCard:GetHeight() == 52, "tsmCard height is 52px")
+	assertCheck(su.tsmCard:GetHeight() == 64, "tsmCard height is 64px")
+	local _, _, _, _, spY = su.standalonePanel:GetPoint(1)
+	local _, _, _, _, cpY = su.connectedPanel:GetPoint(1)
+	assertCheck(spY == -168 and cpY == -168,
+		"standalonePanel and connectedPanel shift top anchor to -168 below 64px tsmCard (got "
+			.. tostring(spY) .. ", " .. tostring(cpY) .. ")")
+	local tsmSubTxt = su.tsmSubFs and su.tsmSubFs:GetText() or ""
+	assertCheck(tsmSubTxt:find("updated hourly inside MerchantMaster tables", 1, true) ~= nil
+		and tsmSubTxt:find("Requires the TradeSkillMaster addon + TSM Desktop App installed locally", 1, true) ~= nil,
+		"tsmSubFs explains hourly table refresh advantage and local TSM addon + Desktop App requirement")
 	assertCheck(su.tsmSwitch:GetChecked() == false, "TSM Light Mode switch defaults OFF")
 	assertCheck((su.tsmStatusFs:GetText() or ""):find("Off", 1, true) ~= nil,
 		"TSM Light Mode status shows Off when disabled")

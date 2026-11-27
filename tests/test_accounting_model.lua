@@ -522,13 +522,23 @@ end
 
 do
     local brokenID, shardID = 12901, 12902
+    local prevItemName = host.ItemName
+    host.ItemName = function(id)
+        if id == brokenID then return "Green Lens" end
+        if id == shardID then return "Large Radiant Shard" end
+        if id == 12903 then return "Blue Staff" end
+        return prevItemName and prevItemName(id) or ("Item #" .. tostring(id))
+    end
+    local prevOverview = M.Compute("overview", { period = "all", char = char, knownCostOnly = false })
+    local baseProfit = prevOverview.kpis.profit or 0
+
     S.Append({char=char,econ="Normal-Horde",type="AH_BUY",itemID=brokenID,qty=1,unit=10000,total=-10000,time=now})
     S.Append({char=char,econ="Normal-Horde",type="DISENCHANT_BROKEN",itemID=brokenID,qty=1,unit=0,total=0,time=now,
-        where="Disenchanting",extra={spellID=13262,deGroup="de:m:1",estValue=18992,outputs="12902:1:18992",nonCash=true}})
-    S.Append({char=char,econ="Normal-Horde",type="DISENCHANT_RECEIVE",itemID=shardID,qty=1,unit=18992,total=0,time=now,
-        where="From: Broken Item",extra={spellID=13262,deGroup="de:m:1",srcItemID=brokenID,srcQty=1,allocBasis=18992,marketValue=18992,nonCash=true}})
-    S.Append({char=char,econ="Normal-Horde",type="AH_SELL",itemID=shardID,qty=1,unit=20000,total=18992,time=now,
-        extra={gross=20000,fee=1008}})
+        where="Disenchanting",extra={spellID=13262,deGroup="de:m:1",estValue=20000,outputs="12902:1:20000",nonCash=true}})
+    S.Append({char=char,econ="Normal-Horde",type="DISENCHANT_RECEIVE",itemID=shardID,qty=1,unit=10000,total=0,time=now,
+        where="From: Green Lens",extra={spellID=13262,deGroup="de:m:1",srcItemID=brokenID,srcName="Green Lens",srcQty=1,allocBasis=10000,marketValue=20000,costCarryover=true,nonCash=true}})
+    S.Append({char=char,econ="Normal-Horde",type="AH_SELL",itemID=shardID,qty=1,unit=20000,total=19000,time=now,
+        extra={gross=20000,fee=1000}})
     M.Invalidate()
 
     local items = M.Compute("items", {period="all",char=char,knownCostOnly=false})
@@ -536,22 +546,75 @@ do
     for _, r in ipairs(items.rows or {}) do
         if r.itemID == brokenID then brokenRow = r elseif r.itemID == shardID then shardRow = r end
     end
-    check(brokenRow and brokenRow.profit == 8992,
-        "Model Items view attributes 8992c DE profit to broken item (got " .. tostring(brokenRow and brokenRow.profit) .. ")")
-    check(shardRow and shardRow.profit == 0,
-        "Model Items view records 0 profit on shard when sold at estimated market price (no double-count)")
+    check(brokenRow and brokenRow.profit == 0 and brokenRow.sold == 0,
+        "Model Items view keeps 0 direct profit and 0 sold on broken Green Lens (got profit=" .. tostring(brokenRow and brokenRow.profit) .. ")")
+    check(brokenRow and brokenRow.deBrokenQty == 1 and brokenRow.deSoldMatsQty == 1 and brokenRow.deIndirectProfit == 9000,
+        "Model Items view exposes deBrokenQty=1, deSoldMatsQty=1, deIndirectProfit=+9000c on Green Lens")
+    check(brokenRow and brokenRow.deSoldOutputs and #brokenRow.deSoldOutputs == 1 and brokenRow.deSoldOutputs[1].itemID == shardID and brokenRow.deSoldOutputs[1].profit == 9000,
+        "Model Items view exposes top sold DE output Large Radiant Shard (+9000c) on Green Lens")
+    check(shardRow and shardRow.profit == 9000 and shardRow.deIndirectProfit == 0,
+        "Model Items view records real +9000c profit on sold Large Radiant Shard")
+
+    local afterOverview = M.Compute("overview", { period = "all", char = char, knownCostOnly = false })
+    check((afterOverview.kpis.profit - baseProfit) == 9000,
+        "Total Account Profit increases by exact +9000c with ZERO double-counting (got " .. tostring(afterOverview.kpis.profit - baseProfit) .. ")")
+
+    local detail = M.GetItemDetail(brokenID, { period = "all", char = char })
+    check(detail and detail.deBrokenQty == 1 and detail.deSoldMatsQty == 1 and detail.deIndirectProfit == 9000 and #detail.deSoldOutputs == 1,
+        "GetItemDetail exposes indirect DE summary for Green Lens")
 
     local led = M.QueryLedger({char=char,period="all",ledgerPreset="craft",types={CRAFT=true,DESTROY=true,DISENCHANT_BROKEN=true,DISENCHANT_RECEIVE=true}})
     local foundBroken, foundRecv = false, false
     for _, r in ipairs(led.rows or {}) do
         if r.type == "DISENCHANT_BROKEN" and r.itemID == brokenID then
             foundBroken = true
-            check(r.profit == 8992 and r.typeLabel == "DE Broken", "Ledger DE Broken carries profit=8992")
+            check(r.profit == 0 and r.typeLabel == "DE Broken", "Ledger DE Broken carries profit=0 (no fake paper profit)")
         elseif r.type == "DISENCHANT_RECEIVE" and r.itemID == shardID then
             foundRecv = true
-            check(r.typeLabel == "DE Receive" and r.extra and r.extra.srcItemID == brokenID, "Ledger DE Receive links srcItemID")
+            check(r.profit == 0 and r.typeLabel == "DE Receive" and r.extra and r.extra.srcItemID == brokenID and r.extra.allocBasis == 10000,
+                "Ledger DE Receive carries profit=0, srcItemID, and carried-over allocBasis")
         end
     end
-    check(foundBroken and foundRecv and led.totals and led.totals.profit == 8992,
-        "Ledger query includes linked DE Broken + DE Receive rows with 8992c total profit")
+    check(foundBroken and foundRecv and led.totals and led.totals.profit == 0,
+        "Ledger craft preset books 0 total profit for DE Broken + DE Receive")
+
+    local allLed = M.QueryLedger({char=char,period="all",search="Green Lens"})
+    local foundShardViaDE = false
+    for _, r in ipairs(allLed.rows or {}) do
+        if r.type == "AH_SELL" and r.itemID == shardID and r.extra and r.extra.deOrigin and r.extra.deOrigin.srcItemID == brokenID then
+            foundShardViaDE = true
+            check(r.profit == 9000, "Ledger AH_SELL for shard reports real +9000c profit and links via DE: Green Lens")
+        end
+    end
+    check(foundShardViaDE, "Ledger search for Green Lens surfaces linked shard AH_SELL via deOrigin")
+
+    -- Multi-source DE sale prorates indirect profit cleanly across both source items without double-counting
+    local staffID = 12903
+    S.Append({char=char,econ="Normal-Horde",type="AH_BUY",itemID=brokenID,qty=1,unit=10000,total=-10000,time=now+1})
+    S.Append({char=char,econ="Normal-Horde",type="DISENCHANT_BROKEN",itemID=brokenID,qty=1,unit=0,total=0,time=now+1,
+        where="Disenchanting",extra={spellID=13262,deGroup="de:m:2",estValue=20000,outputs="12902:1:20000",nonCash=true}})
+    S.Append({char=char,econ="Normal-Horde",type="DISENCHANT_RECEIVE",itemID=shardID,qty=1,unit=10000,total=0,time=now+1,
+        where="From: Green Lens",extra={spellID=13262,deGroup="de:m:2",srcItemID=brokenID,srcName="Green Lens",srcQty=1,allocBasis=10000,marketValue=20000,costCarryover=true,nonCash=true}})
+    S.Append({char=char,econ="Normal-Horde",type="AH_BUY",itemID=staffID,qty=1,unit=14000,total=-14000,time=now+1})
+    S.Append({char=char,econ="Normal-Horde",type="DISENCHANT_BROKEN",itemID=staffID,qty=1,unit=0,total=0,time=now+1,
+        where="Disenchanting",extra={spellID=13262,deGroup="de:m:3",estValue=20000,outputs="12902:1:20000",nonCash=true}})
+    S.Append({char=char,econ="Normal-Horde",type="DISENCHANT_RECEIVE",itemID=shardID,qty=1,unit=14000,total=0,time=now+1,
+        where="From: Blue Staff",extra={spellID=13262,deGroup="de:m:3",srcItemID=staffID,srcName="Blue Staff",srcQty=1,allocBasis=14000,marketValue=20000,costCarryover=true,nonCash=true}})
+    S.Append({char=char,econ="Normal-Horde",type="AH_SELL",itemID=shardID,qty=2,unit=20000,total=38000,time=now+2,
+        extra={gross=40000,fee=2000}})
+    M.Invalidate()
+
+    local items2 = M.Compute("items", {period="all",char=char,knownCostOnly=false})
+    local lens2, staff2, shard2 = items2.byItemID[brokenID], items2.byItemID[staffID], items2.byItemID[shardID]
+    check(lens2 and lens2.deBrokenQty == 2 and lens2.deSoldMatsQty == 2 and lens2.deIndirectProfit == 18000 and lens2.profit == 0,
+        "Multi-source DE prorates +9000c second shard to Green Lens (total indirect +18000c, direct profit 0)")
+    check(staff2 and staff2.deBrokenQty == 1 and staff2.deSoldMatsQty == 1 and staff2.deIndirectProfit == 5000 and staff2.profit == 0,
+        "Multi-source DE prorates +5000c (19000-14000) to Blue Staff (direct profit 0)")
+    check(shard2 and shard2.profit == 23000,
+        "Shard direct profit equals exact sum of indirect DE profits (9000+9000+5000=23000c)")
+    local ov2 = M.Compute("overview", { period = "all", char = char, knownCostOnly = false })
+    check((ov2.kpis.profit - baseProfit) == 23000,
+        "Total Account Profit matches exact 23000c with zero double-counting across multiple DE sources")
+
+    host.ItemName = prevItemName
 end

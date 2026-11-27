@@ -137,6 +137,7 @@ function MH.GetState()
         statusText = state.statusText,
         lastCheckInboxAt = state.lastCheckInboxAt,
         presetPage = state.presetPage,
+        barShown = (MH.bar ~= nil and MH.bar.IsShown and MH.bar:IsShown()) == true,
         presetsPanelShown = (MH.presetsPanel ~= nil and MH.presetsPanel.IsShown and MH.presetsPanel:IsShown()) == true,
         inboxQuickStripShown = (MH.inboxQuickStrip ~= nil and MH.inboxQuickStrip.IsShown and MH.inboxQuickStrip:IsShown()) == true,
         pendingConfirm = state.pendingConfirm and state.pendingConfirm.recipient or nil,
@@ -630,6 +631,11 @@ end
 
 MH.UNSAVED_CONFIRM_POPUP = "MERCHANTMASTER_CONFIRM_UNSAVED_MAIL"
 MH.PRESET_PAGE_SIZE = 8
+MH.DOCK_PANEL_WIDTH = 280
+MH.HELPER_PANEL_HEIGHT = 124
+MH.STATUS_PILL_MAX_WIDTH = 260
+MH.DOCK_GAP_X = 6
+MH.DOCK_GAP_Y = 6
 
 MH.PRESET_ROLE_DEFS = {
     { key = "bank",           label = "Bank",           shortLabel = "Bank",      icon = 133784, group = "core" },
@@ -1201,11 +1207,74 @@ local function paintSurfaceFallback(surf)
     end
 end
 
+local function measurePillTextWidth(label, text)
+    if label then
+        if type(label.GetUnboundedStringWidth) == "function" then
+            local w = tonumber(label:GetUnboundedStringWidth())
+            if w and w > 0 then return w end
+        end
+        if type(label.GetStringWidth) == "function" then
+            local w = tonumber(label:GetStringWidth())
+            if w and w > 0 then
+                return math.max(w, #(tostring(text or "")) * 5.8)
+            end
+        end
+    end
+    return #(tostring(text or "")) * 5.8
+end
+
+local function clampPillText(label, rawText, maxInnerPx)
+    local s = tostring(rawText or "")
+    local limit = tonumber(maxInnerPx) or (MH.STATUS_PILL_MAX_WIDTH - 20)
+    if label and type(label.SetText) == "function" then
+        label:SetText(s)
+    end
+    if measurePillTextWidth(label, s) <= limit then
+        return s
+    end
+    local len = #s
+    while len > 4 do
+        len = len - 1
+        local base = s:sub(1, len):gsub("[%s/%-%(%,]+$", "")
+        local candidate = base .. "..."
+        if label and type(label.SetText) == "function" then
+            label:SetText(candidate)
+        end
+        if measurePillTextWidth(label, candidate) <= limit then
+            return candidate
+        end
+    end
+    return "..."
+end
+
+local function clampStatusPillBounds(statusPill)
+    if not statusPill then return end
+    if statusPill.frame then
+        if statusPill.frame.ClearAllPoints then statusPill.frame:ClearAllPoints() end
+        local parent = statusPill.frame.GetParent and statusPill.frame:GetParent() or statusPill._parent
+        if parent then
+            statusPill.frame:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, -28)
+            statusPill.frame:SetPoint("TOPRIGHT", parent, "TOPRIGHT", -10, -28)
+        end
+        if statusPill.frame.SetWidth then
+            statusPill.frame:SetWidth(MH.STATUS_PILL_MAX_WIDTH)
+        end
+    end
+    if statusPill.label and statusPill.frame then
+        if statusPill.label.ClearAllPoints then statusPill.label:ClearAllPoints() end
+        statusPill.label:SetPoint("LEFT", statusPill.frame, "LEFT", 10, 0)
+        statusPill.label:SetPoint("RIGHT", statusPill.frame, "RIGHT", -10, 0)
+        if statusPill.label.SetJustifyH then statusPill.label:SetJustifyH("CENTER") end
+        if statusPill.label.SetWordWrap then statusPill.label:SetWordWrap(false) end
+        if statusPill.label.SetMaxLines then statusPill.label:SetMaxLines(1) end
+    end
+end
+
 local function createPresetsPanel(mf)
     local panel = _G.CreateFrame("Frame", "MerchantMasterMailPresetsPanel", mf)
-    panel:SetWidth(202)
+    panel:SetWidth(MH.DOCK_PANEL_WIDTH)
     panel:SetHeight(120)
-    panel:SetPoint("TOPLEFT", mf, "TOPRIGHT", 4, 0)
+    panel:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
     panel:Hide()
 
     local theme = ns.Theme
@@ -1246,9 +1315,14 @@ local function createPresetsPanel(mf)
 
     local statusPill
     if theme and type(theme.CreateBadgePill) == "function" then
-        statusPill = theme.CreateBadgePill(panel, "Pick a saved recipient", "neutral", { height = 20, fontSize = 10, padX = 10, minWidth = 182 })
-        statusPill.frame:SetPoint("TOPLEFT", panel, "TOPLEFT", 10, -28)
-        statusPill.frame:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -10, -28)
+        statusPill = theme.CreateBadgePill(panel, "Pick a saved recipient", "neutral", {
+            height = 20,
+            fontSize = 10,
+            padX = 10,
+            minWidth = MH.STATUS_PILL_MAX_WIDTH,
+        })
+        statusPill._parent = panel
+        clampStatusPillBounds(statusPill)
     end
     panel.statusPill = statusPill
 
@@ -1258,6 +1332,7 @@ local function createPresetsPanel(mf)
     statusFs:SetHeight(16)
     if statusFs.SetJustifyH then statusFs:SetJustifyH("LEFT") end
     if statusFs.SetWordWrap then statusFs:SetWordWrap(false) end
+    if statusFs.SetMaxLines then statusFs:SetMaxLines(1) end
     if theme and type(theme.ApplyFont) == "function" then
         theme.ApplyFont(statusFs, 10, "semibold")
     end
@@ -1265,9 +1340,11 @@ local function createPresetsPanel(mf)
     panel.statusFs = statusFs
 
     panel.buttons = {}
+    local rowW = MH.DOCK_PANEL_WIDTH - 16
     for i = 1, MH.PRESET_PAGE_SIZE do
         local b = _G.CreateFrame("Button", nil, panel)
         b:SetHeight(32)
+        if b.SetWidth then b:SetWidth(rowW) end
         b:SetPoint("TOPLEFT", panel, "TOPLEFT", 8, -(52 + (i - 1) * 35))
         b:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -8, -(52 + (i - 1) * 35))
         if theme and type(theme.NineApple) == "function" then
@@ -1280,13 +1357,14 @@ local function createPresetsPanel(mf)
 
         local iconTex = b:CreateTexture(nil, "ARTWORK")
         iconTex:SetSize(18, 18)
-        iconTex:SetPoint("LEFT", b, "LEFT", 7, 0)
+        iconTex:SetPoint("LEFT", b, "LEFT", 8, 0)
         iconTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
         b.iconTex = iconTex
 
         local nameFs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         if nameFs.SetJustifyH then nameFs:SetJustifyH("LEFT") end
         if nameFs.SetWordWrap then nameFs:SetWordWrap(false) end
+        if nameFs.SetMaxLines then nameFs:SetMaxLines(1) end
         if theme and type(theme.ApplyFont) == "function" then
             theme.ApplyFont(nameFs, 11, "semibold")
         end
@@ -1295,6 +1373,7 @@ local function createPresetsPanel(mf)
         local roleFs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         if roleFs.SetJustifyH then roleFs:SetJustifyH("LEFT") end
         if roleFs.SetWordWrap then roleFs:SetWordWrap(false) end
+        if roleFs.SetMaxLines then roleFs:SetMaxLines(1) end
         if theme and type(theme.ApplyFont) == "function" then
             theme.ApplyFont(roleFs, 10, "regular")
         end
@@ -1310,7 +1389,7 @@ local function createPresetsPanel(mf)
         b.initFs = initFs
 
         local selfTag = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        selfTag:SetPoint("RIGHT", b, "RIGHT", -7, 0)
+        selfTag:SetPoint("RIGHT", b, "RIGHT", -8, 0)
         if selfTag.SetJustifyH then selfTag:SetJustifyH("RIGHT") end
         if theme and type(theme.ApplyFont) == "function" then
             theme.ApplyFont(selfTag, 10, "regular")
@@ -1320,8 +1399,19 @@ local function createPresetsPanel(mf)
         b.selfTag = selfTag
 
         b:SetScript("OnClick", function(self)
-            if self._entry and self._entry.name then
-                applyPresetRecipient(self._entry.name, false)
+            local e = self._entry
+            if not e or not e.name then return end
+            local sendShown = (_G.SendMailFrame and _G.SendMailFrame.IsShown and _G.SendMailFrame:IsShown()) == true
+            if not sendShown then
+                local tab2 = _G.MailFrameTab2
+                if tab2 and type(tab2.Click) == "function" then
+                    pcall(tab2.Click, tab2)
+                elseif type(_G.MailFrameTab_OnClick) == "function" then
+                    pcall(_G.MailFrameTab_OnClick, tab2, 2)
+                end
+                applyPresetRecipient(e.name, true)
+            else
+                applyPresetRecipient(e.name, false)
             end
         end)
         attachMailTooltip(b,
@@ -1332,6 +1422,8 @@ local function createPresetsPanel(mf)
                 local lines = { "Roles: " .. tostring(e.allRolesText or e.roleLabel or "") }
                 if e.isSelf then
                     lines[#lines + 1] = "Current character (You)"
+                elseif not (_G.SendMailFrame and _G.SendMailFrame.IsShown and _G.SendMailFrame:IsShown()) then
+                    lines[#lines + 1] = "Click to switch to Send Mail and fill this recipient."
                 else
                     lines[#lines + 1] = "Click to fill Send Mail recipient."
                 end
@@ -1462,23 +1554,38 @@ function MH.RefreshPresetsUI()
     local entries = MH.BuildPresetRecipientEntries()
     local disp = MH.GetDisplayOptions()
     local pal = getPalette()
+    local mf = _G.MailFrame
+    local mailFrameVisible = (mf == nil) or (not mf.IsShown) or (mf:IsShown() == true)
     local openMailShown = (_G.OpenMailFrame and _G.OpenMailFrame.IsShown and _G.OpenMailFrame:IsShown()) == true
     local sendMailShown = (_G.SendMailFrame and _G.SendMailFrame.IsShown and _G.SendMailFrame:IsShown()) == true
     local inboxShown = (_G.InboxFrame and _G.InboxFrame.IsShown and _G.InboxFrame:IsShown()) == true
+    local effectiveInboxShown = inboxShown
+        or (state.mailOpen and mailFrameVisible and _G.InboxFrame == nil and _G.SendMailFrame == nil)
+
+    local dockMode = "hidden"
+    if (not openMailShown) and mailFrameVisible then
+        if sendMailShown then
+            dockMode = "send"
+        elseif effectiveInboxShown then
+            dockMode = "inbox"
+        end
+    end
 
     local rawRecipient = (_G.SendMailNameEditBox and _G.SendMailNameEditBox.GetText and _G.SendMailNameEditBox:GetText()) or ""
     local curTrim = trimOuter(rawRecipient)
     local curKey = canonicalKey(curTrim)
 
-    -- 1. Send Mail Preset Panel
+    -- 1. Mail Recipients Preset Panel (280px wide, right-side docked)
     local panel = MH.presetsPanel
+    local bar = MH.bar
+    local hasEntries = (#entries > 0)
+    local showPanel = (dockMode == "send" or dockMode == "inbox") and hasEntries
+
     if panel then
-        local showPanel = sendMailShown and (not openMailShown) and (#entries > 0)
         if not showPanel then
             panel:Hide()
         else
-            panel:Show()
-            -- Status pill
+            -- Status pill (strictly clamped to 260px inside 280px panel)
             local isSaved, savedEntry = MH.IsSavedMailRecipient(curTrim)
             local statusText, statusVariant, statusHex
             if curTrim == "" then
@@ -1494,14 +1601,13 @@ function MH.RefreshPresetsUI()
                 statusVariant = "orange"
                 statusHex = "hexWarning"
             end
+            local clampedStatusText = clampPillText(panel.statusPill and panel.statusPill.label or panel.statusFs, statusText, MH.STATUS_PILL_MAX_WIDTH - 20)
             if panel.statusPill and panel.statusPill.SetVariant then
-                panel.statusPill:SetVariant(statusVariant, statusText)
-                if panel.statusPill.frame and panel.statusPill.frame.SetWidth then
-                    panel.statusPill.frame:SetWidth(182)
-                end
+                panel.statusPill:SetVariant(statusVariant, clampedStatusText)
+                clampStatusPillBounds(panel.statusPill)
             end
             if panel.statusFs and panel.statusFs.SetText then
-                panel.statusFs:SetText(palHex(statusHex, "98989d") .. statusText .. "|r")
+                panel.statusFs:SetText(palHex(statusHex, "98989d") .. clampedStatusText .. "|r")
             end
 
             -- Pagination
@@ -1649,34 +1755,51 @@ function MH.RefreshPresetsUI()
         end
     end
 
-    -- 2. Compact Inbox Icon Shortcut Strip (omits isSelf)
-    local strip = MH.inboxQuickStrip
-    if strip then
-        local nonSelf = {}
-        for _, e in ipairs(entries) do
-            if not e.isSelf then
-                nonSelf[#nonSelf + 1] = e
+    -- 2. Unified Right-Side Vertical Stacking (Zero Bottom Attachment, Auto-Hide on Read Mail)
+    if dockMode == "hidden" then
+        safeHide(bar)
+        safeHide(panel)
+    elseif dockMode == "send" then
+        if showPanel and panel and mf then
+            if panel.ClearAllPoints then panel:ClearAllPoints() end
+            panel:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
+            panel:Show()
+            if bar then
+                if bar.ClearAllPoints then bar:ClearAllPoints() end
+                bar:SetPoint("TOPLEFT", panel, "BOTTOMLEFT", 0, -MH.DOCK_GAP_Y)
+                bar:Show()
             end
-        end
-        local showStrip = inboxShown and (not openMailShown) and (#nonSelf > 0)
-        if not showStrip then
-            strip:Hide()
         else
-            local count = math.min(#strip.buttons, #nonSelf)
-            for i = 1, #strip.buttons do
-                local btn = strip.buttons[i]
-                local entry = nonSelf[i]
-                btn._entry = entry
-                if entry and i <= count then
-                    btn.iconTex:SetTexture(entry.icon)
-                    btn:Show()
-                else
-                    btn:Hide()
-                end
+            safeHide(panel)
+            if bar and mf then
+                if bar.ClearAllPoints then bar:ClearAllPoints() end
+                bar:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
+                bar:Show()
             end
-            strip:SetWidth(8 + count * 21)
-            strip:Show()
         end
+    elseif dockMode == "inbox" then
+        if bar and mf then
+            if bar.ClearAllPoints then bar:ClearAllPoints() end
+            bar:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
+            bar:Show()
+        end
+        if showPanel and panel then
+            if panel.ClearAllPoints then panel:ClearAllPoints() end
+            if bar then
+                panel:SetPoint("TOPLEFT", bar, "BOTTOMLEFT", 0, -MH.DOCK_GAP_Y)
+            elseif mf then
+                panel:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
+            end
+            panel:Show()
+        else
+            safeHide(panel)
+        end
+    end
+
+    -- 3. Keep legacy Inbox quick strip hidden (presets panel now stacks cleanly on the right)
+    local strip = MH.inboxQuickStrip
+    if strip and strip.Hide then
+        strip:Hide()
     end
 
     return entries, disp
@@ -1700,17 +1823,31 @@ function MH.MountOnMailFrame()
     end
 
     local bar = _G.CreateFrame("Frame", "MerchantMasterMailHelperBar", mf)
-    bar:SetHeight(62)
-    bar:SetPoint("TOPLEFT", mf, "BOTTOMLEFT", 0, -4)
-    bar:SetPoint("TOPRIGHT", mf, "BOTTOMRIGHT", 0, -4)
+    bar:SetSize(MH.DOCK_PANEL_WIDTH, MH.HELPER_PANEL_HEIGHT)
+    bar:SetPoint("TOPLEFT", mf, "TOPRIGHT", MH.DOCK_GAP_X, 0)
 
     local theme = ns.Theme
     if theme and type(theme.NineApple) == "function" then
         bar._bgSurf = theme.NineApple(bar, "glass_r12", "cardBg", "borderStrong", { noSpecular = true })
     end
 
+    local titleFs = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    titleFs:SetPoint("TOPLEFT", bar, "TOPLEFT", 10, -10)
+    titleFs:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -10, -10)
+    if titleFs.SetJustifyH then titleFs:SetJustifyH("LEFT") end
+    if titleFs.SetWordWrap then titleFs:SetWordWrap(false) end
+    if theme and type(theme.ApplyFont) == "function" then
+        theme.ApplyFont(titleFs, 12, "semibold")
+    end
+    titleFs:SetText("Mail Helper")
+    bar.titleFs = titleFs
+
     local function paintBar()
         paintSurfaceFallback(bar._bgSurf)
+        local p = getPalette()
+        if titleFs.SetTextColor and p.text then
+            titleFs:SetTextColor(p.text[1], p.text[2], p.text[3], p.text[4] or 1)
+        end
         MH.UpdateUI()
     end
 
@@ -1718,41 +1855,42 @@ function MH.MountOnMailFrame()
         theme.RegisterWidget(bar, paintBar)
     end
 
-    -- Row 1 (y = -6, height 24px): 4 equal buttons across MailFrame width (~338px).
-    local barW = (mf.GetWidth and tonumber(mf:GetWidth())) or 338
-    if barW < 260 then barW = 338 end
-    local padX, gapX = 6, 4
-    local btnW = math.floor((barW - padX * 2 - gapX * 3) / 4)
+    -- 2x2 grid of 128x24 action buttons inside 280px right-side panel (10 + 128 + 4 + 128 + 10 = 280).
+    local padX, gapX, gapY = 10, 4, 6
+    local btnW, btnH = 128, 24
+    local gridTopY = -32
     local modeDefs = {
-        { mode = "all", label = "Open All", variant = "primary" },
-        { mode = "ah_sales", label = "AH Sales", variant = "secondary" },
-        { mode = "ah_expired", label = "Expired", variant = "secondary" },
-        { mode = "ah_won", label = "Won", variant = "secondary" },
+        { mode = "all",        label = "Open All", variant = "primary",   col = 0, row = 0 },
+        { mode = "ah_sales",   label = "AH Sales", variant = "secondary", col = 1, row = 0 },
+        { mode = "ah_expired", label = "Expired",  variant = "secondary", col = 0, row = 1 },
+        { mode = "ah_won",     label = "Won",      variant = "secondary", col = 1, row = 1 },
     }
     bar.modeBtns = {}
     for idx, def in ipairs(modeDefs) do
         local m = def.mode
-        local b = makeBarButton(bar, def.label, btnW, 24, def.variant, function()
+        local b = makeBarButton(bar, def.label, btnW, btnH, def.variant, function()
             if state.active and state.clickStepper and state.mode == m then
                 MH.Step()
             else
                 MH.Start(m)
             end
         end)
-        local xOff = padX + (idx - 1) * (btnW + gapX)
-        b:SetPoint("TOPLEFT", bar, "TOPLEFT", xOff, -6)
+        local xOff = padX + def.col * (btnW + gapX)
+        local yOff = gridTopY - def.row * (btnH + gapY)
+        b:SetPoint("TOPLEFT", bar, "TOPLEFT", xOff, yOff)
         bar.modeBtns[idx] = { mode = m, btn = b }
     end
 
-    -- Row 2 (y = -34, height 22px): status FontString (left) + Refresh/Next + Stop (right).
-    local stopBtn = makeBarButton(bar, "Stop", 52, 22, "secondary", function()
+    -- Bottom row (y = -92, height 22px): status FontString (left, ~138px) + Refresh (64px) + Stop (50px).
+    local bottomY = -92
+    local stopBtn = makeBarButton(bar, "Stop", 50, 22, "secondary", function()
         MH.Stop("user_stop")
     end)
-    stopBtn:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -padX, -34)
+    stopBtn:SetPoint("TOPRIGHT", bar, "TOPRIGHT", -padX, bottomY)
     if stopBtn.SetEnabled then stopBtn:SetEnabled(false) end
     bar.stopBtn = stopBtn
 
-    local refreshBtn = makeBarButton(bar, "Refresh", 62, 22, "secondary", function()
+    local refreshBtn = makeBarButton(bar, "Refresh", 64, 22, "secondary", function()
         if state.active and state.clickStepper then
             MH.Step()
         else
@@ -1763,13 +1901,13 @@ function MH.MountOnMailFrame()
     bar.refreshBtn = refreshBtn
 
     local statusFs = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    statusFs:SetPoint("LEFT", bar, "LEFT", padX + 2, -14)
-    statusFs:SetPoint("RIGHT", refreshBtn, "LEFT", -6, 0)
-    statusFs:SetPoint("TOP", bar, "TOP", 0, -34)
+    statusFs:SetPoint("TOPLEFT", bar, "TOPLEFT", padX, bottomY)
+    statusFs:SetPoint("BOTTOMRIGHT", refreshBtn, "BOTTOMLEFT", -4, 0)
     statusFs:SetHeight(22)
     if statusFs.SetJustifyH then statusFs:SetJustifyH("LEFT") end
     if statusFs.SetJustifyV then statusFs:SetJustifyV("MIDDLE") end
     if statusFs.SetWordWrap then statusFs:SetWordWrap(false) end
+    if statusFs.SetMaxLines then statusFs:SetMaxLines(1) end
     if theme and type(theme.ApplyFont) == "function" then
         theme.ApplyFont(statusFs, 11, "regular")
     end
@@ -1808,6 +1946,7 @@ function MH.OnEvent(self, event, arg1, arg2)
         if state.active then
             MH.Stop("mail_closed")
         end
+        if MH.bar and MH.bar.Hide then MH.bar:Hide() end
         if MH.presetsPanel and MH.presetsPanel.Hide then MH.presetsPanel:Hide() end
         if MH.inboxQuickStrip and MH.inboxQuickStrip.Hide then MH.inboxQuickStrip:Hide() end
     elseif event == "MAIL_SEND_INFO_UPDATE" or event == "MAIL_FAILED" or event == "MAIL_SEND_SUCCESS" then

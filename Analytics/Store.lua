@@ -111,7 +111,7 @@ function Store.Init()
     if (tonumber(DB.schema) or 0)>1 then Store.readOnly = true; return DB end
     DB.schema = 1
     DB.subSchema=2
-    for _, k in ipairs({ "days", "roll", "loot", "basis", "lots", "ret", "pouches", "snaps", "intradaySnaps", "wealth", "seenMail", "stats", "seed", "probe", "dayStats", "itemStats", "craftYieldStats", "guildSnaps", "warbankSnaps", "archivedRoll", "archivedLoot", "archivedDays", "basisEvents" }) do ensure(DB, k) end
+    for _, k in ipairs({ "days", "roll", "loot", "basis", "deOriginPool", "lots", "ret", "pouches", "snaps", "intradaySnaps", "wealth", "seenMail", "stats", "seed", "probe", "dayStats", "itemStats", "craftYieldStats", "guildSnaps", "warbankSnaps", "archivedRoll", "archivedLoot", "archivedDays", "basisEvents" }) do ensure(DB, k) end
     DB.itemMeta=DB.itemStats
     for _, k in ipairs({ "firstLive", "errors", "disabled", "recon", "lastStanding", "chars", "zones", "tsmSyncedSales", "importedOrigins" }) do ensure(DB.stats, k) end
     DB.stats.favorCostSum = DB.stats.favorCostSum or 0; DB.stats.favorGainSum = DB.stats.favorGainSum or 0
@@ -129,9 +129,26 @@ function Store.Init()
         DB.rollupSchema=3
     end
     if not DB.replayBase and next(DB.days)==nil then
-        DB.replayBase={basis=copy(DB.basis),lots=copy(DB.lots),ret=copy(DB.ret),pouches=copy(DB.pouches),itemStats=copy(DB.itemStats),favorCostSum=DB.stats.favorCostSum,favorGainSum=DB.stats.favorGainSum}
+        DB.replayBase={basis=copy(DB.basis),deOriginPool=copy(DB.deOriginPool),lots=copy(DB.lots),ret=copy(DB.ret),pouches=copy(DB.pouches),itemStats=copy(DB.itemStats),favorCostSum=DB.stats.favorCostSum,favorGainSum=DB.stats.favorGainSum}
     elseif not DB.replayBase and Store.EnsureReplayBase then
         Store.EnsureReplayBase()
+    end
+    if (tonumber(DB.deBasisVersion) or 0) < 2 then
+        local hasDE = false
+        Store.IterDays(nil, nil, function(_, rows)
+            for _, row in ipairs(rows) do
+                if row.type == "DISENCHANT_BROKEN" or row.type == "DISENCHANT_RECEIVE" then
+                    hasDE = true
+                    return false
+                end
+            end
+        end)
+        if hasDE and not Store.readOnly and Store.Rebuild then
+            local res = Store.Rebuild()
+            if res and res.ok then DB.deBasisVersion = 2 end
+        else
+            DB.deBasisVersion = 2
+        end
     end
     return DB
 end
@@ -149,12 +166,133 @@ function Store.Basis(econ, itemID)
     local b = DB and DB.basis and DB.basis[econ] and DB.basis[econ][itemID]
     return b and b.qty or 0, b and b.avg or 0
 end
-function Store.AddBasis(econ, itemID, addQty, paid)
+local unescapes={ ["25"]="%", ["2C"]=",", ["2c"]=",", ["0A"]="\n", ["0a"]="\n", ["0D"]="\r", ["0d"]="\r", ["3B"]=";", ["3b"]=";", ["3D"]="=", ["3d"]="=", ["7C"]="|", ["7c"]="|" }
+local function unescape(s)
+    -- One pass leaves decoded percent signs untouched (%25 is effectively last).
+    if not s:find("%",1,true) then return s end
+    return (s:gsub("%%(%x%x)",unescapes))
+end
+local function escOriginName(s)
+    return tostring(s or ""):gsub("%%","%%25"):gsub("|","%%7C"):gsub(";","%%3B")
+end
+local function roundNearInt(n)
+    local r=floor(n+0.5)
+    if math.abs(n-r)<1e-6 then return r end
+    return n
+end
+local function encodeDeOrigins(origins)
+    if type(origins)~="table" or #origins==0 then return nil end
+    local parts={}
+    for _,o in ipairs(origins) do
+        parts[#parts+1]=tostring(tonumber(o.srcItemID) or 0).."|"..tostring(o.qty or 0).."|"..tostring(tonumber(o.srcCost) or 0).."|"..escOriginName(o.srcName or "")
+    end
+    return tconcat(parts,";")
+end
+local function hydrateDeOrigin(row)
+    local e=row and row.extra
+    if type(e)~="table" or type(e.deOriginPack)~="string" or e.deOriginPack=="" or type(e.deOrigin)=="table" then return end
+    local list={}
+    local totalQty,totalCost=0,0
+    for seg in e.deOriginPack:gmatch("[^;]+") do
+        local sid,q,c,nm=seg:match("^(%d+)|([^|]+)|([^|]+)|(.*)$")
+        local srcID=tonumber(sid) or 0
+        local qty=tonumber(q) or 0
+        local cost=tonumber(c) or 0
+        if srcID>0 and qty>0 then
+            local name=unescape(nm or "")
+            if name=="" then name="Item #"..tostring(srcID) end
+            list[#list+1]={srcItemID=srcID,srcName=name,qty=roundNearInt(qty),srcCost=cost}
+            totalQty=totalQty+qty; totalCost=totalCost+cost
+        end
+    end
+    if #list>0 then
+        local primary=list[1]
+        local saleQty=max(1,tonumber(row.qty) or 1)
+        e.deOrigin={
+            srcItemID=primary.srcItemID,
+            srcName=primary.srcName,
+            qty=roundNearInt(totalQty),
+            srcCost=totalCost,
+            share=min(1,totalQty/saleQty),
+        }
+        e.deOrigins=#list>1 and list or nil
+    end
+end
+local function addOriginPool(econ, itemID, addQty, paid, deMeta)
+    if not DB or itemID<=0 or addQty<=0 then return end
+    local poolRoot=ensure(DB,"deOriginPool")
+    local econPool=ensure(poolRoot,econ)
+    local list=ensure(econPool,itemID)
+    local srcID=(type(deMeta)=="table" and tonumber(deMeta.srcItemID)) or 0
+    local srcName=(type(deMeta)=="table" and type(deMeta.srcName)=="string" and deMeta.srcName~="") and deMeta.srcName or nil
+    local cost=max(0,tonumber(paid) or 0)
+    for _,entry in ipairs(list) do
+        if (tonumber(entry.srcItemID) or 0)==srcID then
+            entry.qty=(tonumber(entry.qty) or 0)+addQty
+            entry.cost=(tonumber(entry.cost) or 0)+cost
+            if srcName and (not entry.srcName or entry.srcName=="") then entry.srcName=srcName end
+            return
+        end
+    end
+    list[#list+1]={srcItemID=srcID,srcName=srcName,qty=addQty,cost=cost}
+end
+local function consumeOriginPool(econ, itemID, takeQty, clearAll)
+    if not DB or not DB.deOriginPool or not DB.deOriginPool[econ] then return nil end
+    local list=DB.deOriginPool[econ][itemID]
+    if type(list)~="table" or #list==0 then return nil end
+    if takeQty<=0 then
+        if clearAll then DB.deOriginPool[econ][itemID]=nil end
+        return nil
+    end
+    local totalPoolQty=0
+    for _,entry in ipairs(list) do totalPoolQty=totalPoolQty+max(0,tonumber(entry.qty) or 0) end
+    if totalPoolQty<=0 then
+        DB.deOriginPool[econ][itemID]=nil
+        return nil
+    end
+    local consumeAll=clearAll or (takeQty>=totalPoolQty-1e-9)
+    local frac=consumeAll and 1 or (takeQty/totalPoolQty)
+    local consumedDE,kept={},{}
+    for _,entry in ipairs(list) do
+        local eq=max(0,tonumber(entry.qty) or 0)
+        local ec=max(0,tonumber(entry.cost) or 0)
+        if eq>0 then
+            local dq=consumeAll and eq or (eq*frac)
+            local dc=consumeAll and ec or min(ec,floor(ec*frac+0.5))
+            local sid=tonumber(entry.srcItemID) or 0
+            if sid>0 and dq>1e-9 then
+                consumedDE[#consumedDE+1]={
+                    srcItemID=sid,
+                    srcName=(type(entry.srcName)=="string" and entry.srcName~="") and entry.srcName or ("Item #"..tostring(sid)),
+                    qty=roundNearInt(dq),
+                    srcCost=dc,
+                }
+            end
+            if not consumeAll then
+                local remQ=eq-dq
+                local remC=max(0,ec-dc)
+                if remQ>1e-9 then
+                    entry.qty=remQ; entry.cost=remC; kept[#kept+1]=entry
+                end
+            end
+        end
+    end
+    DB.deOriginPool[econ][itemID]=#kept>0 and kept or nil
+    if #consumedDE==0 then return nil end
+    table.sort(consumedDE,function(a,b)
+        if a.qty~=b.qty then return a.qty>b.qty end
+        if a.srcCost~=b.srcCost then return a.srcCost>b.srcCost end
+        return a.srcItemID<b.srcItemID
+    end)
+    return consumedDE
+end
+function Store.AddBasis(econ, itemID, addQty, paid, deMeta)
     if not writable() or itemID <= 0 or addQty <= 0 then return end
     if not Store._appending and not Store._replaying then DB.basisEvents[#DB.basisEvents+1]={time=Store._basisTime or Store.Now(),econ=econ,itemID=itemID,qty=addQty,paid=paid,order=replayOrder()} end
     local b = ensure(ensure(DB.basis, econ), itemID)
     local old = b.qty or 0; local qty = old + addQty
     b.avg = ((b.avg or 0) * old + paid) / qty; b.qty = qty
+    addOriginPool(econ, itemID, addQty, paid, deMeta)
     if not Store._appending and not Store._replaying then changed(nil,"basis") end
 end
 function Store.ConsumeBasis(econ, itemID, takeQty)
@@ -166,8 +304,9 @@ function Store.ConsumeBasis(econ, itemID, takeQty)
     local cost = floor(known * (b.avg or 0) + 0.5)
     if event then event.paid=-cost; event.known=known end
     b.qty = (b.qty or 0) - known; if b.qty <= 0 then b.avg = 0 end
+    local deConsumed = consumeOriginPool(econ, itemID, known, b.qty <= 0)
     if not Store._appending and not Store._replaying and known>0 then changed(nil,"basis") end
-    return cost, max(0, takeQty - known)
+    return cost, max(0, takeQty - known), deConsumed
 end
 function Store.Lots(char, itemID)
     local lots = DB and DB.lots and DB.lots[char] or {}
@@ -366,7 +505,7 @@ end
 local function consumeCost(econ, id, qty, marketOnly)
     id, qty = tonumber(id) or 0, tonumber(qty) or 0
     if id <= 0 or qty <= 0 then return 0, 0 end
-    local cost, missing = Store.ConsumeBasis(econ, id, qty)
+    local cost, missing, deConsumed = Store.ConsumeBasis(econ, id, qty)
     if missing>0 then
         local unit
         if marketOnly then unit=evaluate(function(h)
@@ -379,7 +518,7 @@ local function consumeCost(econ, id, qty, marketOnly)
         else unit=Store.EstimateCraftOrMarketCost(id) end
         cost=cost+floor(missing*unit+0.5)
     end
-    return cost, missing
+    return cost, missing, deConsumed
 end
 function Store.GetRunningFavorPrice()
     if DB and DB.stats and (DB.stats.favorGainSum or 0) > 0 then return max(0, DB.stats.favorCostSum / DB.stats.favorGainSum) end
@@ -404,9 +543,6 @@ local function dailyStats(row, day)
         add("salesGross", gross); add("profitDelta", gross - fee - (row.cogs or 0))
     elseif buyTypes[typ] then add("buySpent", math.abs(row.total))
     elseif typ == "AH_CANCEL" or typ == "AH_EXPIRE" then add("depLost", e.depLost); add("profitDelta", -(e.depLost or 0))
-    elseif typ == "DISENCHANT_BROKEN" then
-        local estVal = tonumber(e.estValue) or 0
-        if estVal > 0 then add("profitDelta", estVal - (row.cogs or 0)) end
     elseif typ == "ADJUST" then add("adjustTotal", row.total)
     elseif typ == "WRIT_TURNIN" then
         add("writCost", row.cogs); add("writQuestCash", row.total); add("writRep", e.rep); add("writsDone", row.qty)
@@ -506,9 +642,28 @@ function Store.Append(row)
             local fee=tonumber(e.fee) or 0; local gross=tonumber(e.gross) or max(0,total+fee)
             if typ=="AH_SELL" then local matched, _, dt=Store.CloseUnits(char,id,qty,"sell",tonumber(e.saleAt) or row.time,{unit=row.unit,name=e.name}); r.dtSum=r.dtSum+dt; r.dtUnits=r.dtUnits+matched end
             if (row.cogs==nil or e.recomputeCost) and id>0 and qty>0 then
-                local cost,missing=consumeCost(econ,id,qty); row.cogs=cost
+                local cost,missing,deConsumed=consumeCost(econ,id,qty); row.cogs=cost
                 e.autoCost=true; e.recomputeCost=nil
                 if missing>0 then e.est=1; e.estUnits=missing end
+                if deConsumed and #deConsumed>0 then
+                    local totalDeQty,totalDeCost=0,0
+                    for _,orig in ipairs(deConsumed) do
+                        totalDeQty=totalDeQty+(tonumber(orig.qty) or 0)
+                        totalDeCost=totalDeCost+(tonumber(orig.srcCost) or 0)
+                    end
+                    local primary=deConsumed[1]
+                    e.deOrigin={
+                        srcItemID=primary.srcItemID,
+                        srcName=primary.srcName,
+                        qty=roundNearInt(totalDeQty),
+                        srcCost=totalDeCost,
+                        share=min(1,totalDeQty/max(1,qty)),
+                    }
+                    e.deOrigins=#deConsumed>1 and deConsumed or nil
+                    e.deOriginPack=encodeDeOrigins(deConsumed)
+                elseif Store._replaying then
+                    e.deOrigin=nil; e.deOrigins=nil; e.deOriginPack=nil
+                end
             end
             r.sold=r.sold+qty; r.gross=r.gross+gross; r.fee=r.fee+fee; r.cogs=r.cogs+(row.cogs or 0); r.estUnits=r.estUnits+(tonumber(e.estUnits) or 0)
             if typ=="AH_SELL" then r.ahSold=(r.ahSold or 0)+qty end
@@ -545,17 +700,18 @@ function Store.Append(row)
             e.outputs=table.concat(encoded,";"); e.nonCash=true
         elseif typ=="DISENCHANT_BROKEN" and id>0 and qty>0 then
             local cost=Store.ConsumeBasis(econ,id,qty); row.cogs=cost
-            local estVal=tonumber(e.estValue) or 0
-            if estVal>0 then
-                row.profit=estVal-cost
-                r.sold=r.sold+qty; r.gross=r.gross+estVal; r.cogs=r.cogs+cost
-            else
-                row.profit=0
-            end
+            row.profit=0
             e.nonCash=true
+            e.deSrcCost=cost
         elseif typ=="DISENCHANT_RECEIVE" and id>0 and qty>0 then
-            local basis=tonumber(e.allocBasis) or tonumber(e.marketValue) or 0
-            Store.AddBasis(econ,id,qty,max(0,basis))
+            local basis=max(0,tonumber(e.allocBasis) or 0)
+            local srcID=tonumber(e.srcItemID) or 0
+            local srcName=(type(e.srcName)=="string" and e.srcName~="" and e.srcName)
+                or (type(row.where)=="string" and row.where:match("^From:%s*(.+)$"))
+                or (ns.Model and ns.Model.ItemName and srcID>0 and ns.Model.ItemName(srcID))
+                or (srcID>0 and ("Item #"..tostring(srcID)) or nil)
+            if srcID>0 and (type(e.srcName)~="string" or e.srcName=="") and srcName then e.srcName=srcName end
+            Store.AddBasis(econ,id,qty,basis,srcID>0 and {srcItemID=srcID,srcName=srcName} or nil)
             row.profit=0
             e.nonCash=true
         elseif typ=="WRIT_TURNIN" then
@@ -614,12 +770,6 @@ function Store.AddLoot(itemID, source, zone, qty, opts)
     changed(nil,"loot",DB.stats.firstLive[char]~=prevFirst or nil)
 end
 
-local unescapes={ ["25"]="%", ["2C"]=",", ["2c"]=",", ["0A"]="\n", ["0a"]="\n", ["0D"]="\r", ["0d"]="\r", ["3B"]=";", ["3b"]=";", ["3D"]="=", ["3d"]="=", ["7C"]="|", ["7c"]="|" }
-local function unescape(s)
-    -- One pass leaves decoded percent signs untouched (%25 is effectively last).
-    if not s:find("%",1,true) then return s end
-    return (s:gsub("%%(%x%x)",unescapes))
-end
 local function numberString(n)
     if n==floor(n) and n>-100000000000000 and n<100000000000000 then return tostring(n) end
     return string.format("%.17g",n)
@@ -757,9 +907,13 @@ function Store.UnpackDayString(str)
             elseif typ=="t" then value=true elseif typ=="f" then value=false else value=nil end
             return value
         end
-        local fields={}
+        local fields,hasDeOriginPack={},false
         for _,key in ipairs(packedFields) do fields[#fields+1]=key end
-        for i=1,extras do fields[#fields+1]=scalar() end
+        for i=1,extras do
+            local key=scalar()
+            if key=="deOriginPack" then hasDeOriginPack=true end
+            fields[#fields+1]=key
+        end
         local extraRows={}
         -- Nil constructor fields reserve row capacity without adding absent keys.
         if work then
@@ -844,6 +998,9 @@ function Store.UnpackDayString(str)
             end
         end
         decodedNumbers,decodedCount=numberCache,numberCount
+        if hasDeOriginPack then
+            for i=1,count do hydrateDeOrigin(rows[i]) end
+        end
         return rows
     end
     local function text(s)
@@ -867,6 +1024,7 @@ function Store.UnpackDayString(str)
                 end
                 if scalarValue then row.extra[scalarValue.key]=scalarValue.value end
             end
+            if row.extra.deOriginPack then hydrateDeOrigin(row) end
             rows[#rows+1]=row
         end
     end
@@ -1110,7 +1268,7 @@ function Store.CoalesceRows(rows,windowSec)
 end
 
 local function stateSnapshot(source)
-    return {basis=copy(source.basis),lots=copy(source.lots),ret=copy(source.ret),pouches=copy(source.pouches),itemStats=copy(source.itemStats),
+    return {basis=copy(source.basis),deOriginPool=copy(source.deOriginPool or {}),lots=copy(source.lots),ret=copy(source.ret),pouches=copy(source.pouches),itemStats=copy(source.itemStats),
         recon=copy(source.stats.recon),historicalBasis=copy(source.historicalBasis),favorCostSum=source.stats.favorCostSum,favorGainSum=source.stats.favorGainSum}
 end
 local function allRows()
@@ -1182,7 +1340,8 @@ function Store.EnsureReplayBase()
             elseif r.type=="DISENCHANT_BROKEN" then
                 undo(r.econ,r.itemID,r.qty,r.cogs or 0)
             elseif r.type=="DISENCHANT_RECEIVE" then
-                undo(r.econ,r.itemID,-r.qty,-(tonumber(e.allocBasis) or tonumber(e.marketValue) or 0))
+                local prevBasis=(e.costCarryover==true) and (tonumber(e.allocBasis) or 0) or (tonumber(e.allocBasis) or tonumber(e.marketValue) or 0)
+                undo(r.econ,r.itemID,-r.qty,-prevBasis)
             elseif r.type=="WRIT_TURNIN" or r.type=="CRATE_TURNIN" then
                 local inputs={{id=r.itemID,qty=r.type=="WRIT_TURNIN" and 1 or max(1,r.qty)}}
                 if r.type=="WRIT_TURNIN" and (tonumber(e.reqItemID) or 0)>0 and (tonumber(e.reqQty) or 0)>0 then inputs[#inputs+1]={id=e.reqItemID,qty=e.reqQty} end
@@ -1203,7 +1362,7 @@ function Store.EnsureReplayBase()
         end
         end
     end
-    base.itemStats={}; base.pouches={}; base.ret={}; base.recon={}
+    base.itemStats={}; base.pouches={}; base.ret={}; base.recon={}; base.deOriginPool={}
     -- Preserve lots created before raw coverage, while replay owns the recorded posts.
     for c,items in pairs(base.lots) do for id,lots in pairs(items) do
         for i=#lots,1,-1 do for _,r in ipairs(rows) do
@@ -1234,7 +1393,7 @@ local function replay(source,rows,events,base)
     local work=copy(source); local b=base or {}
     work.days={}; work.roll={}; work.dayStats={}
     for day in pairs(source.archivedDays or {}) do work.roll[day]=copy(source.roll[day]); work.dayStats[day]=copy(source.dayStats[day]) end
-    work.basis=copy(b.basis or {}); work.lots=copy(b.lots or {}); work.ret=copy(b.ret or {}); work.pouches=copy(b.pouches or {})
+    work.basis=copy(b.basis or {}); work.deOriginPool=copy(b.deOriginPool or {}); work.lots=copy(b.lots or {}); work.ret=copy(b.ret or {}); work.pouches=copy(b.pouches or {})
     work.itemStats=copy(b.itemStats or {}); work.itemMeta=work.itemStats
     work.stats.favorCostSum=b.favorCostSum or 0; work.stats.favorGainSum=b.favorGainSum or 0
     for c,r in pairs(work.stats.recon) do
@@ -1250,6 +1409,19 @@ local function replay(source,rows,events,base)
         if not a.row~=not b.row then return a.event~=nil end
         return a.tie<b.tie
     end)
+    local deGroupOutputs,deGroupResolved,repairedDEItems={},{},{}
+    for _,entry in ipairs(timeline) do
+        local row=entry.row
+        if row and row.type=="DISENCHANT_RECEIVE" then
+            local e=row.extra or {}; row.extra=e
+            local gk=(type(e.deGroup)=="string" and e.deGroup~="") and e.deGroup or nil
+            if gk then
+                local grp=deGroupOutputs[gk]
+                if not grp then grp={}; deGroupOutputs[gk]=grp end
+                grp[#grp+1]={row=row,weight=max(0,tonumber(e.marketValue) or 0),qty=max(0,tonumber(row.qty) or 0)}
+            end
+        end
+    end
     DB=work; Store.db=work; Store._replaying=true
     local historicalBasis=copy(b.historicalBasis or {}); work.historicalBasis=historicalBasis
     local notify=Store.onChange; Store.onChange=nil
@@ -1279,7 +1451,17 @@ local function replay(source,rows,events,base)
                         b.qty=b.qty-known; e.est=missing>0 and 1 or nil; e.estUnits=missing>0 and missing or nil
                     end
                 end
-                if not e.tsm and (e.autoCost or e.recomputeCost) then row.cogs=nil; e.est=nil; e.estUnits=nil end
+                if not e.tsm and (e.autoCost or e.recomputeCost or (sellTypes[row.type] and repairedDEItems[row.itemID] and not e.manualCost)) then
+                    row.cogs=nil; e.est=nil; e.estUnits=nil
+                    if sellTypes[row.type] then e.deOrigin=nil; e.deOrigins=nil; e.deOriginPack=nil end
+                end
+                if row.type=="DISENCHANT_RECEIVE" and e.costCarryover~=true then
+                    local gk=(type(e.deGroup)=="string" and e.deGroup~="") and e.deGroup or nil
+                    if not (gk and deGroupResolved[gk]) then
+                        e.allocBasis=0; e.costCarryover=true; row.unit=0
+                        if row.itemID and row.itemID>0 then repairedDEItems[row.itemID]=true end
+                    end
+                end
                 if row.type=="CRAFT" and e.reagentInputs then
                     e.reagents={}; for id,qty in e.reagentInputs:gmatch("(%d+):([%d%.]+)") do e.reagents[#e.reagents+1]={itemID=tonumber(id),qty=tonumber(qty)} end
                 end
@@ -1289,6 +1471,40 @@ local function replay(source,rows,events,base)
                 local recon=work.stats.recon[row.char]
                 if recon and recon.gold~=nil and ((recon.order and (e.replayOrder or 0)<=recon.order) or (not recon.order and recon.at and row.time<recon.at)) then row.skipRecon=true end
                 assert(Store.Append(row),"replay rejected event")
+                if row.type=="DISENCHANT_BROKEN" then
+                    local gk=(type(e.deGroup)=="string" and e.deGroup~="") and e.deGroup or nil
+                    local grp=gk and deGroupOutputs[gk] or nil
+                    if grp and #grp>0 then
+                        local srcCost=max(0,tonumber(row.cogs) or tonumber(e.deSrcCost) or 0)
+                        local totalMV,totalUnits=0,0
+                        for _,item in ipairs(grp) do
+                            totalMV=totalMV+item.weight
+                            totalUnits=totalUnits+item.qty
+                        end
+                        local used=0
+                        for idx,item in ipairs(grp) do
+                            local share=0
+                            if srcCost>0 then
+                                if idx==#grp then
+                                    share=max(0,srcCost-used)
+                                else
+                                    local ratio=(totalMV>0) and (item.weight/totalMV) or (item.qty/max(1,totalUnits))
+                                    share=floor(srcCost*ratio)
+                                end
+                                used=used+share
+                            end
+                            local ie=item.row.extra
+                            local wasLegacy=(ie.costCarryover~=true) or (tonumber(ie.allocBasis)~=share)
+                            ie.allocBasis=share
+                            ie.costCarryover=true
+                            item.row.unit=floor(share/max(1,item.qty)+0.5)
+                            if wasLegacy and item.row.itemID and item.row.itemID>0 then
+                                repairedDEItems[item.row.itemID]=true
+                            end
+                        end
+                        deGroupResolved[gk]=true
+                    end
+                end
             end
         end
         -- Loot counters remain authoritative; basis mutations are replayed from the separate journal.
@@ -1305,7 +1521,8 @@ end
 local function finite(n) return type(n)=="number" and n==n and n~=math.huge and n~=-math.huge end
 local function publishReplay(work)
     for day,d in pairs(DB.days) do if d.s and work.days[day] then work.days[day]={s=Store.PackRows(work.days[day].r)} end end
-    for _,k in ipairs({"days","roll","dayStats","basis","lots","ret","pouches","itemStats"}) do DB[k]=work[k] end
+    for _,k in ipairs({"days","roll","dayStats","basis","deOriginPool","lots","ret","pouches","itemStats"}) do DB[k]=work[k] end
+    unpackedCache={}
     DB.itemMeta=DB.itemStats; DB.stats.recon=work.stats.recon; DB.stats.favorCostSum=work.stats.favorCostSum; DB.stats.favorGainSum=work.stats.favorGainSum
     DB.stats.nextReplayOrder=max(DB.stats.nextReplayOrder or 0,work.stats.nextReplayOrder or 0)
     for c in pairs(DB.stats.chars) do Store.UpdateTodayListedSnap(c) end
@@ -1319,6 +1536,7 @@ function Store.Rebuild()
     if not work then return {ok=false,err=err} end
     publishReplay(work); return {ok=true}
 end
+Store.Replay = Store.Rebuild
 function Store.RecordCraftYield(spellID, itemID, madeQty, castsCount, rolls)
     if not writable() then return nil end
     local sid = tonumber(spellID)

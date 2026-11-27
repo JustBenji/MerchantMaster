@@ -1444,6 +1444,8 @@ local SKIN_ICON_BY_ID = {
 	[6050] = "INV_Potion_32",                    -- Frost Oil
 	[6049] = "INV_Potion_32",
 	[10504] = "INV_Misc_Lens_01",                -- Green Lens
+	[11176] = "INV_Enchant_DustDream",           -- Dream Dust
+	[11178] = "INV_Enchant_ShardRadiantLarge",   -- Large Radiant Shard
 	[4304] = "INV_Misc_LeatherScrap_02",         -- Thick Leather
 }
 local SKIN_POTION_ICONS = { "INV_Potion_32", "INV_Potion_25", "INV_Potion_76", "INV_Potion_54", "INV_Potion_41", "INV_Potion_80" }
@@ -3508,6 +3510,7 @@ if skinsMode then
 		local priorDashRange = db.dashboardBriefRange
 		local priorAhDaily = db.ahDaily
 		local priorLivePrices = db.ahPrices and db.ahPrices[econ]
+		local priorScannedAt = priorLivePrices and priorLivePrices._scannedAt
 		local savedPrices = {}
 
 		-- Set deterministic morning time (09:20 local) so greeting is "Good morning, Grommash"
@@ -3529,6 +3532,7 @@ if skinsMode then
 		}
 		db.ahPrices = db.ahPrices or {}
 		db.ahPrices[econ] = db.ahPrices[econ] or {}
+		db.ahPrices[econ]._scannedAt = morningTs - 240
 		db.ahDaily = db.ahDaily or {}
 		local dailyCopy = {}
 		for k, v in pairs((priorAhDaily and priorAhDaily[econ]) or {}) do dailyCopy[k] = v end
@@ -3563,6 +3567,7 @@ if skinsMode then
 		}
 		local runGold = 14800000
 		local dayMultipliers = { 0.88, 1.12, 0.76, 1.24, 1.05, 0.94, 1.18, 1.32 }
+		local ydayHoursAgo = { 22, 19, 16, 13, 10 }
 		for dOff = 7, 1, -1 do
 			local baseTs = morningTs - dOff * 86400 - 7200
 			local mult = dayMultipliers[8 - dOff] or 1.0
@@ -3574,8 +3579,9 @@ if skinsMode then
 				local f = it.fee * q
 				local c = it.cogs * q
 				dayProfit = dayProfit + (g - f - c)
+				local saleTs = (dOff == 1) and (morningTs - ydayHoursAgo[idx] * 3600 + 900) or (baseTs - (idx * 1800))
 				Store.Append({
-					time = baseTs - (idx * 1800),
+					time = saleTs,
 					type = "AH_SELL",
 					char = charKey,
 					econ = econ,
@@ -3624,18 +3630,19 @@ if skinsMode then
 				extra = { spellID = cr.spellID, name = cr.name },
 			})
 		end
-		-- Today's crisp AH_SELL log (10 varied sales for scrollable Recent AH Sales + Best Items)
+		-- Today's crisp AH_SELL log (10 varied sales including DE-origin tag for scrollable Recent AH Sales + Best Items)
 		local todaySales = {
 			{ minsAgo = 14,  id = 13512, name = "Flask of Supreme Power",         qty = 2,  gross = 548000, fee = 27400, cogs = 356000 },
-			{ minsAgo = 32,  id = 10504, name = "Green Lens",                     qty = 2,  gross = 336000, fee = 16800, cogs = 144000 },
+			{ minsAgo = 26,  id = 11176, name = "Dream Dust",                     qty = 1,  gross = 18500,  fee = 925,   cogs = 8400,
+				deOrigin = { srcItemID = 10504, srcName = "Green Lens", srcCost = 8400 } },
 			{ minsAgo = 55,  id = 13454, name = "Greater Arcane Elixir",          qty = 8,  gross = 636000, fee = 31800, cogs = 332000 },
 			{ minsAgo = 82,  id = 13452, name = "Elixir of the Mongoose",         qty = 10, gross = 684000, fee = 34200, cogs = 368000 },
-			{ minsAgo = 115, id = 13444, name = "Major Mana Potion",              qty = 15, gross = 622500, fee = 31125, cogs = 336000 },
-			{ minsAgo = 148, id = 13457, name = "Greater Fire Protection Potion", qty = 6,  gross = 267000, fee = 13350, cogs = 149400 },
-			{ minsAgo = 190, id = 5634,  name = "Free Action Potion",             qty = 10, gross = 242000, fee = 12100, cogs = 128000 },
-			{ minsAgo = 235, id = 4304,  name = "Thick Leather",                  qty = 40, gross = 36000,  fee = 1800,  cogs = 24000 },
-			{ minsAgo = 285, id = 13446, name = "Major Healing Potion",           qty = 20, gross = 370000, fee = 18500, cogs = 212000 },
-			{ minsAgo = 340, id = 13456, name = "Greater Frost Protection Potion", qty = 5, gross = 182500, fee = 9125,  cogs = 105000 },
+			{ minsAgo = 145, id = 13444, name = "Major Mana Potion",              qty = 15, gross = 622500, fee = 31125, cogs = 336000 },
+			{ minsAgo = 210, id = 13457, name = "Greater Fire Protection Potion", qty = 6,  gross = 267000, fee = 13350, cogs = 149400 },
+			{ minsAgo = 275, id = 5634,  name = "Free Action Potion",             qty = 10, gross = 242000, fee = 12100, cogs = 128000 },
+			{ minsAgo = 340, id = 4304,  name = "Thick Leather",                  qty = 40, gross = 36000,  fee = 1800,  cogs = 24000 },
+			{ minsAgo = 415, id = 13446, name = "Major Healing Potion",           qty = 20, gross = 370000, fee = 18500, cogs = 212000 },
+			{ minsAgo = 490, id = 13456, name = "Greater Frost Protection Potion", qty = 5, gross = 182500, fee = 9125,  cogs = 105000 },
 		}
 		for idx, s in ipairs(todaySales) do
 			Store.Append({
@@ -3650,7 +3657,7 @@ if skinsMode then
 				cogs = s.cogs,
 				where = "Orgrimmar",
 				skipRecon = true,
-				extra = { name = s.name, gross = s.gross, fee = s.fee, replayOrder = 100 - idx },
+				extra = { name = s.name, gross = s.gross, fee = s.fee, replayOrder = 100 - idx, deOrigin = s.deOrigin },
 			})
 		end
 		-- Seed 10 hourly intraday wealth snapshots up to morningTs (Total Wealth Hourly Line Chart)
@@ -3685,6 +3692,7 @@ if skinsMode then
 		db.ahDaily = priorAhDaily
 		if priorLivePrices then
 			for id in pairs(dropPrices) do db.ahPrices[econ][id] = savedPrices[id] end
+			db.ahPrices[econ]._scannedAt = priorScannedAt
 		end
 		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
 		if ns.DashboardBrief and ns.DashboardBrief.InvalidateCache then ns.DashboardBrief.InvalidateCache() end
@@ -3777,6 +3785,7 @@ if not cartAhOnly then
 		local priorSnapRaw, priorSnapParsed, priorSnapHeat = ns.snapshotRaw, ns.snapshotParsed, ns.snapshotHeatmapCache
 		local priorDaily, priorSnaps = db.ahDaily, db.ahSnapshots
 		local priorLive = db.ahPrices and db.ahPrices[econ]
+		local priorDaScannedAt = priorLive and priorLive._scannedAt
 		local savedLive = {}
 		local Store = ns.Analytics and ns.Analytics.Store
 		local priorLedgerDB = _G.MerchantMasterLedgerDB
@@ -3784,6 +3793,9 @@ if not cartAhOnly then
 
 		local day = math.floor(simTime / 86400)
 		local scanAt = simTime - 240
+		if db.ahPrices and db.ahPrices[econ] then
+			db.ahPrices[econ]._scannedAt = scanAt
+		end
 		local daDaily, daSnaps = {}, {}
 		local daSeries = {
 			[13512] = { 610000, 622000, 618000, 642000, 655000, 672000, 685000 }, -- Flask of Supreme Power
@@ -3869,6 +3881,7 @@ if not cartAhOnly then
 		db.ahDaily, db.ahSnapshots = priorDaily, priorSnaps
 		if priorLive then
 			for id in pairs(daSeries) do db.ahPrices[econ][id] = savedLive[id] end
+			db.ahPrices[econ]._scannedAt = priorDaScannedAt
 		end
 		if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
 		if ns.Analytics and ns.Analytics.Model and ns.Analytics.Model.Invalidate then ns.Analytics.Model.Invalidate() end
@@ -4031,6 +4044,7 @@ if not cartAhOnly then
 		local priorNumBags = _G.NUM_BAG_SLOTS
 		local priorGetProfs, priorGetProfInfo = _G.GetProfessions, _G.GetProfessionInfo
 		local priorGetSpellBook = _G.GetSpellBookItemInfo
+		local priorProfFrame = _G.ProfessionsFrame
 		local priorSpellBookProf = _G.SpellBookProfessionFrame
 		local priorProf1 = _G.PrimaryProfession1
 		local priorAS = db.disenchantHelperAS
@@ -4081,34 +4095,49 @@ if not cartAhOnly then
 		applySkin("goblin")
 		app.panel:Hide()
 
-		-- Left side: Blizzard Spellbook Professions panel showing Enchanting -> Disenchant + real MerchantMaster launcher icon
-		local sbProf = makeWidget("Frame", "SpellBookProfessionFrame", _G.UIParent)
-		sbProf:SetSize(480, 420)
-		sbProf:ClearAllPoints()
-		sbProf:SetPoint("LEFT", _G.UIParent, "LEFT", 118, 0)
-		sbProf:SetFrameStrata("MEDIUM")
-		sbProf:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 10 })
-		sbProf:SetBackdropColor(0.08, 0.07, 0.06, 0.96)
-		sbProf:SetBackdropBorderColor(0.62, 0.48, 0.22, 0.94)
+		-- Left side: WoW Forever ProfessionsFrame.BookPage showing Enchanting -> Disenchant + real MerchantMaster launcher icon
+		local profFrame = makeWidget("Frame", "ProfessionsFrame", _G.UIParent)
+		profFrame:SetSize(480, 420)
+		profFrame:ClearAllPoints()
+		profFrame:SetPoint("LEFT", _G.UIParent, "LEFT", 118, 0)
+		profFrame:SetFrameStrata("MEDIUM")
+		profFrame:SetFrameLevel(1)
 
-		local sbTitle = sbProf:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-		sbTitle:SetPoint("TOPLEFT", sbProf, "TOPLEFT", 20, -18)
+		local bookPage = makeWidget("Frame", nil, profFrame)
+		bookPage:SetAllPoints(profFrame)
+		bookPage:SetFrameStrata("MEDIUM")
+		bookPage:SetFrameLevel(100)
+		bookPage:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 10 })
+		bookPage:SetBackdropColor(0.08, 0.07, 0.06, 0.96)
+		bookPage:SetBackdropBorderColor(0.62, 0.48, 0.22, 0.94)
+		profFrame.BookPage = bookPage
+
+		local sbTitle = bookPage:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+		sbTitle:SetPoint("TOPLEFT", bookPage, "TOPLEFT", 20, -18)
 		sbTitle:SetJustifyH("LEFT")
-		sbTitle:SetText("Spellbook & Professions")
+		sbTitle:SetText("Professions")
 		sbTitle:SetTextColor(0.97, 0.84, 0.49, 1)
 
-		local sbSub = sbProf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		sbSub:SetPoint("TOPLEFT", sbProf, "TOPLEFT", 20, -42)
+		local sbSub = bookPage:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		sbSub:SetPoint("TOPLEFT", bookPage, "TOPLEFT", 20, -42)
 		sbSub:SetJustifyH("LEFT")
-		sbSub:SetText("Professions Tab  -  Enchanting Disenchant Launcher")
+		sbSub:SetText("ProfessionsFrame.BookPage  -  Enchanting Disenchant Launcher")
 		sbSub:SetTextColor(0.68, 0.66, 0.60, 1)
 
-		local p1 = makeWidget("Frame", "PrimaryProfession1", sbProf)
+		local contentFrame = makeWidget("Frame", nil, bookPage)
+		contentFrame:SetPoint("TOPLEFT", bookPage, "TOPLEFT", 20, -76)
+		contentFrame:SetSize(440, 260)
+		contentFrame:SetFrameLevel(101)
+		bookPage.ProfessionsContentFrame = contentFrame
+
+		local p1 = makeWidget("Frame", nil, contentFrame)
 		p1:SetSize(440, 150)
-		p1:SetPoint("TOPLEFT", sbProf, "TOPLEFT", 20, -76)
+		p1:SetPoint("TOPLEFT", contentFrame, "TOPLEFT", 0, 0)
+		p1:SetFrameLevel(102)
 		p1:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", edgeSize = 8 })
 		p1:SetBackdropColor(0.11, 0.10, 0.09, 0.95)
 		p1:SetBackdropBorderColor(0.46, 0.36, 0.20, 0.80)
+		contentFrame.PrimaryProfession1 = p1
 
 		local p1Ico = p1:CreateTexture(nil, "ARTWORK")
 		p1Ico:SetSize(38, 38)
@@ -4120,6 +4149,7 @@ if not cartAhOnly then
 		p1Title:SetJustifyH("LEFT")
 		p1Title:SetText("Enchanting")
 		p1Title:SetTextColor(0.98, 0.88, 0.56, 1)
+		p1.professionName = p1Title
 
 		local p1Rank = p1:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 		p1Rank:SetPoint("TOPLEFT", p1Title, "BOTTOMLEFT", 0, -4)
@@ -4127,42 +4157,46 @@ if not cartAhOnly then
 		p1Rank:SetText("Artisan  300 / 300")
 		p1Rank:SetTextColor(0.50, 0.88, 0.56, 1)
 
-		local topBtn = makeWidget("Button", "PrimaryProfession1SpellButtonTop", p1)
-		topBtn:SetSize(34, 34)
-		topBtn:SetPoint("TOPLEFT", p1, "TOPLEFT", 18, -82)
-		local topTex = topBtn:CreateTexture(nil, "ARTWORK")
-		topTex:SetAllPoints(topBtn)
+		local sb1 = makeWidget("Button", nil, p1)
+		sb1:SetSize(34, 34)
+		sb1:SetPoint("TOPLEFT", p1, "TOPLEFT", 18, -82)
+		sb1:SetFrameLevel(103)
+		sb1.spellID = 7411
+		local topTex = sb1:CreateTexture(nil, "ARTWORK")
+		topTex:SetAllPoints(sb1)
 		topTex:SetTexture(136244)
-		topBtn.spellString = topBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-		topBtn.spellString:SetPoint("LEFT", topBtn, "RIGHT", 8, 0)
-		topBtn.spellString:SetJustifyH("LEFT")
-		topBtn.spellString:SetText("Enchanting")
-		topBtn.spellString:SetTextColor(0.95, 0.94, 0.90, 1)
+		sb1.spellString = sb1:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		sb1.spellString:SetPoint("LEFT", sb1, "RIGHT", 8, 0)
+		sb1.spellString:SetJustifyH("LEFT")
+		sb1.spellString:SetText("Enchanting")
+		sb1.spellString:SetTextColor(0.95, 0.94, 0.90, 1)
+		p1.SpellButton1 = sb1
 
-		local botBtn = makeWidget("Button", "PrimaryProfession1SpellButtonBottom", p1)
-		botBtn:SetSize(34, 34)
-		botBtn:SetPoint("LEFT", topBtn, "RIGHT", 140, 0)
-		local botTex = botBtn:CreateTexture(nil, "ARTWORK")
-		botTex:SetAllPoints(botBtn)
+		local sb2 = makeWidget("Button", nil, p1)
+		sb2:SetSize(34, 34)
+		sb2:SetPoint("LEFT", sb1, "RIGHT", 140, 0)
+		sb2:SetFrameLevel(103)
+		sb2.spellID = 13262
+		local botTex = sb2:CreateTexture(nil, "ARTWORK")
+		botTex:SetAllPoints(sb2)
 		botTex:SetTexture(132853)
-		botBtn.spellString = botBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-		botBtn.spellString:SetPoint("LEFT", botBtn, "RIGHT", 8, 0)
-		botBtn.spellString:SetJustifyH("LEFT")
-		botBtn.spellString:SetText("Disenchant")
-		botBtn.spellString:SetTextColor(0.95, 0.94, 0.90, 1)
+		sb2.spellString = sb2:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+		sb2.spellString:SetPoint("LEFT", sb2, "RIGHT", 8, 0)
+		sb2.spellString:SetJustifyH("LEFT")
+		sb2.spellString:SetText("Disenchant")
+		sb2.spellString:SetTextColor(0.95, 0.94, 0.90, 1)
+		p1.SpellButton2 = sb2
 
-		p1.SpellButtonTop = topBtn
-		p1.SpellButtonBottom = botBtn
-		sbProf.PrimaryProfession1 = p1
-		_G.SpellBookProfessionFrame = sbProf
-		_G.PrimaryProfession1 = p1
+		_G.ProfessionsFrame = profFrame
+		_G.SpellBookProfessionFrame = nil
+		_G.PrimaryProfession1 = nil
 
-		local sbNote = sbProf:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		local sbNote = bookPage:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 		sbNote:SetPoint("TOPLEFT", p1, "BOTTOMLEFT", 4, -18)
 		sbNote:SetPoint("TOPRIGHT", p1, "BOTTOMRIGHT", -4, -18)
 		sbNote:SetJustifyH("LEFT")
 		sbNote:SetWordWrap(true)
-		sbNote:SetText("MerchantMaster mounts a 1-click Disenchant Helper launcher right beside your Disenchant spell in the Professions book and Enchanting window.")
+		sbNote:SetText("MerchantMaster mounts a 1-click Disenchant Helper launcher directly onto WoW Forever's ProfessionsFrame.BookPage right beside Disenchant.")
 		sbNote:SetTextColor(0.76, 0.78, 0.80, 1)
 
 		_G.GetProfessions = function() return 1, nil, nil, nil, nil, nil end
@@ -4174,9 +4208,15 @@ if not cartAhOnly then
 			if slot == 12 then return "SPELL", 13262 end
 		end
 
-		sbProf:Show()
+		profFrame:Show()
+		bookPage:Show()
+		contentFrame:Show()
+		p1:Show()
 		solveLayout(false)
 		DH.RefreshProfessionButtons()
+		local dhSt = DH.GetState()
+		assert(dhSt.profBookShown == true and dhSt.profBookBtn and dhSt.profBookBtn:GetFrameLevel() >= 108,
+			"disenchant-helper-goblin must mount BookPage launcher beside Disenchant at level >= 108")
 
 		-- Right side: Standalone Goblin Baron Disenchant Helper window
 		DH.Show()
@@ -4186,7 +4226,7 @@ if not cartAhOnly then
 		local dhFrame = DH.GetState().frame
 		assert(dhFrame and dhFrame:IsShown(), "disenchant-helper-goblin must open DisenchantHelper frame")
 		dhFrame:ClearAllPoints()
-		dhFrame:SetPoint("LEFT", sbProf, "RIGHT", 64, 0)
+		dhFrame:SetPoint("LEFT", profFrame, "RIGHT", 64, 0)
 		drainTimers(500)
 		flushPendingLayout()
 		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
@@ -4194,7 +4234,9 @@ if not cartAhOnly then
 
 		-- Clean up
 		DH.Hide()
-		sbProf:Hide()
+		bookPage:Hide()
+		profFrame:Hide()
+		_G.ProfessionsFrame = priorProfFrame
 		_G.SpellBookProfessionFrame = priorSpellBookProf
 		_G.PrimaryProfession1 = priorProf1
 		_G.GetProfessions, _G.GetProfessionInfo = priorGetProfs, priorGetProfInfo

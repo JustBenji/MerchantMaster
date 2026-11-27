@@ -11,9 +11,9 @@ MerchantMaster reads your live Auction House scans inside World of Warcraft Fore
 Alongside market analysis, MerchantMaster docks five built-in helpers directly into the WoW windows you use every session:
 
 1. **Disenchant Helper:** Lists disenchantable green, blue, and epic gear in your bags, calculates expected material value (with an **Arcane Salvager +20%** toggle and optional AH cut), and lets you work through the queue with one secure **DISENCHANT** button plus **Skip**. Also mounts a quick-launch button directly onto Blizzard's Enchanting Professions and Craft windows.
-2. **Crafter Helper:** Drives your active craft order from start to finish. Resolves sub-crafts, tracks materials sitting in your bank, mailbox, or alts, separates vendor pickups from AH buys, and steps you through crafting the final items.
-3. **Mail Helper:** Docks onto Blizzard's mailbox for fast batch looting of AH sales, won buyouts, and gold while respecting full bags and skipping C.O.D. mail. On the Send Mail tab, it adds quick-pick **Preset Recipients** (`Bank`, `Auction`, `Main Crafter`, and profession alts, managed in **Console -> Mail** with WoW Forever surname support) and an unsaved-recipient confirmation popup before mailing items to an unlisted character (gold-only mail continues using Blizzard's built-in confirmation).
-4. **Sell Helper (`MM Sell` Tab):** Adds a dedicated **MM Sell** tab inside the Auction House with a categorized bag picker, live undercut presets (`Match`, `-1c`, `-1s`, `-1%`), duration toggles (`2h`, `8h`, `24h`), live competition rows, and a sequential posting queue.
+2. **Crafter Helper:** Drives your active craft order from start to finish. Resolves sub-crafts, tracks materials sitting in your bank, mailbox, or alts, batch-loots needed mats with **Collect All** / **Stop** at the Bank and Mailbox, separates vendor pickups from AH buys, and steps you through crafting the final items.
+3. **Mail Helper:** Uses a unified `280px` right-side dock alongside Blizzard's mailbox across **Inbox** and **Send Mail** (keeping Mailbox tabs unobstructed). Batch-loots AH sales, won buyouts, and gold while respecting full bags and skipping C.O.D. mail, adds quick-pick **Preset Recipients** (`Bank`, `Auction`, `Main Crafter`, and profession alts, managed in **Console -> Mail** with WoW Forever surname support), and prompts before mailing items to an unlisted character (gold-only mail continues using Blizzard's built-in confirmation).
+4. **Sell Helper (`MM Sell` Tab):** Adds a dedicated **MM Sell** tab inside the Auction House that auto-refreshes live prices on open and item load, pairs a 3-zone top panel (`Deposit`, `Total Price`, side-by-side `[Match] [-1c] [-1s] [-1%]` rule toggles, and `2h` / `8h` / `24h` durations) with a categorized bag picker, live competition rows, and a sequential posting queue.
 5. **Buy Auction House Helper:** Docks beside the Auction House when you send a Shopping List over. Steps through each needed item, compares live buyouts against your expected price and max-buy cap, and shows the provenance chain linking every material back to its sub-craft or turn-in goal.
 
 ---
@@ -105,7 +105,8 @@ Right-click any row or click **Deep Analysis >** in Quick Look for a full visual
 *   Dual `24h` and `7d` price and craft-cost trend charts (collapsing cleanly to a Vendor Floor / Live AH / 24h Deposit strip when fewer than 2 scans exist).
 *   3-bar **Profit Waterfall** (`Craft Cost`, `Net AH Sale`, `Net Profit`) for recipes and a Price Range track for standalone items.
 *   **Reagent Cost Share** percentage bars showing which material drives your cost, with click-to-drill-down and `< Return` history restoration.
-*   4-tier **Demand Heat** bar, **Personal Ledger** horizon bars, cross-alt stock chips (`Bags`, `Bank`, `Mail`, `AH`), a Watchlist star button in the header, and 7x24 heatmap timing when snapshots are enabled.
+*   Always-visible color-graded Hot/Cold sales heat strip right above the fold inside the **Competition** card: shows a `24h` hourly strip in Snapshot mode and a `Cold -> Hot` spectrum bar in Standalone or TSM mode.
+*   4-tier **Demand Heat** bar, **Personal Ledger** horizon bars (including non-double-counted indirect disenchant profit), cross-alt stock chips (`Bags`, `Bank`, `Mail`, `AH`), a Watchlist star button in the header, and 7x24 heatmap timing when snapshots are enabled.
 
 ### 9. All Items & Quick Views
 Browse and filter every cataloged crafting output, gathering material, cloth, recipe scroll, crate, writ, and vendor supply in one fast table.
@@ -140,26 +141,26 @@ Move from shopping straight into crafting without losing track of sub-crafts or 
 ![Crafter Helper](.previews/12-baron-crafter-helper.png)
 
 *   Guides multi-step orders through collect (`Bank`, `Mail`, `Alt`), vendor purchase, sub-craft, and final craft stages.
-*   Shows remaining quantities live as you withdraw materials and complete casts.
-*   Keeps every craft tied to its parent Shopping List destination so large multi-recipe batches stay organized.
+*   Includes a **Collect All** / **Stop** workflow to batch-loot needed crafting materials straight from your Bank and Mailbox.
+*   Shows remaining quantities live as you withdraw materials and complete casts, keeping every craft tied to its parent Shopping List destination.
 
 ### 13. Mail Helper & Preset Recipients
 Collect AH proceeds in batches and send mail between your characters without typos.
 
 ![Mail Helper and Preset Recipients](.previews/13-baron-mail-helper.png)
 
-*   Docks onto the Inbox to batch-loot AH sales, buyouts, and gold while skipping C.O.D. mail and pausing safely if bags fill up.
-*   Adds quick-pick **Preset Recipients** (`Bank`, `Auction`, `Main Crafter`, and profession roles) on the Send Mail tab, configured in **Console -> Mail** (`/mm mail`).
-*   Handles WoW Forever `First Surname` names cleanly and prompts for confirmation before mailing items to a character outside your saved presets (while gold-only mail keeps Blizzard's built-in confirmation).
+*   Uses a unified `280px` right-side dock alongside the Mailbox across both **Inbox** and **Send Mail** (removing any obstructed bar beneath Blizzard's Mail tabs).
+*   Batch-loots AH sales, buyouts, and gold on the **Inbox** tab while skipping C.O.D. mail and pausing safely if bags fill up.
+*   Widens **Mail Recipients** to `280px` with a strictly bounded `Saved:` pill, quick-pick **Preset Recipients** (`Bank`, `Auction`, `Main Crafter`, and profession roles, configured in **Console -> Mail** `/mm mail`), WoW Forever `First Surname` handling, and a confirmation prompt before mailing items to a character outside your saved presets (gold-only mail keeps Blizzard's built-in confirmation).
 
 ### 14. Sell Helper (`MM Sell` AH Tab)
 Post auctions from a spacious native tab built directly into the WoW Forever Auction House frame.
 
 ![Sell Helper MM Sell AH Tab](.previews/14-baron-sell-helper.png)
 
-*   Categorized bag grid for fast item selection alongside live competition rows and recent price history.
-*   One-click undercut presets (`Match`, `-1c`, `-1s`, `-1%`) and auction duration selectors (`2h`, `8h`, `24h`).
-*   Sequential posting queue integrated with MerchantMaster's ledger and inventory tracking.
+*   Automatically refreshes live AH prices whenever you open `MM Sell` or load an item, with guarded retry if the Auction House is throttled or busy.
+*   Arranges the top panel into 3 balanced zones with larger `Deposit` and `Total Price` readouts, side-by-side `[Match] [-1c] [-1s] [-1%]` undercut rule buttons, and auction duration toggles (`2h`, `8h`, `24h`).
+*   Pairs a categorized bag grid with live competition rows, recent price history, and a sequential posting queue tied to MerchantMaster's ledger and inventory tracking.
 
 ### 15. Buy Auction House Helper
 Work through a multi-item Shopping List at the Auction House without typing item names one by one.
@@ -184,7 +185,8 @@ Inspect addon storage, switch themes, configure Mail presets, generate redacted 
 
 ![Console and Snapshot Settings](.previews/17-baron-console-snapshots.png)
 
-*   **Snapshot Settings (`/mm snapshots`):** Side-by-side **Windows** (PowerShell) and **Linux / Steam Deck** (`install_linux.py`) / macOS setup cards, live database and WoW AddOn folder status when connected, and an optional **TSM Light Mode** switch for players who already run the TSM app and want hourly refreshed "recent" prices without local snapshot files (7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth stay exclusive to `MerchantMaster_Snapshots`).
+*   **Snapshot Settings (`/mm snapshots`):** Side-by-side **Windows** (PowerShell) and **Linux / Steam Deck** (`install_linux.py`) / macOS setup cards, live database and WoW AddOn folder status when connected, and an optional **TSM Light Mode** switch. Turning on **TSM Light Mode** writes hourly refreshed prices straight into MerchantMaster's tables with zero local snapshot files (7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth stay off unless `MerchantMaster_Snapshots` is installed), and requires both the **TradeSkillMaster** addon and the **TSM Desktop App** installed locally (see TSM's setup instructions).
+*   **Top Header Freshness Pill:** Displays the active market data source and age without clipping: `TSM <time>` (TSM Light Mode), `Snap <time>` (`MerchantMaster_Snapshots`), or `AH <time>` (manual in-game scan), with both Snapshot and Manual AH timestamps shown on hover.
 *   **Database (`/mm db`):** Inspects WoW SavedVariables alongside the dedicated **AH Snapshot Storage (On Disk)** card (`SQLite DB`, `WAL`, `SHM`, `Sync Log`, row counts, active DB path, and combined total).
 *   Reports clearly if `MerchantMaster_Snapshots` is installed on disk but unchecked in **Esc -> AddOns**, with a manual **Refresh** button to retry loading.
 
@@ -241,7 +243,7 @@ You can copy the exact command for your OS anytime inside WoW under **Console ->
     python3 -m pip install --upgrade https://github.com/JustBenji/MerchantMaster-Snapshots/archive/refs/heads/main.zip && python3 -m snapshot_builder setup-gui
     ```
 *   **Zero in-game folder config:** The helper writes the sibling `MerchantMaster_Snapshots` addon straight into `<WoW>/_forever_/Interface/AddOns`. Paste your API key, choose your server, click **Save & Sync**, and run `/reload` in WoW. Check active database paths and disk usage anytime under **Console -> Snapshot Settings** or **Console -> Database**.
-*   **Optional TSM Light Mode (Hourly Prices, No Local Storage):** MerchantMaster stays 100% standalone by default with zero third-party requirement. If you already run the TSM desktop app, you can flip on **TSM Light Mode** under **Console -> Snapshot Settings** (`/mm snapshots`) to pull hourly refreshed "recent" prices with zero local snapshot files; 7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth stay off unless `MerchantMaster_Snapshots` is installed.
+*   **Optional TSM Light Mode (Hourly Table Prices, Zero Local Files):** MerchantMaster stays 100% standalone by default with no third-party requirement. Flipping on **TSM Light Mode** under **Console -> Snapshot Settings** (`/mm snapshots`) writes hourly refreshed prices directly into MerchantMaster's tables with zero local snapshot files, while 7x24 heatmaps, 24h hourly curves, and 6-tier buyout depth stay off unless `MerchantMaster_Snapshots` is installed. Using TSM Light Mode requires both the **TradeSkillMaster** addon and the **TSM Desktop App** installed locally (follow TSM's setup instructions). In the top header, the freshness badge distinguishes your active feed at a glance: `TSM <time>` for TSM Light Mode, `Snap <time>` for `MerchantMaster_Snapshots`, and `AH <time>` for manual in-game AH scans (hovering shows both Snapshot and Manual AH timestamps).
 
 ---
 

@@ -1515,8 +1515,8 @@ do
 		"Spellbook launcher appears when Enchanting + Disenchant are learned")
 	check(stEnch.profBookBtn:GetWidth() == 30 and stEnch.profBookBtn:GetHeight() == 30,
 		"Spellbook launcher button is 30x30")
-	check(stEnch.profBookBtn:GetParent() == sbProf and stEnch.profBookBtn:GetAttribute("type") == nil,
-		"Spellbook launcher is a non-secure Button parented to SpellBookProfessionFrame")
+	check(stEnch.profBookBtn:GetParent() == p1Frame and stEnch.profBookBtn:GetAttribute("type") == nil,
+		"Spellbook launcher is a non-secure Button parented to PrimaryProfession1")
 
 	-- Verify ZERO overlap with spellString (483..569) and ZERO overhang past SpellBookProfessionFrame (200..700)
 	local ptAnchor, ptRel, ptRelAnchor, ptX = stEnch.profBookBtn:GetPoint(1)
@@ -1741,6 +1741,223 @@ do
 	local stFlushed = DH.GetState()
 	check(stFlushed.pendingButtonsRefresh == false and stFlushed.profBookShown == true and stFlushed.craftWinShown == true,
 		"PLAYER_REGEN_ENABLED flushes pendingButtonsRefresh and shows both launchers")
+
+	-- 8F. WoW Forever 16001 ProfessionsFrame.BookPage live /fstack hierarchy & FrameLevel fix
+	do
+		local origProfBookUpdate = _G.ProfessionsBookFrame_Update
+		local origEventRegistry = _G.EventRegistry
+		sbProf:Hide()
+		craftF:Hide()
+		tsF:Hide()
+		profF:Hide()
+
+		-- Mock EventRegistry supporting RegisterCallback / TriggerEvent
+		local erCallbacks = {}
+		_G.EventRegistry = {
+			RegisterCallback = function(_, eventName, fn, owner)
+				erCallbacks[eventName] = erCallbacks[eventName] or {}
+				erCallbacks[eventName][#erCallbacks[eventName] + 1] = { fn = fn, owner = owner }
+			end,
+			TriggerEvent = function(_, eventName, ...)
+				for _, rec in ipairs(erCallbacks[eventName] or {}) do
+					rec.fn(rec.owner, ...)
+				end
+			end,
+		}
+		_G.ProfessionsBookFrame_Update = function() end
+
+		-- Build exact Forever 16001 hierarchy:
+		-- ProfessionsFrame (1) -> BookPage (100) -> ProfessionsContentFrame (101)
+		--   -> PrimaryProfession1 (102) -> SpellButton1 ("Enchanting", 103) & SpellButton2 ("Disenchant", 103)
+		local fProf = makeWidget("Frame", "ProfessionsFrame", UIParent)
+		fProf:SetFrameLevel(1)
+		fProf.GetFrameStrata = function() return "HIGH" end
+		fProf.MaximizeMinimize = makeWidget("Button", "ForeverProfMaxMin", fProf)
+		fProf.MaximizeMinimize:SetFrameLevel(10)
+		setBoxX(fProf, 100, 680)
+		fProf:SetHeight(560)
+		fProf:Hide()
+
+		local bookPage = makeWidget("Frame", nil, fProf)
+		bookPage:SetFrameLevel(100)
+		bookPage.GetFrameStrata = function() return "HIGH" end
+		setBoxX(bookPage, 110, 660)
+		bookPage:SetHeight(500)
+		bookPage:Hide()
+		fProf.BookPage = bookPage
+
+		local contentFrame = makeWidget("Frame", nil, bookPage)
+		contentFrame:SetFrameLevel(101)
+		setBoxX(contentFrame, 120, 640)
+		contentFrame:SetHeight(480)
+		contentFrame:Show()
+		bookPage.ProfessionsContentFrame = contentFrame
+
+		local fp1 = makeWidget("Frame", nil, contentFrame)
+		fp1:SetFrameLevel(102)
+		setBoxX(fp1, 130, 620)
+		fp1:SetHeight(120)
+		fp1:Show()
+		fp1.professionName = fp1:CreateFontString(nil, "OVERLAY")
+		fp1.professionName:SetText("Enchanting")
+		contentFrame.PrimaryProfession1 = fp1
+
+		local sb1 = makeWidget("Button", nil, fp1)
+		sb1:SetFrameLevel(103)
+		setBoxX(sb1, 350, 37)
+		sb1:SetHeight(37)
+		sb1.GetID = function() return 1 end
+		sb1.spellID = 7411
+		sb1.spellString = sb1:CreateFontString(nil, "OVERLAY")
+		sb1.spellString:SetText("Enchanting")
+		setBoxX(sb1.spellString, 393, 76)
+		fp1.SpellButton1 = sb1
+
+		local sb2 = makeWidget("Button", nil, fp1)
+		sb2:SetFrameLevel(103)
+		setBoxX(sb2, 350, 37)
+		sb2:SetHeight(37)
+		sb2.GetID = function() return 2 end
+		sb2.spellID = 13262
+		sb2.spellString = sb2:CreateFontString(nil, "OVERLAY")
+		sb2.spellString:SetText("Disenchant")
+		setBoxX(sb2.spellString, 393, 84)
+		fp1.SpellButton2 = sb2
+
+		local fp2 = makeWidget("Frame", nil, contentFrame)
+		fp2:SetFrameLevel(102)
+		setBoxX(fp2, 130, 620)
+		fp2:SetHeight(120)
+		fp2:Show()
+		contentFrame.PrimaryProfession2 = fp2
+
+		local craftingPage = makeWidget("Frame", nil, fProf)
+		craftingPage:SetFrameLevel(100)
+		craftingPage:Hide()
+		fProf.CraftingPage = craftingPage
+
+		local fProfKeys = snapshotKeys(fProf)
+		local bookKeys = snapshotKeys(bookPage)
+		local contentKeys = snapshotKeys(contentFrame)
+		local fp1Keys = snapshotKeys(fp1)
+		local fp2Keys = snapshotKeys(fp2)
+
+		_G.ProfessionsFrame = fProf
+		mockBaseProf = { professionID = 333, professionName = "Enchanting" }
+
+		-- ADDON_LOADED ("Blizzard_Professions") + PLAYER_ENTERING_WORLD install BookPage & EventRegistry hooks
+		local evF = DH.GetState().eventFrame
+		evF:GetScript("OnEvent")(evF, "ADDON_LOADED", "Blizzard_Professions")
+		evF:GetScript("OnEvent")(evF, "PLAYER_ENTERING_WORLD")
+		check(erCallbacks["ProfessionsBookFrame.Show"] ~= nil and #erCallbacks["ProfessionsBookFrame.Show"] == 1
+			and erCallbacks["ProfessionsBookFrame.Hide"] ~= nil and #erCallbacks["ProfessionsBookFrame.Hide"] == 1,
+			"EventRegistry registers ProfessionsBookFrame.Show and ProfessionsBookFrame.Hide once cleanly")
+
+		-- Show ProfessionsFrame + BookPage (triggers hooked OnShow!)
+		fProf:Show()
+		bookPage:Show()
+
+		local stForever = DH.GetState()
+		local fBtn = stForever.profBookBtn
+		check(stForever.profBookShown == true and fBtn ~= nil,
+			"Forever 16001 ProfessionsFrame.BookPage shows Disenchant Helper launcher beside Disenchant")
+		check(fBtn:GetParent() == fp1 and fBtn:GetAttribute("type") == nil,
+			"Forever 16001 launcher is a non-secure Button parented to PrimaryProfession1")
+		check(fBtn:GetFrameLevel() >= 108,
+			"Forever 16001 launcher frameLevel (" .. tostring(fBtn:GetFrameLevel()) .. ") is >= 108 (above BookPage 100 / SpellButton2 103)")
+
+		-- Verify SetFrameStrata propagates BookPage strata
+		local capturedStrata = nil
+		local origSetStrata = fBtn.SetFrameStrata
+		fBtn.SetFrameStrata = function(self, s)
+			capturedStrata = s
+			if origSetStrata then return origSetStrata(self, s) end
+		end
+		_G.ProfessionsBookFrame_Update()
+		check(capturedStrata == "HIGH",
+			"Forever 16001 launcher propagates BookPage strata ('HIGH'), got " .. tostring(capturedStrata))
+		fBtn.SetFrameStrata = origSetStrata
+
+		-- Verify clean anchoring right of Disenchant (350+37=387, spellString 393..477, gap 8 -> left >= 485, inside fp1 130..750)
+		local fAnc, fRel, fRelAnc, fX = fBtn:GetPoint(1)
+		check(fAnc == "LEFT" and fRel == sb2 and fRelAnc == "RIGHT",
+			"Forever 16001 launcher anchors LEFT -> SpellButton2 RIGHT (got " .. tostring(fAnc) .. " -> " .. tostring(fRelAnc) .. ")")
+		local fRenderedL = sb2:GetRight() + (fX or 0)
+		local fRenderedR = fRenderedL + fBtn:GetWidth()
+		check(fRenderedL >= sb2.spellString:GetRight() + 8 and fRenderedR <= fp1:GetRight() - 8,
+			string.format("Forever 16001 launcher clears Disenchant label (left=%d >= %d) and fits inside PrimaryProfession1 (right=%d <= %d)",
+				fRenderedL, sb2.spellString:GetRight() + 8, fRenderedR, fp1:GetRight() - 8))
+
+		-- CRITICAL: While BookPage is visible, Craft-window titlebar button on ProfessionsFrame MUST stay hidden!
+		check(stForever.craftWinShown == false,
+			"ProfessionsFrame Craft titlebar button stays hidden while BookPage overview is visible")
+
+		-- Zero injected fields on Blizzard frames
+		checkNoNewKeys(fProf, fProfKeys, "Forever ProfessionsFrame")
+		checkNoNewKeys(bookPage, bookKeys, "Forever ProfessionsFrame.BookPage")
+		checkNoNewKeys(contentFrame, contentKeys, "Forever ProfessionsContentFrame")
+		checkNoNewKeys(fp1, fp1Keys, "Forever PrimaryProfession1")
+		checkNoNewKeys(fp2, fp2Keys, "Forever PrimaryProfession2")
+
+		-- Switch from BookPage to Enchanting CraftingPage: BookPage OnHide hides profBookBtn, CraftingPage shows titlebar btn
+		bookPage:Hide()
+		craftingPage:Show()
+		local stCraftPage = DH.GetState()
+		check(stCraftPage.profBookShown == false and stCraftPage.craftWinShown == true,
+			"Switching BookPage -> Enchanting CraftingPage hides BookPage icon and shows Craft titlebar icon")
+
+		-- Switch CraftingPage to non-Enchanting (Alchemy 171): both buttons hidden
+		mockBaseProf = { professionID = 171, professionName = "Alchemy" }
+		evF:GetScript("OnEvent")(evF, "TRADE_SKILL_DATA_SOURCE_CHANGED")
+		local stAlchPage = DH.GetState()
+		check(stAlchPage.profBookShown == false and stAlchPage.craftWinShown == false,
+			"Switching CraftingPage to Alchemy (171) hides both BookPage and Craft titlebar buttons")
+
+		-- Switch back to BookPage via OnShow & EventRegistry: profBookBtn returns at level >= 108, craftWin stays hidden
+		craftingPage:Hide()
+		bookPage:Show()
+		_G.EventRegistry:TriggerEvent("ProfessionsBookFrame.Show")
+		local stBackBook = DH.GetState()
+		check(stBackBook.profBookShown == true and stBackBook.profBookBtn:GetFrameLevel() >= 108 and stBackBook.craftWinShown == false,
+			"Returning to BookPage restores launcher at level >= 108 and keeps Craft titlebar button hidden")
+
+		-- Safe visible-slot fallback when GetProfessions() is unavailable/empty + secret spellString guard
+		local prevGetProfs = _G.GetProfessions
+		_G.GetProfessions = function() return nil, nil end
+		local prevSpellID = sb2.spellID
+		sb2.spellID = nil -- force label text detection
+		DH.RefreshProfessionButtons()
+		check(DH.GetState().profBookShown == true and DH.GetState().profBookBtn:GetFrameLevel() >= 108,
+			"Visible-slot fallback finds Disenchant via spellString when GetProfessions() returns nil")
+
+		-- Secret value on spellString:GetText() is safely ignored without throwing
+		_G.issecretvalue = function(v) return v == "SECRET_SPELL_TEXT" end
+		sb2.spellString:SetText("SECRET_SPELL_TEXT")
+		local prevGetSBInfo = _G.GetSpellBookItemInfo
+		_G.GetSpellBookItemInfo = nil
+		DH.RefreshProfessionButtons()
+		check(DH.GetState().profBookShown == false,
+			"Secret spellString text on BookPage button is safely guarded without error")
+		sb2.spellID = prevSpellID
+		sb2.spellString:SetText("Disenchant")
+		_G.GetSpellBookItemInfo = prevGetSBInfo
+		_G.GetProfessions = prevGetProfs
+		_G.issecretvalue = origIsSecretValue
+		DH.RefreshProfessionButtons()
+		check(DH.GetState().profBookShown == true,
+			"Launcher recovers cleanly after secret sentinel clears")
+
+		-- Closing ProfessionsFrame hides BookPage launcher even if BookPage._shown remains true
+		fProf:Hide()
+		check(bookPage:IsShown() == true and DH.GetState().profBookShown == false,
+			"Hiding ProfessionsFrame hides BookPage launcher even while BookPage._shown stays true")
+
+		bookPage:Hide()
+		craftingPage:Hide()
+		mockBaseProf = nil
+		_G.EventRegistry = origEventRegistry
+		_G.ProfessionsBookFrame_Update = origProfBookUpdate
+	end
 
 	-- Restore ALL local mocks & theme cleanly
 	sbProf:Hide()

@@ -1005,7 +1005,85 @@ do
         DA.Render({ kind = "recipe", row = flaskRow, recipe = flaskRow.recipe, itemID = 13512 }, false)
         check(DA.ledgerCard.horizonFrame:IsShown() and plain(DA.ledgerCard.bodyFs:GetText()) ~= "",
             "ledgerCard must gracefully guard nil inventory, nil saleRate, and nil isSlowing")
+
+        -- Indirect via Disenchant summary line on Personal Ledger card
+        ns.Analytics.Model.GetItemDetail = function()
+            return {
+                windows = { d7 = {}, d30 = {}, all = { sold = 0, bought = 12, profit = 0 } },
+                saleRate = 0,
+                isSlowing = false,
+                deBrokenQty = 12,
+                deSoldMatsQty = 11,
+                deIndirectProfit = 104000,
+                deSoldOutputs = { { itemID = 11178, name = "Large Radiant Shard", qty = 11, profit = 104000 } },
+                inventory = { bags = 0, bank = 0, mail = 0, ah = 0, total = 0 },
+            }
+        end
+        DA.Render({ kind = "item", itemID = 10504, name = "Green Lens" }, false)
+        local deLedgerTxt = plain(DA.ledgerCard.bodyFs:GetText())
+        check(deLedgerTxt:find("Indirect via Disenchant:", 1, true) ~= nil
+            and deLedgerTxt:find("DE'd 12x -> Sold mats", 1, true) ~= nil
+            and deLedgerTxt:find("10g 40s", 1, true) ~= nil,
+            "Personal Ledger card must render Indirect via Disenchant summary when deBrokenQty > 0 (got: " .. deLedgerTxt .. ")")
         ns.Analytics.Model.GetItemDetail = origGetItemDetail
+    end
+
+    -- 12g-2. compCard colored heatmap line in Standalone (spectrum) AND Snapshot (24h strip) modes, zero vertical overlap
+    do
+        local cc = DA.compCard
+        local hsf = cc and cc.heatStripFrame
+        check(hsf ~= nil and hsf:IsShown() and hsf.captionFs ~= nil,
+            "compCard must mount and show heatStripFrame above bodyFs")
+        local origGetHeatStrip = ns.Pricing and ns.Pricing.GetItemHeatStrip24h
+        local origGetHeatmap = ns.Pricing and ns.Pricing.GetItemHeatmap
+
+        -- Mode A: Standalone (no 24h snapshot curve) -> 12-segment colored spectrum bar + active heat marker
+        if ns.Pricing then
+            ns.Pricing.GetItemHeatStrip24h = function() return nil end
+            ns.Pricing.GetItemHeatmap = function() return nil end
+        end
+        DA.Render({ kind = "item", itemID = 10504, name = "Green Lens" }, false)
+        DA.Layout(1320, 730)
+        check(hsf._mode == "spectrum" and hsf.spectrumBar:IsShown() and #(hsf.spectrumSegs or {}) == 12
+            and hsf.spectrumMarker ~= nil and hsf.spectrumMarker:IsShown(),
+            "Standalone mode must render 12-segment colored Hot/Cold spectrum bar with active marker")
+        check(plain(hsf.captionFs:GetText()):find("Sales Heat", 1, true) ~= nil,
+            "Standalone mode caption must label Sales Heat (got: " .. plain(hsf.captionFs:GetText()) .. ")")
+        check(not (hsf.strip24h and hsf.strip24h.frame and hsf.strip24h.frame:IsShown()),
+            "Standalone mode must hide 24h snapshot strip")
+        local function pointY(f)
+            local pt = f and f._points and f._points[1]
+            return tonumber(pt and (pt[5] or pt.y)) or 0
+        end
+        local hsfY = pointY(hsf)
+        local bodyY = pointY(cc.bodyFs)
+        check(hsfY < 0 and math.abs(bodyY) >= math.abs(hsfY) + hsf:GetHeight(),
+            "compCard.bodyFs must sit cleanly below heatStripFrame with zero vertical overlap (hsfY=" .. tostring(hsfY) .. ", hsfH=" .. tostring(hsf:GetHeight()) .. ", bodyY=" .. tostring(bodyY) .. ")")
+        local compTop = pointY(cc)
+        local ledTop = pointY(DA.ledgerCard)
+        check(math.abs(ledTop) >= math.abs(compTop) + cc:GetHeight(),
+            "ledgerCard must sit cleanly below compCard after adding heatStripFrame (zero overlap)")
+
+        -- Mode B: Snapshot mode (24h hourly curve present) -> real 24h colored CreateHeatStrip24h bar
+        if ns.Pricing then
+            local hourly = {}
+            for hr = 0, 23 do hourly[hr] = { avgPrice = 10000 + hr * 400 } end
+            ns.Pricing.GetItemHeatStrip24h = function()
+                return { hourly = hourly, avgPrice = 14600, medianPrice = 14600, updatedAt = _G.time() }
+            end
+        end
+        DA.Render({ kind = "item", itemID = 10504, name = "Green Lens" }, false)
+        DA.Layout(1320, 730)
+        check(hsf._mode == "snapshot" and hsf.strip24h ~= nil and hsf.strip24h.frame:IsShown()
+            and not hsf.spectrumBar:IsShown(),
+            "Snapshot mode must render real 24h colored CreateHeatStrip24h bar and hide standalone spectrum")
+        check(plain(hsf.captionFs:GetText()):find("24h Heatmap", 1, true) ~= nil,
+            "Snapshot mode caption must label 24h Heatmap (got: " .. plain(hsf.captionFs:GetText()) .. ")")
+
+        if ns.Pricing then
+            ns.Pricing.GetItemHeatStrip24h = origGetHeatStrip
+            ns.Pricing.GetItemHeatmap = origGetHeatmap
+        end
     end
 
     -- acqCard pills shown for recipe

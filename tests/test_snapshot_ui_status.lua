@@ -192,14 +192,14 @@ do
 	check(ui.statusSyncFs:GetText() == "AH just now",
 		"Default OFF with 20s Live AH scan should show 'AH just now', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
 
-	-- 5m Blizzard snapshot beats 20m Live AH -> "Blizz 5m"
+	-- 5m Blizzard snapshot beats 20m Live AH -> "Snap 5m"
 	resetState(false)
 	loadMeta("Normal-Horde", nowTs - 300, "blizzard", 3661, 1240, 30)
 	db.ahPrices["Normal-Horde"] = { _scannedAt = nowTs - 1200 }
 	db.lastRefreshAt = nowTs - 1200
 	app.refresh()
-	check(ui.statusSyncFs:GetText() == "Blizz 5m",
-		"Default OFF: 5m Blizzard snapshot must beat 20m Live AH ('Blizz 5m'), got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
+	check(ui.statusSyncFs:GetText() == "Snap 5m",
+		"Default OFF: 5m Blizzard snapshot must beat 20m Live AH ('Snap 5m'), got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
 
 	-- 2m Live AH beats 12m Blizzard snapshot -> "AH 2m"
 	resetState(false)
@@ -210,32 +210,32 @@ do
 	check(ui.statusSyncFs:GetText() == "AH 2m",
 		"Default OFF: 2m Live AH must beat 12m Blizzard snapshot ('AH 2m'), got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
 
-	-- 8h Blizzard snapshot with no Live AH (no 90m cutoff, ignores tsmLastUpdate) -> "Blizz 8h"
+	-- 8h Blizzard snapshot with no Live AH (no 90m cutoff, ignores tsmLastUpdate) -> "Snap 8h"
 	resetState(false)
 	db.tsmLastUpdate = nowTs - 600
 	loadMeta("Normal-Horde", nowTs - 28800, "blizzard", 3661, 1240, 30)
 	app.refresh()
-	check(ui.statusSyncFs:GetText() == "Blizz 8h",
-		"Default OFF: 8h Blizzard snapshot must show 'Blizz 8h' (no 90m cutoff), got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
+	check(ui.statusSyncFs:GetText() == "Snap 8h",
+		"Default OFF: 8h Blizzard snapshot must show 'Snap 8h' (no 90m cutoff), got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
 
 	-- Legacy db.priceSource = "tsm_min" is automatically normalized to "auto" (SavedVariables migration)
 	resetState(false)
 	db.priceSource = "tsm_min"
 	loadMeta("Normal-Horde", nowTs - 300, "blizzard", 3661, 1240, 30)
 	app.refresh()
-	check(ui.statusSyncFs:GetText() == "Blizz 5m",
-		"Standalone: migrated tsm_min must behave as Auto ('Blizz 5m'), got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
+	check(ui.statusSyncFs:GetText() == "Snap 5m",
+		"Standalone: migrated tsm_min must behave as Auto ('Snap 5m'), got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
 	check(db.priceSource == "auto", "SavedVariables migration normalizes legacy db.priceSource='tsm_min' -> 'auto'")
 	check(ui.sourceBtn:GetText() == "Src: Auto",
 		"Standalone: sourceBtn must show 'Src: Auto' after migrating tsm_min, got '" .. tostring(ui.sourceBtn:GetText()) .. "'")
 
-	-- Explicit priceSource="snapshot" -> Blizz even when > 90m old (e.g. 2h)
+	-- Explicit priceSource="snapshot" -> Snap even when > 90m old (e.g. 2h)
 	resetState(false)
 	db.priceSource = "snapshot"
 	loadMeta("Normal-Horde", nowTs - 7200, "blizzard", 3661, 1240, 30)
 	app.refresh()
-	check(ui.statusSyncFs:GetText() == "Blizz 2h",
-		"Explicit snapshot mode (2h blizzard) should show 'Blizz 2h', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
+	check(ui.statusSyncFs:GetText() == "Snap 2h",
+		"Explicit snapshot mode (2h blizzard) should show 'Snap 2h', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
 
 	-- Explicit priceSource="snapshot" with no snapshot loaded -> non-destructive fallback to 'auto' ('No AH Scan Yet')
 	resetState(false)
@@ -244,14 +244,14 @@ do
 	check(ui.statusSyncFs:GetText() == "No AH Scan Yet" and db.priceSource == "snapshot" and ns.GetEffectivePriceSource() == "auto",
 		"Explicit snapshot mode without loaded snapshot falls back non-destructively to 'No AH Scan Yet', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
 
-	-- Auto + fresh Blizzard snapshot (12m) -> "Blizz 12m" + green status dot
+	-- Auto + fresh Blizzard snapshot (12m) -> "Snap 12m" + green status dot
 	resetState(false)
 	loadMeta("Normal-Horde", nowTs - 720, "blizzard", 3661, 1240, 30)
 	app.refresh()
-	check(ui.statusSyncFs:GetText() == "Blizz 12m",
-		"Auto + fresh Blizzard snapshot should show 'Blizz 12m', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
-	check(ui.statusServerFs:GetText():find("Blizz 12m", 1, true) ~= nil,
-		"statusServerFs should include 'Blizz 12m', got '" .. tostring(ui.statusServerFs:GetText()) .. "'")
+	check(ui.statusSyncFs:GetText() == "Snap 12m",
+		"Auto + fresh Blizzard snapshot should show 'Snap 12m', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
+	check(ui.statusServerFs:GetText():find("Snap 12m", 1, true) ~= nil,
+		"statusServerFs should include 'Snap 12m', got '" .. tostring(ui.statusServerFs:GetText()) .. "'")
 	check(near(ui.statusDot._vertexColor, Theme.GetActivePalette().accentGreen),
 		"Status dot should tint green when fresh Blizzard snapshot is active")
 end

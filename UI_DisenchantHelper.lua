@@ -50,6 +50,16 @@ local state = {
 }
 local hookedGlobals = {}
 local hookedFrames = {}
+local registeredEventRegistry = {}
+local EVENT_REGISTRY_OWNER = {}
+local PANEL_BUTTON_KEYS = {
+	"SpellButton1",
+	"SpellButton2",
+	"SpellButtonTop",
+	"SpellButtonBottom",
+	"button1",
+	"button2",
+}
 
 local function pal()
 	local T = ns.Theme
@@ -988,6 +998,9 @@ local function isProfBookVisible(profFrame)
 	if profFrame == _G.SpellBookProfessionFrame and _G.SpellBookFrame then
 		if not isFrameVisible(_G.SpellBookFrame) then return false end
 	end
+	if _G.ProfessionsFrame and profFrame == _G.ProfessionsFrame.BookPage then
+		if not isFrameVisible(_G.ProfessionsFrame) then return false end
+	end
 	return true
 end
 
@@ -1123,6 +1136,27 @@ local function createLauncherButton(parent, size)
 	return btn
 end
 
+local function safeFrameLevel(fr)
+	if not fr or type(fr.GetFrameLevel) ~= "function" then return 0 end
+	local lvl = fr:GetFrameLevel()
+	if hasSecret(lvl) or type(lvl) ~= "number" then return 0 end
+	return lvl
+end
+
+local function getButtonLabelText(btn)
+	if not btn then return nil end
+	local labelFs = btn.spellString
+		or btn.SpellName
+		or (type(btn.GetName) == "function" and btn:GetName() and _G[btn:GetName() .. "SpellName"])
+	if labelFs and type(labelFs.GetText) == "function" then
+		local ok, txt = pcall(labelFs.GetText, labelFs)
+		if ok and not hasSecret(txt) and type(txt) == "string" and txt ~= "" then
+			return txt
+		end
+	end
+	return nil
+end
+
 local function isDisenchantSpellButton(btn, spellOffset, numAbilities, slotHint)
 	if not btn then return false end
 	local deName = getDisenchantSpellName()
@@ -1130,6 +1164,12 @@ local function isDisenchantSpellButton(btn, spellOffset, numAbilities, slotHint)
 
 	if btn.spellID ~= nil and not hasSecret(btn.spellID) then
 		if btn.spellID == DISENCHANT_SPELL_ID then return true end
+	end
+	if type(btn.GetSpellID) == "function" then
+		local okId, sid = pcall(btn.GetSpellID, btn)
+		if okId and not hasSecret(sid) and sid == DISENCHANT_SPELL_ID then
+			return true
+		end
 	end
 
 	local slot = nil
@@ -1187,55 +1227,97 @@ local function isDisenchantSpellButton(btn, spellOffset, numAbilities, slotHint)
 		end
 	end
 
-	local labelFs = btn.spellString
-		or (type(btn.GetName) == "function" and btn:GetName() and _G[btn:GetName() .. "SpellName"])
-	if labelFs and type(labelFs.GetText) == "function" then
-		local txt = labelFs:GetText()
-		if not hasSecret(txt) and type(txt) == "string" and txt ~= "" then
-			local tl = txt:lower()
-			if tl == "disenchant" or tl == deLow then return true end
-		end
+	local txt = getButtonLabelText(btn)
+	if txt then
+		local tl = txt:lower()
+		if tl == "disenchant" or tl == deLow then return true end
 	end
 
 	return false
 end
 
+local function resolvePrimaryPanel(profBookFrame, content, panelName)
+	return (content and content[panelName]) or profBookFrame[panelName] or _G[panelName]
+end
+
+local function findDisenchantButtonInPanel(profPanel, panelName, spellOffset, numAbilities)
+	if not (profPanel and isFrameVisible(profPanel)) then return nil end
+	local rawCandidates = {
+		{ btn = profPanel.SpellButton1, hint = 1 },
+		{ btn = profPanel.SpellButton2, hint = 2 },
+		{ btn = profPanel.SpellButtonTop, hint = 1 },
+		{ btn = profPanel.SpellButtonBottom, hint = 2 },
+		{ btn = profPanel.button1, hint = 1 },
+		{ btn = profPanel.button2, hint = 2 },
+		{ btn = _G[panelName .. "SpellButton1"], hint = 1 },
+		{ btn = _G[panelName .. "SpellButton2"], hint = 2 },
+		{ btn = _G[panelName .. "SpellButtonTop"], hint = 1 },
+		{ btn = _G[panelName .. "SpellButtonBottom"], hint = 2 },
+	}
+	local seen = {}
+	for _, entry in ipairs(rawCandidates) do
+		local b = entry.btn
+		if b and not seen[b] then
+			seen[b] = true
+			if isFrameVisible(b) and isDisenchantSpellButton(b, spellOffset, numAbilities, entry.hint) then
+				return b
+			end
+		end
+	end
+	return nil
+end
+
+local function isPanelEnchanting(profPanel, panelName)
+	if not profPanel then return false end
+	local nameFs = profPanel.professionName
+		or profPanel.ProfessionName
+		or (panelName and _G[panelName .. "ProfessionName"])
+	if nameFs and type(nameFs.GetText) == "function" then
+		local ok, txt = pcall(nameFs.GetText, nameFs)
+		if ok and isEnchantingName(txt) then
+			return true
+		end
+	end
+	for _, key in ipairs(PANEL_BUTTON_KEYS) do
+		local b = profPanel[key]
+		if b and isFrameVisible(b) then
+			if b.spellID ~= nil and not hasSecret(b.spellID) and b.spellID == ENCHANTING_SPELL_ID then
+				return true
+			end
+			if isEnchantingName(getButtonLabelText(b)) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local function findEnchantingDisenchantButton(profBookFrame)
 	if not isProfBookVisible(profBookFrame) then return nil, nil end
-	if type(_G.GetProfessions) ~= "function" or type(_G.GetProfessionInfo) ~= "function" then
+	local content = profBookFrame.ProfessionsContentFrame or profBookFrame
+	if content ~= profBookFrame and not isFrameVisible(content) then
 		return nil, nil
 	end
-	local okP, p1, p2 = pcall(_G.GetProfessions)
-	if not okP or hasSecret(p1, p2) then return nil, nil end
 
-	local primaryIndices = { p1, p2 }
-	for slotIdx = 1, 2 do
-		local profIdx = primaryIndices[slotIdx]
-		if type(profIdx) == "number" and profIdx > 0 then
-			local okI, name, _, _, _, numAbilities, spellOffset, skillLine = pcall(_G.GetProfessionInfo, profIdx)
-			if okI and not hasSecret(name, numAbilities, spellOffset, skillLine) then
-				if skillLine == ENCHANTING_SKILL_LINE or isEnchantingName(name) then
-					local panelName = "PrimaryProfession" .. slotIdx
-					local profPanel = profBookFrame[panelName] or _G[panelName]
-					if profPanel and isFrameVisible(profPanel) then
-						local rawCandidates = {
-							{ btn = profPanel.SpellButtonTop, hint = 1 },
-							{ btn = profPanel.SpellButtonBottom, hint = 2 },
-							{ btn = profPanel.button1, hint = 1 },
-							{ btn = profPanel.button2, hint = 2 },
-							{ btn = profPanel.SpellButton1, hint = 1 },
-							{ btn = profPanel.SpellButton2, hint = 2 },
-							{ btn = _G[panelName .. "SpellButtonTop"], hint = 1 },
-							{ btn = _G[panelName .. "SpellButtonBottom"], hint = 2 },
-						}
-						local seen = {}
-						for _, entry in ipairs(rawCandidates) do
-							local b = entry.btn
-							if b and not seen[b] then
-								seen[b] = true
-								if isFrameVisible(b) and isDisenchantSpellButton(b, spellOffset, numAbilities, entry.hint) then
-									return b, profPanel
-								end
+	local profApiResolved = false
+	local knowsEnchanting = false
+	if type(_G.GetProfessions) == "function" and type(_G.GetProfessionInfo) == "function" then
+		local okP, p1, p2 = pcall(_G.GetProfessions)
+		if okP and not hasSecret(p1, p2) then
+			local primaryIndices = { p1, p2 }
+			for slotIdx = 1, 2 do
+				local profIdx = primaryIndices[slotIdx]
+				if type(profIdx) == "number" and profIdx > 0 then
+					local okI, name, _, _, _, numAbilities, spellOffset, skillLine = pcall(_G.GetProfessionInfo, profIdx)
+					if okI and not hasSecret(name, numAbilities, spellOffset, skillLine) then
+						profApiResolved = true
+						if skillLine == ENCHANTING_SKILL_LINE or isEnchantingName(name) then
+							knowsEnchanting = true
+							local panelName = "PrimaryProfession" .. slotIdx
+							local profPanel = resolvePrimaryPanel(profBookFrame, content, panelName)
+							local found = findDisenchantButtonInPanel(profPanel, panelName, spellOffset, numAbilities)
+							if found then
+								return found, profPanel
 							end
 						end
 					end
@@ -1243,6 +1325,22 @@ local function findEnchantingDisenchantButton(profBookFrame)
 			end
 		end
 	end
+
+	if profApiResolved and not knowsEnchanting then
+		return nil, nil
+	end
+
+	for slotIdx = 1, 2 do
+		local panelName = "PrimaryProfession" .. slotIdx
+		local profPanel = resolvePrimaryPanel(profBookFrame, content, panelName)
+		if profPanel and isFrameVisible(profPanel) then
+			local found = findDisenchantButtonInPanel(profPanel, panelName, nil, nil)
+			if found and (knowsEnchanting or isPanelEnchanting(profPanel, panelName) or isDisenchantSpellButton(found, nil, nil, nil)) then
+				return found, profPanel
+			end
+		end
+	end
+
 	return nil, nil
 end
 
@@ -1265,6 +1363,7 @@ local function anchorProfBookButton(btn, profBookFrame, profPanel, spellBtn)
 	local gap = 8
 	local edgePad = 8
 	local labelFs = spellBtn.spellString
+		or spellBtn.SpellName
 		or (type(spellBtn.GetName) == "function" and spellBtn:GetName() and _G[spellBtn:GetName() .. "SpellName"])
 
 	local btnL, btnR = getFrameBoundsX(spellBtn)
@@ -1310,8 +1409,23 @@ local function anchorProfBookButton(btn, profBookFrame, profPanel, spellBtn)
 			btn:SetPoint("LEFT", spellBtn, "RIGHT", gap, 0)
 		end
 	end
-	if btn.SetFrameLevel and profBookFrame.GetFrameLevel then
-		btn:SetFrameLevel((profBookFrame:GetFrameLevel() or 1) + 5)
+
+	if btn.SetFrameStrata then
+		local strata = (profBookFrame and profBookFrame.GetFrameStrata and profBookFrame:GetFrameStrata())
+			or (profPanel and profPanel.GetFrameStrata and profPanel:GetFrameStrata())
+			or "MEDIUM"
+		if hasSecret(strata) or type(strata) ~= "string" or strata == "" then
+			strata = "MEDIUM"
+		end
+		btn:SetFrameStrata(strata)
+	end
+	if btn.SetFrameLevel then
+		local targetLevel = math.max(
+			safeFrameLevel(spellBtn),
+			safeFrameLevel(profPanel),
+			safeFrameLevel(profBookFrame)
+		) + 5
+		btn:SetFrameLevel(targetLevel)
 	end
 end
 
@@ -1377,8 +1491,19 @@ local function refreshProfBookButton()
 	local activeBook = nil
 	local spellBtn = nil
 	local profPanel = nil
-	for _, fr in ipairs({ _G.SpellBookProfessionFrame, _G.ProfessionsBookFrame }) do
-		if fr and isProfBookVisible(fr) then
+	local bookCandidates = {}
+	if _G.ProfessionsFrame and _G.ProfessionsFrame.BookPage then
+		bookCandidates[#bookCandidates + 1] = _G.ProfessionsFrame.BookPage
+	end
+	if _G.SpellBookProfessionFrame then
+		bookCandidates[#bookCandidates + 1] = _G.SpellBookProfessionFrame
+	end
+	if _G.ProfessionsBookFrame then
+		bookCandidates[#bookCandidates + 1] = _G.ProfessionsBookFrame
+	end
+
+	for _, fr in ipairs(bookCandidates) do
+		if isProfBookVisible(fr) then
 			local foundBtn, foundPanel = findEnchantingDisenchantButton(fr)
 			if foundBtn then
 				activeBook = fr
@@ -1394,16 +1519,18 @@ local function refreshProfBookButton()
 		return false
 	end
 
+	local targetParent = profPanel or activeBook
 	for owner, b in pairs(state.profBookBtns) do
-		if owner ~= activeBook and b and b.Hide then
+		if owner ~= targetParent and b and b.Hide then
 			b:Hide()
 		end
 	end
 
-	local btn = state.profBookBtns[activeBook]
-	if not btn or (btn.GetParent and btn:GetParent() ~= activeBook) then
-		btn = createLauncherButton(activeBook, PROF_BTN_SIZE)
-		state.profBookBtns[activeBook] = btn
+	local btn = state.profBookBtns[targetParent]
+	if not btn or (btn.GetParent and btn:GetParent() ~= targetParent) then
+		if btn and btn.Hide then btn:Hide() end
+		btn = createLauncherButton(targetParent, PROF_BTN_SIZE)
+		state.profBookBtns[targetParent] = btn
 	end
 	state.profBookBtn = btn
 	anchorProfBookButton(btn, activeBook, profPanel, spellBtn)
@@ -1417,7 +1544,8 @@ local function refreshCraftWindowButtons()
 	for _, frameName in ipairs(CRAFT_FRAME_NAMES) do
 		local frame = _G[frameName]
 		local btn = state.craftWinBtns[frameName]
-		if frame and isFrameVisible(frame) and isCraftWindowEnchanting(frameName) then
+		local bookPageShown = (frameName == "ProfessionsFrame" and frame and frame.BookPage and isFrameVisible(frame.BookPage)) and true or false
+		if frame and isFrameVisible(frame) and not bookPageShown and isCraftWindowEnchanting(frameName) then
 			if not btn or (btn.GetParent and btn:GetParent() ~= frame) then
 				if btn and btn.Hide then btn:Hide() end
 				btn = createLauncherButton(frame, CRAFT_BTN_SIZE)
@@ -1430,8 +1558,18 @@ local function refreshCraftWindowButtons()
 			else
 				btn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -34, -4)
 			end
-			if btn.SetFrameLevel and frame.GetFrameLevel then
-				btn:SetFrameLevel((frame:GetFrameLevel() or 1) + 5)
+			if btn.SetFrameStrata and frame.GetFrameStrata then
+				local strata = frame:GetFrameStrata()
+				if not hasSecret(strata) and type(strata) == "string" and strata ~= "" then
+					btn:SetFrameStrata(strata)
+				end
+			end
+			if btn.SetFrameLevel then
+				local baseLvl = safeFrameLevel(frame)
+				if anchor then
+					baseLvl = math.max(baseLvl, safeFrameLevel(anchor))
+				end
+				btn:SetFrameLevel(baseLvl + 5)
 			end
 			paintLauncherButton(btn)
 			btn:Show()
@@ -1467,22 +1605,46 @@ local function hookFrameOnce(frame, onShowFn, onHideFn)
 	if onHideFn then frame:HookScript("OnHide", onHideFn) end
 end
 
-local function installBlizzardHooks()
-	local function onBlizzUpdate()
-		DisenchantHelper.RefreshProfessionButtons()
+local function hookBookPageOnce(bookPage, onShowFn, onHideFn)
+	if not bookPage then return end
+	hookFrameOnce(bookPage, onShowFn, onHideFn)
+end
+
+local function hookEventRegistryOnce(eventName, callback)
+	local reg = _G.EventRegistry
+	if type(reg) ~= "table" or type(reg.RegisterCallback) ~= "function" then return end
+	if registeredEventRegistry[reg] and registeredEventRegistry[reg][eventName] then return end
+	local ok = pcall(reg.RegisterCallback, reg, eventName, callback, EVENT_REGISTRY_OWNER)
+	if ok then
+		registeredEventRegistry[reg] = registeredEventRegistry[reg] or {}
+		registeredEventRegistry[reg][eventName] = true
 	end
+end
 
-	hookGlobalOnce("SpellBook_UpdateProfessions", onBlizzUpdate)
-	hookGlobalOnce("SpellBookFrame_Update", onBlizzUpdate)
-	hookGlobalOnce("CraftFrame_Update", onBlizzUpdate)
-	hookGlobalOnce("TradeSkillFrame_Update", onBlizzUpdate)
+local function onBlizzProfessionUpdate()
+	DisenchantHelper.RefreshProfessionButtons()
+end
 
-	hookFrameOnce(_G.SpellBookProfessionFrame, onBlizzUpdate, onBlizzUpdate)
-	hookFrameOnce(_G.ProfessionsBookFrame, onBlizzUpdate, onBlizzUpdate)
-	hookFrameOnce(_G.SpellBookFrame, onBlizzUpdate, onBlizzUpdate)
-	hookFrameOnce(_G.CraftFrame, onBlizzUpdate, onBlizzUpdate)
-	hookFrameOnce(_G.TradeSkillFrame, onBlizzUpdate, onBlizzUpdate)
-	hookFrameOnce(_G.ProfessionsFrame, onBlizzUpdate, onBlizzUpdate)
+local function installBlizzardHooks()
+	hookGlobalOnce("ProfessionsBookFrame_Update", onBlizzProfessionUpdate)
+	hookGlobalOnce("SpellBook_UpdateProfessions", onBlizzProfessionUpdate)
+	hookGlobalOnce("SpellBookFrame_Update", onBlizzProfessionUpdate)
+	hookGlobalOnce("CraftFrame_Update", onBlizzProfessionUpdate)
+	hookGlobalOnce("TradeSkillFrame_Update", onBlizzProfessionUpdate)
+
+	hookEventRegistryOnce("ProfessionsBookFrame.Show", onBlizzProfessionUpdate)
+	hookEventRegistryOnce("ProfessionsBookFrame.Hide", onBlizzProfessionUpdate)
+
+	hookFrameOnce(_G.SpellBookProfessionFrame, onBlizzProfessionUpdate, onBlizzProfessionUpdate)
+	hookFrameOnce(_G.ProfessionsBookFrame, onBlizzProfessionUpdate, onBlizzProfessionUpdate)
+	hookFrameOnce(_G.SpellBookFrame, onBlizzProfessionUpdate, onBlizzProfessionUpdate)
+	hookFrameOnce(_G.CraftFrame, onBlizzProfessionUpdate, onBlizzProfessionUpdate)
+	hookFrameOnce(_G.TradeSkillFrame, onBlizzProfessionUpdate, onBlizzProfessionUpdate)
+	hookFrameOnce(_G.ProfessionsFrame, onBlizzProfessionUpdate, onBlizzProfessionUpdate)
+	if _G.ProfessionsFrame then
+		hookBookPageOnce(_G.ProfessionsFrame.BookPage, onBlizzProfessionUpdate, onBlizzProfessionUpdate)
+		hookFrameOnce(_G.ProfessionsFrame.CraftingPage, onBlizzProfessionUpdate, onBlizzProfessionUpdate)
+	end
 end
 
 function DisenchantHelper.RefreshProfessionButtons()
@@ -1499,7 +1661,10 @@ end
 
 local function handleIntegrationEvent(_, event, arg1)
 	if event == "ADDON_LOADED" then
-		if not hasSecret(arg1) and WATCHED_ADDONS[arg1] then
+		if (not hasSecret(arg1) and WATCHED_ADDONS[arg1])
+			or (_G.ProfessionsFrame and not hookedFrames[_G.ProfessionsFrame])
+			or (_G.ProfessionsFrame and _G.ProfessionsFrame.BookPage and not hookedFrames[_G.ProfessionsFrame.BookPage])
+			or (_G.ProfessionsBookFrame and not hookedFrames[_G.ProfessionsBookFrame]) then
 			DisenchantHelper.RefreshProfessionButtons()
 		end
 		return
@@ -1526,6 +1691,7 @@ do
 	local ev = CreateFrame("Frame")
 	for _, evName in ipairs({
 		"PLAYER_LOGIN",
+		"PLAYER_ENTERING_WORLD",
 		"ADDON_LOADED",
 		"SPELLS_CHANGED",
 		"SKILL_LINES_CHANGED",

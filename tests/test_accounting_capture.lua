@@ -1095,5 +1095,86 @@ do
     _G.GetMoney = oldGetMoney
     ns.Store.Init()
 end
+
+-- Disenchant capture: proportional cost carryover, remainder copper split, and 0-cost looted BoE
+do
+    local oldLedger = _G.MerchantMasterLedgerDB
+    local oldContainer = _G.C_Container
+    local oldGetItemCount = _G.GetItemCount
+    local oldMarketPrice = host.GetItemMarketPrice
+    local oldItemName = ns.Model.ItemName
+    _G.MerchantMasterLedgerDB = { schema = 1, stats = { chars = {} } }
+    ns.Store.Init()
+    local char, econ = ns.Store.CurrentCharAndEcon()
+    local bagState = { [8101] = 1, [8102] = 0, [8103] = 1, [8104] = 0, [8105] = 0, [8106] = 0, [8107] = 1, [8108] = 0 }
+    local slotOrder = { 8101, 8102, 8103, 8104, 8105, 8106, 8107, 8108 }
+    local prices = { [8102] = 20000, [8104] = 1000, [8105] = 1000, [8106] = 1000, [8108] = 20000 }
+    local names = { [8101] = "Green Lens", [8102] = "Large Radiant Shard", [8103] = "Arcane Robe", [8107] = "Looted Belt" }
+    host.GetItemMarketPrice = function(id) return prices[id] or 0 end
+    ns.Model.ItemName = function(id) return names[id] or ("Item " .. tostring(id)) end
+    _G.C_Container = {
+        GetContainerNumSlots = function(bag) return bag == 0 and #slotOrder or 0 end,
+        GetContainerItemInfo = function(bag, slot)
+            if bag ~= 0 then return nil end
+            local id = slotOrder[slot]
+            local n = id and bagState[id] or 0
+            if n > 0 then return { itemID = id, stackCount = n } end
+        end,
+    }
+    _G.GetItemCount = function(id) return bagState[id] or 0 end
+
+    -- Case 1: 1g Green Lens -> 2g Large Radiant Shard carries over exact 1g basis (NOT 2g marketValue)
+    ns.Store.AddBasis(econ, 8101, 1, 10000)
+    ns.Capture.OnEvent(nil, "UNIT_SPELLCAST_SUCCEEDED", "player", "de1", 13262)
+    bagState[8101] = 0; bagState[8102] = 1
+    ns.Capture.OnEvent(nil, "BAG_UPDATE_DELAYED")
+    local rows = ns.Store.db.days[ns.Store.DayKey()].r
+    local b1, r1
+    for _, r in ipairs(rows) do
+        if r.type == "DISENCHANT_BROKEN" and r.itemID == 8101 then b1 = r
+        elseif r.type == "DISENCHANT_RECEIVE" and r.itemID == 8102 then r1 = r end
+    end
+    check(b1 and b1.cogs == 10000 and b1.profit == 0, "DE capture books 0 profit on Green Lens DISENCHANT_BROKEN")
+    check(r1 and r1.extra.costCarryover == true and r1.extra.allocBasis == 10000 and r1.extra.marketValue == 20000 and r1.extra.srcName == "Green Lens",
+        "DE capture stamps costCarryover=true and carries 10000c basis instead of 20000c marketValue")
+    eq(select(2, ns.Store.Basis(econ, 8102)), 10000, "Large Radiant Shard basis equals 10000c source cost")
+
+    -- Case 2: Multi-output exact integer copper split (100c across 3 equal-value outputs -> 33 + 33 + 34 = 100)
+    ns.Store.AddBasis(econ, 8103, 1, 100)
+    ns.Capture.OnEvent(nil, "UNIT_SPELLCAST_SUCCEEDED", "player", "de2", 13262)
+    bagState[8103] = 0; bagState[8104] = 1; bagState[8105] = 1; bagState[8106] = 1
+    ns.Capture.OnEvent(nil, "BAG_UPDATE_DELAYED")
+    local splitRows, splitSum = {}, 0
+    for _, r in ipairs(ns.Store.db.days[ns.Store.DayKey()].r) do
+        if r.type == "DISENCHANT_RECEIVE" and r.extra.srcItemID == 8103 then
+            splitRows[#splitRows + 1] = r
+            splitSum = splitSum + (tonumber(r.extra.allocBasis) or 0)
+        end
+    end
+    eq(#splitRows, 3, "multi-output DE emits 3 DISENCHANT_RECEIVE rows")
+    eq(splitSum, 100, "multi-output DE conserves exact 100c copper total")
+    eq(splitRows[1].extra.allocBasis, 33, "first multi-output share is 33c")
+    eq(splitRows[2].extra.allocBasis, 33, "second multi-output share is 33c")
+    eq(splitRows[3].extra.allocBasis, 34, "final multi-output share receives 34c remainder")
+
+    -- Case 3: 0-cost looted BoE DE -> allocBasis == 0, costCarryover == true, basis == 0
+    ns.Capture.OnEvent(nil, "UNIT_SPELLCAST_SUCCEEDED", "player", "de3", 13262)
+    bagState[8107] = 0; bagState[8108] = 1
+    ns.Capture.OnEvent(nil, "BAG_UPDATE_DELAYED")
+    local r3
+    for _, r in ipairs(ns.Store.db.days[ns.Store.DayKey()].r) do
+        if r.type == "DISENCHANT_RECEIVE" and r.itemID == 8108 then r3 = r end
+    end
+    check(r3 and r3.extra.costCarryover == true and r3.extra.allocBasis == 0 and r3.extra.marketValue == 20000,
+        "0-cost looted BoE DE sets allocBasis=0 with costCarryover=true even when marketValue=20000")
+    eq(select(2, ns.Store.Basis(econ, 8108)), 0, "0-cost looted BoE output has 0 basis")
+
+    host.GetItemMarketPrice = oldMarketPrice
+    ns.Model.ItemName = oldItemName
+    _G.C_Container = oldContainer
+    _G.GetItemCount = oldGetItemCount
+    _G.MerchantMasterLedgerDB = oldLedger
+    ns.Store.Init()
+end
 print(string.format("PASS: Random-enchant ledger capture (%d total assertions)",assertions))
 print("PASS: Inventory freshness generation")

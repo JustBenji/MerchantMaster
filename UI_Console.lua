@@ -1645,7 +1645,7 @@ local function buildSetupView(parent)
 	local tsmCard = createSurfaceCard(frame, "glass_r12", "cardBg")
 	tsmCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -96)
 	tsmCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -96)
-	tsmCard:SetHeight(52)
+	tsmCard:SetHeight(64)
 	su.tsmCard = tsmCard
 
 	local tsmSwitch = createCheck(tsmCard, "TSM Light Mode (Hourly Prices, No Local Storage)", 12, function(_, isOn)
@@ -1675,16 +1675,18 @@ local function buildSetupView(parent)
 		applyFont(tsmSwitch.label, 12, "semibold")
 	end
 	attachTooltip(tsmSwitch, "TSM Light Mode (Hourly Prices)", {
-		"Optional opt-in: pull hourly refreshed prices from TradeSkillMaster without local snapshot files.",
+		"Keeps AH prices updated hourly inside MerchantMaster tables with zero local snapshot files.",
+		"Requires the TradeSkillMaster addon + TSM Desktop App installed locally (see TSM's setup instructions).",
 		"7x24 heatmaps, hourly curves, and 6-tier buyout depth stay off unless MerchantMaster_Snapshots is installed.",
 	})
 	su.tsmSwitch = tsmSwitch
 
 	local tsmSubFs = makeFs(tsmCard, 10, "regular", "textSecondary")
-	tsmSubFs:SetPoint("TOPLEFT", tsmCard, "TOPLEFT", 54, -30)
-	tsmSubFs:SetPoint("TOPRIGHT", tsmCard, "TOPRIGHT", -180, -30)
-	if tsmSubFs.SetWordWrap then tsmSubFs:SetWordWrap(false) end
-	tsmSubFs:SetText("Optional: pull hourly refreshed prices from TradeSkillMaster without local snapshot files. 7x24 heatmaps and buyout depth stay off.")
+	tsmSubFs:SetPoint("TOPLEFT", tsmCard, "TOPLEFT", 54, -29)
+	tsmSubFs:SetPoint("BOTTOMRIGHT", tsmCard, "BOTTOMRIGHT", -184, 6)
+	if tsmSubFs.SetJustifyV then tsmSubFs:SetJustifyV("TOP") end
+	if tsmSubFs.SetWordWrap then tsmSubFs:SetWordWrap(true) end
+	tsmSubFs:SetText("Keeps AH prices updated hourly inside MerchantMaster tables with zero local snapshot files (7x24 heatmaps and buyout depth stay off). Requires the TradeSkillMaster addon + TSM Desktop App installed locally (see TSM's setup instructions).")
 	su.tsmSubFs = tsmSubFs
 
 	local tsmStatusFs = makeFs(tsmCard, 11, "semibold", "textMuted", "RIGHT")
@@ -1695,7 +1697,7 @@ local function buildSetupView(parent)
 
 	-- Sub-Container A: Standalone Guide Split Left (Windows) / Right (Linux)
 	local standalonePanel = CreateFrame("Frame", nil, frame)
-	standalonePanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -156)
+	standalonePanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -168)
 	standalonePanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
 	su.standalonePanel = standalonePanel
 
@@ -1818,7 +1820,7 @@ local function buildSetupView(parent)
 
 	-- Sub-Container B: Connected Companion Config & Split Windows/Linux Command Builders
 	local connectedPanel = CreateFrame("Frame", nil, frame)
-	connectedPanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -156)
+	connectedPanel:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -168)
 	connectedPanel:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
 	su.connectedPanel = connectedPanel
 

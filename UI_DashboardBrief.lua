@@ -118,6 +118,14 @@ local function setTextColor(fs, col)
     fs:SetTextColor(col[1] or 1, col[2] or 1, col[3] or 1, col[4] or 1)
 end
 
+local function rgbToHex(col, fallback)
+    if type(col) ~= "table" then return fallback or "8c919e" end
+    local r = clamp(floor((safeNum(col[1], 0.55) or 0.55) * 255 + 0.5), 0, 255)
+    local g = clamp(floor((safeNum(col[2], 0.57) or 0.57) * 255 + 0.5), 0, 255)
+    local b = clamp(floor((safeNum(col[3], 0.62) or 0.62) * 255 + 0.5), 0, 255)
+    return format("%02x%02x%02x", r, g, b)
+end
+
 local function applyFont(fs, size, weight)
     if not fs then return end
     local T = ns.Theme
@@ -337,6 +345,9 @@ local function computeAHBase(econKey, now)
                             ahItemFreq[itemID] = (ahItemFreq[itemID] or 0) + max(1, profit > 0 and floor(profit / 100) or qty)
                         end
 
+                        local deOrigin = (e and type(e.deOrigin) == "table") and e.deOrigin or nil
+                        local deOrigins = (e and type(e.deOrigins) == "table") and e.deOrigins or nil
+
                         allAHRows[#allAHRows + 1] = {
                             itemID = itemID,
                             name = resolveItemName(itemID, e and e.name),
@@ -351,6 +362,8 @@ local function computeAHBase(econKey, now)
                             day = day,
                             char = r.char,
                             replayOrder = replayOrder,
+                            deOrigin = deOrigin,
+                            deOrigins = deOrigins,
                         }
                     end
                 end
@@ -528,8 +541,67 @@ function Brief.ComputeAHSalesSummary(econKey, rangeKey, nowOverride)
 end
 
 ---------------------------------------------------------------------------------------------------
--- Hourly & Daily Wealth Series Builder (with Day-1 Ledger Reconstruction Fallback)
+-- Hourly & Daily Wealth Series Builder (24-Slot Ledger Cashflow Math + Daily Snapshots)
 ---------------------------------------------------------------------------------------------------
+local SELL_WEALTH_TYPES = {
+    AH_SELL = true,
+    VENDOR_SELL = true,
+    COD_SELL = true,
+    TRADE_SELL = true,
+}
+
+local DEPOSIT_LOSS_TYPES = {
+    AH_CANCEL = true,
+    AH_EXPIRE = true,
+}
+
+local TURNIN_WEALTH_TYPES = {
+    WRIT_TURNIN = true,
+    CRATE_TURNIN = true,
+}
+
+local CASH_WEALTH_TYPES = {
+    LOOT = true,
+    MONEY_LOOT = true,
+    QUEST_MONEY = true,
+    POUCH_MONEY = true,
+    GUILD_WITHDRAW = true,
+    REPAIR = true,
+    POSTAGE = true,
+    TRAINER_FEE = true,
+    GUILD_DEPOSIT = true,
+    ADJUST = true,
+    OTHER_INCOME = true,
+    OTHER_EXPENSE = true,
+}
+
+local function rowWealthDelta(r)
+    local rType = r and r.type
+    if not rType then return 0 end
+    local e = type(r.extra) == "table" and r.extra or nil
+    if SELL_WEALTH_TYPES[rType] then
+        local fee = (e and safeNum(e.fee, 0)) or 0
+        local net = safeNum(r.total, 0) or 0
+        local gross = (e and safeNum(e.gross, nil)) or max(0, net + fee)
+        local cogs = safeNum(r.cogs, 0) or 0
+        return (gross - fee) - cogs
+    elseif DEPOSIT_LOSS_TYPES[rType] then
+        local depLost = e and safeNum(e.depLost, nil) or nil
+        if (depLost == nil or depLost == 0) and safeNum(r.depLost, nil) then
+            depLost = safeNum(r.depLost, 0) or 0
+        end
+        return -max(0, depLost or 0)
+    elseif TURNIN_WEALTH_TYPES[rType] then
+        return (safeNum(r.total, 0) or 0) - (safeNum(r.cogs, 0) or 0)
+    elseif CASH_WEALTH_TYPES[rType] then
+        return safeNum(r.total, 0) or 0
+    end
+    -- Balance-sheet asset swaps (AH_BUY, VENDOR_BUY, COD_BUY, TRADE_BUY, VENDOR_BUYBACK,
+    -- CRAFT, DESTROY, DISENCHANT_BROKEN, DISENCHANT_RECEIVE, MONEY_TRANSFER, AH_POST,
+    -- AH_BID, AH_OUTBID) do not change total net wealth.
+    return 0
+end
+
 local function readPortfolio(econKey, rangeKey)
     local Model = ns.Analytics and ns.Analytics.Model
     local p = nil
@@ -588,157 +660,77 @@ function Brief.BuildWealthChartSeries(wealthMode, rangeKey, econKey, portfolioDa
             mode = "daily",
             points = pts,
             usedFallback = false,
+            isLedgerDerived = false,
             latestTotal = latestTotal,
             change24h = lastVal - prevVal,
             dailyCount = #dailySeries,
         }
     end
 
-    -- Hourly Wealth mode (also serves as fallback when < 2 daily snapshots exist)
+    -- Hourly Wealth mode: compute all 24 rolling hourly slots strictly from ledger net-wealth deltas
     local todayKey = dayKeyFromSec(now)
     local yesterdayKey = dayKeyFromSec(now - 86400)
     local curHourFloor = floor(now / 3600) * 3600
-    local minTs = curHourFloor - 23 * 3600
+    local start24h = curHourFloor - 23 * 3600
 
-    local rawPts = {}
-    local intraday = Store and Store.db and Store.db.intradaySnaps
-    if type(intraday) == "table" then
-        for _, dk in ipairs({ yesterdayKey, todayKey }) do
-            local dayRec = intraday[dk]
-            local ptsMap = type(dayRec) == "table" and dayRec.points
-            if type(ptsMap) == "table" then
-                for hKey, pt in pairs(ptsMap) do
-                    if type(pt) == "table" and type(pt.chars) == "table" then
-                        local ts = safeNum(pt.time, 0) or 0
-                        if ts == 0 or (ts >= minTs - 3600 and ts <= curHourFloor + 3600) then
-                            local sumGold, sumItems, sumListed, matched = 0, 0, 0, 0
-                            for cKey, cSnap in pairs(pt.chars) do
-                                if type(cSnap) == "table" and matchesEcon(cSnap.econ, cKey, econKey, Store) then
-                                    sumGold = sumGold + (safeNum(cSnap.gold, 0) or 0)
-                                    sumItems = sumItems + (safeNum(cSnap.items, 0) or 0)
-                                    sumListed = sumListed + (safeNum(cSnap.listed, 0) or 0)
-                                    matched = matched + 1
-                                end
-                            end
-                            if matched > 0 then
-                                local hr = safeNum(pt.hour, safeNum(hKey, 0)) or 0
-                                local label = format("%02d:00", clamp(floor(hr), 0, 23))
-                                rawPts[#rawPts + 1] = {
-                                    day = dk .. " " .. label,
-                                    label = label,
-                                    value = sumGold + sumItems + sumListed,
-                                    gold = sumGold,
-                                    items = sumItems,
-                                    listed = sumListed,
-                                    sortKey = ts > 0 and ts or (curHourFloor - (23 - hr) * 3600),
-                                    isReconstructed = false,
-                                }
-                            end
-                        end
-                    end
-                end
-            end
-        end
+    local deltaBySlot = {}
+    for slot = 1, 24 do
+        deltaBySlot[slot] = 0
     end
 
-    tsort(rawPts, function(a, b)
-        if a.sortKey ~= b.sortKey then return a.sortKey < b.sortKey end
-        return tostring(a.day) < tostring(b.day)
-    end)
-
-    -- Keep at most 24 newest points
-    if #rawPts > 24 then
-        local trimmed = {}
-        for i = #rawPts - 23, #rawPts do
-            trimmed[#trimmed + 1] = rawPts[i]
-        end
-        rawPts = trimmed
-    end
-
-    if #rawPts >= 2 then
-        local firstV = rawPts[1].value or 0
-        local lastV = rawPts[#rawPts].value or latestTotal
-        return {
-            mode = "hourly",
-            points = rawPts,
-            usedFallback = false,
-            latestTotal = latestTotal > 0 and latestTotal or lastV,
-            change24h = lastV - firstV,
-            dailyCount = #dailySeries,
-        }
-    end
-
-    -- Day-1 fallback: reconstruct today's hourly wealth curve backward from latestTotal
-    -- using today's timestamped ledger cashflows so the hourly graph works immediately!
-    local curHr = hourFromSec(now)
-    local deltaByHr = {}
-    local earliestEventHr = curHr
     if Store and Store.IterDays then
-        Store.IterDays(todayKey, todayKey, function(_, rows)
+        Store.IterDays(yesterdayKey, todayKey, function(day, rows)
             for i = 1, #(rows or {}) do
                 local r = rows[i]
                 if type(r) == "table" and matchesEcon(r.econ, r.char, econKey, Store) then
-                    local totalDelta = safeNum(r.total, 0) or 0
-                    if totalDelta ~= 0 then
-                        local rTs = safeNum(r.time, 0) or 0
-                        local h = rTs > 0 and hourFromSec(rTs) or curHr
-                        h = clamp(h, 0, curHr)
-                        deltaByHr[h] = (deltaByHr[h] or 0) + totalDelta
-                        if h < earliestEventHr then earliestEventHr = h end
+                    local d = rowWealthDelta(r)
+                    if d ~= 0 then
+                        local ts = safeNum(r.time, 0) or 0
+                        if ts >= start24h and ts < curHourFloor + 3600 then
+                            local slot = floor((ts - start24h) / 3600) + 1
+                            if slot >= 1 and slot <= 24 then
+                                deltaBySlot[slot] = deltaBySlot[slot] + d
+                            end
+                        elseif day == todayKey and ts == 0 then
+                            deltaBySlot[24] = deltaBySlot[24] + d
+                        end
                     end
                 end
             end
         end)
     end
 
-    local reconPts = {}
-    if curHr == 0 then
-        local startVal = max(0, latestTotal - (deltaByHr[0] or 0))
-        reconPts[1] = {
-            day = todayKey .. " 00:00 (Start)",
-            label = "Start",
-            value = startVal,
-            sortKey = curHourFloor - 1800,
-            isReconstructed = true,
-        }
-        reconPts[2] = {
-            day = todayKey .. " 00:00",
-            label = "00:00",
-            value = latestTotal,
-            sortKey = curHourFloor,
-            isReconstructed = true,
-        }
-    else
-        local startHr = min(earliestEventHr, max(0, curHr - 7))
-        if startHr >= curHr then startHr = curHr - 1 end
-        local vals = {}
-        vals[curHr] = latestTotal
-        for h = curHr, startHr + 1, -1 do
-            vals[h - 1] = max(0, (vals[h] or 0) - (deltaByHr[h] or 0))
-        end
-        for h = startHr, curHr do
-            local label = format("%02d:00", h)
-            reconPts[#reconPts + 1] = {
-                day = todayKey .. " " .. label,
-                label = label,
-                value = vals[h] or 0,
-                sortKey = curHourFloor - (curHr - h) * 3600,
-                isReconstructed = true,
-            }
-        end
+    local wealth = {}
+    wealth[24] = max(0, latestTotal)
+    for slot = 23, 1, -1 do
+        wealth[slot] = max(0, wealth[slot + 1] - deltaBySlot[slot + 1])
     end
 
-    local firstV = reconPts[1] and reconPts[1].value or latestTotal
-    local lastV = reconPts[#reconPts] and reconPts[#reconPts].value or latestTotal
+    local pts = {}
+    for slot = 1, 24 do
+        local slotTs = start24h + (slot - 1) * 3600
+        local label = format("%02d:00", hourFromSec(slotTs))
+        pts[slot] = {
+            day = dayKeyFromSec(slotTs) .. " " .. label,
+            label = label,
+            value = wealth[slot],
+            delta = deltaBySlot[slot],
+            sortKey = slotTs,
+            isLedgerDerived = true,
+        }
+    end
+
     return {
         mode = "hourly",
-        points = reconPts,
-        usedFallback = true,
+        points = pts,
+        usedFallback = false,
+        isLedgerDerived = true,
         latestTotal = latestTotal,
-        change24h = lastV - firstV,
+        change24h = wealth[24] - wealth[1],
         dailyCount = #dailySeries,
     }
 end
+Brief.ComputeWealthSeries = Brief.BuildWealthChartSeries
 
 ---------------------------------------------------------------------------------------------------
 -- Reagent Price-Drop Impact Alerts (Your Top Crafts)
@@ -1874,7 +1866,10 @@ function Brief.Create(parent, opts)
                     r.icon:Hide()
                 end
                 local qtySuffix = (sale.qty and sale.qty > 1) and (" x" .. tostring(sale.qty)) or ""
-                r.nameFs:SetText(tostring(sale.name or "Item") .. qtySuffix)
+                local deSrc = (type(sale.deOrigin) == "table" and type(sale.deOrigin.srcName) == "string" and sale.deOrigin.srcName ~= "")
+                    and sale.deOrigin.srcName or nil
+                local deSuffix = deSrc and ("  |cff" .. rgbToHex(pal.textMuted, "8c919e") .. "via DE: " .. deSrc .. "|r") or ""
+                r.nameFs:SetText(tostring(sale.name or "Item") .. qtySuffix .. deSuffix)
                 local whenText
                 if sale.day == todayKey and (sale.time or 0) > 0 then
                     whenText = fmtDate("%H:%M", sale.time)
@@ -1941,6 +1936,25 @@ function Brief.Create(parent, opts)
             if not (_G.GameTooltip and s) then return end
             _G.GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             _G.GameTooltip:AddLine(format("%s x%d", tostring(s.name), s.qty or 1), 1, 1, 1)
+            local de = type(s.deOrigin) == "table" and s.deOrigin or nil
+            if de and type(de.srcName) == "string" and de.srcName ~= "" then
+                local srcCost = safeNum(de.srcCost, nil)
+                local costAmt = (srcCost ~= nil) and srcCost or (safeNum(s.cogs, 0) or 0)
+                local deLine = format("Disenchanted from %s | Cost %s", de.srcName, formatCopper(costAmt, false))
+                if type(s.deOrigins) == "table" and #s.deOrigins > 1 then
+                    deLine = deLine .. format(" (+%d more)", #s.deOrigins - 1)
+                end
+                _G.GameTooltip:AddLine(deLine, 0.72, 0.78, 0.90)
+                if type(s.deOrigins) == "table" and #s.deOrigins > 1 then
+                    for _, src in ipairs(s.deOrigins) do
+                        if type(src) == "table" and type(src.srcName) == "string" and src.srcName ~= "" then
+                            local qPart = (safeNum(src.qty, 0) or 0) > 0 and (" x" .. tostring(src.qty)) or ""
+                            _G.GameTooltip:AddDoubleLine("  " .. src.srcName .. qPart,
+                                "Cost " .. formatCopper(safeNum(src.srcCost, 0) or 0, false), 0.70, 0.74, 0.80, 0.85, 0.88, 0.92)
+                        end
+                    end
+                end
+            end
             _G.GameTooltip:AddDoubleLine("Gross", formatCopper(s.gross, false))
             _G.GameTooltip:AddDoubleLine("AH Cut", "-" .. formatCopper(s.fee, false))
             _G.GameTooltip:AddDoubleLine("COGS", "-" .. formatCopper(s.cogs, false))

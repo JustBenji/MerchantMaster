@@ -910,6 +910,109 @@ do
 		"Opening the AH clears the cross and restores the refresh icon")
 	AuctionHouseFrame:Hide()
 
+	-- Header status capsule source precedence (Snap vs AH, never Blizz), dual-timestamp tooltip, and Goblin Baron width
+	do
+		local now = hostEnv.getFixtureNow()
+		local savedGetSnapMeta = ns.Pricing.GetSnapshotMeta
+		local savedLastRefresh = MerchantMasterDB.lastRefreshAt
+		local savedPriceSrc = MerchantMasterDB.priceSource
+		local savedSkin = Theme.GetSkin()
+		local savedSubText = ui.brandSubFs and ui.brandSubFs:GetText() or ""
+
+		MerchantMasterDB.priceSource = "auto"
+		MerchantMasterDB.economy = "auto"
+
+		-- Case 1: Snapshot newer than manual AH scan (even with source="Blizzard API") -> "Snap 8m", NEVER "Blizz"
+		local snapTs = now - 8 * 60
+		local liveTs = now - 23 * 60
+		ns.Pricing.GetSnapshotMeta = function() return { updatedAt = snapTs, source = "Blizzard API" } end
+		MerchantMasterDB.ahPrices[economyKey] = { _scannedAt = liveTs }
+		MerchantMasterDB.lastRefreshAt = liveTs
+		app.refresh()
+		check(ui.statusSyncFs:GetText() == "Snap 8m",
+			"Newer Blizzard snapshot displays 'Snap 8m' (never 'Blizz'), got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
+		check(not ui.statusSyncFs:GetText():find("Blizz", 1, true), "Status capsule never displays 'Blizz'")
+		check(ui._statusSnapAt == snapTs and ui._statusLiveAt == liveTs,
+			"Status capsule tracks both _statusSnapAt and _statusLiveAt")
+
+		-- Hover tooltip reports Active Source + both Last Snapshot (Snap) and Last Manual AH Scan (AH)
+		GameTooltip:Hide()
+		ui.statusCapsule:GetScript("OnEnter")(ui.statusCapsule)
+		local tipJoined = table.concat(GameTooltip._lines or {}, "\n")
+		check(tipJoined:find("Active Source: Snap 8m", 1, true) ~= nil,
+			"Tooltip shows Active Source: Snap 8m, got:\n" .. tipJoined)
+		check(tipJoined:find("Last Snapshot (Snap):", 1, true) ~= nil and tipJoined:find("8m", 1, true) ~= nil,
+			"Tooltip shows Last Snapshot (Snap) timestamp and age, got:\n" .. tipJoined)
+		check(tipJoined:find("Last Manual AH Scan (AH):", 1, true) ~= nil and tipJoined:find("23m", 1, true) ~= nil,
+			"Tooltip shows Last Manual AH Scan (AH) timestamp and age, got:\n" .. tipJoined)
+		GameTooltip:Hide()
+
+		-- Case 2: Equal timestamps -> Snapshot wins ("Snap 8m")
+		MerchantMasterDB.ahPrices[economyKey] = { _scannedAt = snapTs }
+		MerchantMasterDB.lastRefreshAt = snapTs
+		app.refresh()
+		check(ui.statusSyncFs:GetText() == "Snap 8m",
+			"Equal snap/live timestamps prefer 'Snap 8m', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
+
+		-- Case 3: Manual AH scan newer than snapshot -> "AH 2m"
+		local fresherLiveTs = now - 2 * 60
+		MerchantMasterDB.ahPrices[economyKey] = { _scannedAt = fresherLiveTs }
+		MerchantMasterDB.lastRefreshAt = fresherLiveTs
+		app.refresh()
+		check(ui.statusSyncFs:GetText() == "AH 2m",
+			"Newer manual AH scan displays 'AH 2m', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
+
+		-- Case 4: No snapshot -> tooltip shows Last Snapshot (Snap): None
+		ns.Pricing.GetSnapshotMeta = function() return nil end
+		app.refresh()
+		check(ui.statusSyncFs:GetText() == "AH 2m",
+			"Manual AH without snapshot displays 'AH 2m', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
+		GameTooltip:Hide()
+		ui.statusCapsule:GetScript("OnEnter")(ui.statusCapsule)
+		local tipNoSnap = table.concat(GameTooltip._lines or {}, "\n")
+		check(tipNoSnap:find("Last Snapshot (Snap): None", 1, true) ~= nil,
+			"Tooltip shows 'Last Snapshot (Snap): None' when absent, got:\n" .. tipNoSnap)
+		GameTooltip:Hide()
+
+		-- Case 5: Goblin Baron custom skin expands capsule cleanly without clipping even when toolbar is narrow (220px)
+		Theme.SetSkin("goblin", true)
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		ui.toolbar:SetWidth(220)
+		if ui.brandSubFs then ui.brandSubFs:SetText("Alchemy 375 / Herbalism 375") end
+		ns.Pricing.GetSnapshotMeta = function() return { updatedAt = now - 12 * 60, source = "blizzard" } end
+		MerchantMasterDB.ahPrices[economyKey] = { _scannedAt = now - 23 * 60 }
+		MerchantMasterDB.lastRefreshAt = now - 23 * 60
+		app.refresh()
+		local needGob = 12 + 6 + 7 + ui.statusEconFs:GetStringWidth() + 8 + 1 + 8 + ui.statusSyncFs:GetStringWidth() + 41
+		local gobW = ui.statusCapsule:GetWidth()
+		check(ui.statusSyncFs:GetText() == "Snap 12m",
+			"Goblin Baron status label is 'Snap 12m', got '" .. tostring(ui.statusSyncFs:GetText()) .. "'")
+		check(gobW >= needGob and gobW <= 330,
+			string.format("Goblin Baron capsule (%s) fits full text (%s) without clipping and stays <= 330px", tostring(gobW), tostring(needGob)))
+
+		-- Also verify real-coordinate GetLeft() gap measurement in Goblin Baron
+		local savedHdrLeft, savedToolsLeft = ui.skinHeader.GetLeft, ui.toolsBtn.GetLeft
+		local savedTitleLeft, savedSubLeft = ui.brandTitleFs.GetLeft, ui.brandSubFs.GetLeft
+		ui.skinHeader.GetLeft = function() return 20 end
+		ui.brandTitleFs.GetLeft = function() return 106 end
+		ui.brandSubFs.GetLeft = function() return 336 end
+		ui.toolsBtn.GetLeft = function() return 830 end
+		app.updateScanChrome()
+		local gobCoordW = ui.statusCapsule:GetWidth()
+		check(gobCoordW >= needGob and gobCoordW <= 330,
+			string.format("Goblin Baron real-coord capsule (%s) fits full text (%s) and stays <= 330px", tostring(gobCoordW), tostring(needGob)))
+		ui.skinHeader.GetLeft, ui.toolsBtn.GetLeft = savedHdrLeft, savedToolsLeft
+		ui.brandTitleFs.GetLeft, ui.brandSubFs.GetLeft = savedTitleLeft, savedSubLeft
+
+		-- Restore state
+		ns.Pricing.GetSnapshotMeta = savedGetSnapMeta
+		MerchantMasterDB.lastRefreshAt = savedLastRefresh
+		MerchantMasterDB.priceSource = savedPriceSrc
+		if ui.brandSubFs then ui.brandSubFs:SetText(savedSubText) end
+		Theme.SetSkin(savedSkin, true)
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+	end
+
 	ui.toast.ShowToast = savedToast
 	C_AuctionHouse.HasFullBrowseResults, C_AuctionHouse.RequestMoreBrowseResults = savedFull, savedMore
 	MerchantMasterDB.ahPrices[economyKey] = savedPool

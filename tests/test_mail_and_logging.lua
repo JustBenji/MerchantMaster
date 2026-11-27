@@ -69,6 +69,7 @@ local function makeFrame(frameType, name, parent)
         SetHeight = function(self, h) self._h = h end,
         GetWidth = function(self) return self._w end,
         GetHeight = function(self) return self._h end,
+        GetParent = function(self) return self._parent end,
         Show = function(self) self._shown = true end,
         Hide = function(self) self._shown = false end,
         IsShown = function(self) return self._shown end,
@@ -84,12 +85,18 @@ local function makeFrame(frameType, name, parent)
             local fs = {
                 _text = "",
                 _shown = true,
-                SetPoint = function() end,
-                ClearAllPoints = function() end,
-                SetHeight = function() end,
-                SetJustifyH = function() end,
-                SetJustifyV = function() end,
-                SetWordWrap = function() end,
+                _points = {},
+                _wordWrap = true,
+                _maxLines = nil,
+                SetPoint = function(s, ...) s._points[#s._points + 1] = { ... } end,
+                ClearAllPoints = function(s) s._points = {} end,
+                SetHeight = function(s, h) s._h = h end,
+                SetJustifyH = function(s, j) s._justifyH = j end,
+                SetJustifyV = function(s, j) s._justifyV = j end,
+                SetWordWrap = function(s, w) s._wordWrap = w and true or false end,
+                SetMaxLines = function(s, n) s._maxLines = n end,
+                GetStringWidth = function(s) return #(s._text or "") * 6 end,
+                GetUnboundedStringWidth = function(s) return #(s._text or "") * 6 end,
                 SetText = function(s, t) s._text = tostring(t or "") end,
                 GetText = function(s) return s._text end,
                 SetTextColor = function() end,
@@ -153,6 +160,36 @@ host = {
             b.SetActive = function(self, on) self._active = on and true or false end
             return b
         end,
+        CreateBadgePill = function(parent, text, variant, opts)
+            opts = opts or {}
+            local frame = makeFrame("Frame", nil, parent)
+            frame:SetHeight(opts.height or 20)
+            local label = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            label:SetPoint("CENTER", 0, 0)
+            label:SetWordWrap(false)
+            local pill = {
+                frame = frame,
+                label = label,
+                variant = variant or "neutral",
+            }
+            function pill.SetVariant(selfOrVar, varOrText, maybeText)
+                local v, t
+                if selfOrVar == pill then
+                    v, t = varOrText, maybeText
+                else
+                    v, t = selfOrVar, varOrText
+                end
+                if v ~= nil then pill.variant = v end
+                if t ~= nil then label:SetText(tostring(t)) end
+                local strW = label:GetStringWidth()
+                local padX = opts.padX or 18
+                local minW = opts.minWidth or 24
+                -- Intentionally mirror UI_Theme.CreateBadgePill auto-expansion so tests catch overflow
+                frame:SetWidth(math.max(minW, math.ceil(strW) + padX))
+            end
+            pill:SetVariant(variant or "neutral", text or "")
+            return pill
+        end,
     },
     app = {
         charKey = "Normal-Horde-Forever-Hero",
@@ -196,7 +233,7 @@ local function findRows(typ)
 end
 
 -- =========================================================================
--- 1. WS1 Pure Standalone Analytics (Store + Capture — zero TSM reads)
+-- 1. WS1 Pure Standalone Analytics (Store + Capture - zero TSM reads)
 -- =========================================================================
 _G.TradeSkillMasterDB = {
     ["r@Normal@internalData@auctionSaleHints"] = { ["TSM Exclusive Item\001i:99901"] = true },
@@ -511,7 +548,11 @@ freeBagSlots = 0
 _G.MailFrame = makeFrame("Frame", "MailFrame", nil)
 scanCalls = 0
 MH.OnEvent(nil, "MAIL_SHOW")
-check(MH.bar ~= nil and MH.bar:GetHeight() == 62, "MailHelper mounts 62px bar onto MailFrame")
+check(MH.bar ~= nil and MH.bar:GetWidth() == 280 and MH.bar:GetHeight() == 124,
+    "MailHelper mounts 280x124 right-side Mail Helper panel onto MailFrame")
+check(MH.bar._points[1] and MH.bar._points[1][1] == "TOPLEFT" and MH.bar._points[1][2] == _G.MailFrame
+    and MH.bar._points[1][3] == "TOPRIGHT" and MH.bar._points[1][4] == 6 and MH.bar._points[1][5] == 0,
+    "MailHelper bar anchors to MailFrame TOPRIGHT (6, 0), never below MailFrame")
 MH.Start("all")
 -- Step through inbox updates until batch completes
 local guard = 0
@@ -1013,12 +1054,14 @@ do
     local savedGetRealm = _G.GetRealmName
     local savedGetPlayer = host.GetPlayerFullName
     local savedMailPresets = _G.MerchantMasterDB.mailPresets
+    local savedBar = MH.bar
     local savedPresetsPanel = MH.presetsPanel
     local savedInboxStrip = MH.inboxQuickStrip
 
     _G.GetRealmName = function() return "Forever" end
     host.GetPlayerFullName = function() return "Hero", "Hero" end
     _G.MerchantMasterDB.mailPresets = nil
+    MH.bar = nil
     MH.presetsPanel = nil
     MH.inboxQuickStrip = nil
 
@@ -1103,37 +1146,125 @@ do
     MH.SetPresetCharacter("auction", "Elara Vance")
     MH.SetPresetCharacter("alchemy", "Hero")
 
+    local function hasPoint(widget, pt, relFrame, relPt, x, y)
+        for _, p in ipairs((widget and widget._points) or {}) do
+            if p[1] == pt and p[2] == relFrame and p[3] == relPt and p[4] == x and p[5] == y then
+                return true
+            end
+        end
+        return false
+    end
+    local function hasBottomMailAnchor(widget)
+        for _, p in ipairs((widget and widget._points) or {}) do
+            if p[2] == mailFrame and (p[3] == "BOTTOMLEFT" or p[3] == "BOTTOMRIGHT") then
+                return true
+            end
+        end
+        return false
+    end
+
     -- Open Mailbox (Inbox visible, SendMail hidden)
     MH.OnEvent(nil, "MAIL_SHOW")
     eq(_G.SendMail, sendMailFn, "MailHelper NEVER wraps _G.SendMail (keeps Analytics Capture hook clean)")
+    check(MH.bar ~= nil and MH.bar._name == "MerchantMasterMailHelperBar",
+        "Mail Helper panel created with name MerchantMasterMailHelperBar")
+    eq(MH.bar:GetWidth(), 280, "Mail Helper panel width is 280px")
+    eq(MH.bar:GetHeight(), 124, "Mail Helper panel height is 124px")
+    eq(MH.bar.titleFs:GetText(), "Mail Helper", "Mail Helper header text is 'Mail Helper'")
+    eq(#MH.bar.modeBtns, 4, "Mail Helper 2x2 grid exposes 4 action buttons")
+    for idx, entry in ipairs(MH.bar.modeBtns) do
+        eq(entry.btn:GetWidth(), 128, "Mail Helper grid button " .. idx .. " width is 128px")
+        eq(entry.btn:GetHeight(), 24, "Mail Helper grid button " .. idx .. " height is 24px")
+    end
+    eq(MH.bar.refreshBtn:GetWidth(), 64, "Mail Helper Refresh button width is 64px")
+    eq(MH.bar.stopBtn:GetWidth(), 50, "Mail Helper Stop button width is 50px")
+    check(not hasBottomMailAnchor(MH.bar), "Mail Helper NEVER anchors below MailFrame (BOTTOMLEFT/BOTTOMRIGHT)")
+
     check(MH.presetsPanel ~= nil and MH.presetsPanel._name == "MerchantMasterMailPresetsPanel",
         "Send Mail presets panel created with name MerchantMasterMailPresetsPanel")
-    check(MH.inboxQuickStrip ~= nil, "Inbox quick-pick icon strip created")
-    eq(MH.presetsPanel:IsShown(), false, "Presets panel stays hidden when SendMailFrame is hidden")
-    eq(MH.inboxQuickStrip:IsShown(), true, "Inbox quick strip shown when InboxFrame is shown with non-self presets")
-    -- Inbox quick strip omits isSelf (only 2 buttons visible, not 3)
-    eq(MH.inboxQuickStrip.buttons[1]:IsShown(), true, "Inbox strip button 1 shown (Goldbank)")
-    eq(MH.inboxQuickStrip.buttons[2]:IsShown(), true, "Inbox strip button 2 shown (Elara Vance)")
-    eq(MH.inboxQuickStrip.buttons[3]:IsShown(), false, "Inbox strip omits isSelf character (Hero)")
+    eq(MH.presetsPanel:GetWidth(), 280, "Mail Recipients presets panel width is 280px")
+    check(MH.presetsPanel.statusPill ~= nil and MH.presetsPanel.statusPill.frame:GetWidth() <= 260,
+        "Mail Recipients statusPill width is strictly <= 260px")
+    eq(MH.presetsPanel.statusPill.label._wordWrap, false, "statusPill label disables word wrap")
+    check(hasPoint(MH.presetsPanel.statusPill.label, "LEFT", MH.presetsPanel.statusPill.frame, "LEFT", 10, 0)
+        and hasPoint(MH.presetsPanel.statusPill.label, "RIGHT", MH.presetsPanel.statusPill.frame, "RIGHT", -10, 0),
+        "statusPill label is strictly clamped inside pill (+10 LEFT .. -10 RIGHT)")
+    check(MH.inboxQuickStrip ~= nil, "Inbox quick-pick struct preserved if referenced")
+    eq(MH.inboxQuickStrip:IsShown(), false, "Inbox quick strip stays hidden to avoid duplicate Inbox clutter")
 
-    -- Opening an inbox mail hides quick strip and keeps presets panel hidden
+    -- InboxFrame stacking: MH.bar on top (MailFrame TOPRIGHT 6,0), MH.presetsPanel cleanly underneath (MH.bar BOTTOMLEFT 0,-6)
+    eq(MH.bar:IsShown(), true, "Mail Helper panel shown on InboxFrame")
+    eq(MH.presetsPanel:IsShown(), true, "Presets panel shown below Mail Helper on InboxFrame when presets exist")
+    check(hasPoint(MH.bar, "TOPLEFT", mailFrame, "TOPRIGHT", 6, 0),
+        "On InboxFrame, MH.bar anchors at TOPLEFT -> MailFrame TOPRIGHT (6, 0)")
+    check(hasPoint(MH.presetsPanel, "TOPLEFT", MH.bar, "BOTTOMLEFT", 0, -6),
+        "On InboxFrame, MH.presetsPanel stacks under MH.bar at TOPLEFT -> MH.bar BOTTOMLEFT (0, -6)")
+
+    -- Opening an inbox mail hides BOTH MH.bar and MH.presetsPanel
     openMailFrame:Show()
     MH.RefreshPresetsUI()
-    eq(MH.inboxQuickStrip:IsShown(), false, "OpenMailFrame shown hides inbox quick strip")
-    eq(MH.presetsPanel:IsShown(), false, "OpenMailFrame shown keeps presets panel hidden")
+    eq(MH.bar:IsShown(), false, "OpenMailFrame shown hides MH.bar")
+    eq(MH.presetsPanel:IsShown(), false, "OpenMailFrame shown hides MH.presetsPanel")
+    eq(MH.inboxQuickStrip:IsShown(), false, "OpenMailFrame shown keeps inboxQuickStrip hidden")
     openMailFrame:Hide()
     MH.RefreshPresetsUI()
-    eq(MH.inboxQuickStrip:IsShown(), true, "Closing OpenMailFrame restores inbox quick strip")
+    eq(MH.bar:IsShown(), true, "Closing OpenMailFrame restores MH.bar on InboxFrame")
+    eq(MH.presetsPanel:IsShown(), true, "Closing OpenMailFrame restores MH.presetsPanel on InboxFrame")
 
-    -- Clicking inbox icon switches to SendMail tab, fills recipient, calls CanSend, focuses subject!
-    MH.inboxQuickStrip.buttons[2]:Click()
-    eq(tab2Clicks, 1, "Clicking inbox quick-pick switches to Send Mail tab via MailFrameTab2:Click()")
-    eq(nameBox:GetText(), "Elara Vance", "Clicking inbox quick-pick fills SendMailNameEditBox")
-    check(canSendCalls >= 1, "Clicking inbox quick-pick triggers SendMailFrame_CanSend()")
-    eq(subjFocusCount, 1, "Clicking inbox quick-pick focuses SendMailSubjectEditBox")
+    -- Clicking preset row from Inbox switches to SendMail tab, fills recipient, calls CanSend, focuses subject, and flips stack!
+    MH.presetsPanel.buttons[2]:Click()
+    eq(tab2Clicks, 1, "Clicking recipient row from Inbox switches to Send Mail tab via MailFrameTab2:Click()")
+    eq(nameBox:GetText(), "Elara Vance", "Clicking recipient row fills SendMailNameEditBox")
+    check(canSendCalls >= 1, "Clicking recipient row triggers SendMailFrame_CanSend()")
+    eq(subjFocusCount, 1, "Clicking recipient row from Inbox focuses SendMailSubjectEditBox")
     eq(MH.presetsPanel:IsShown(), true, "Presets panel shows when SendMailFrame is active")
+    eq(MH.bar:IsShown(), true, "Mail Helper panel shows below presets panel on SendMailFrame")
+    check(hasPoint(MH.presetsPanel, "TOPLEFT", mailFrame, "TOPRIGHT", 6, 0),
+        "On SendMailFrame with presets, MH.presetsPanel anchors at TOPLEFT -> MailFrame TOPRIGHT (6, 0)")
+    check(hasPoint(MH.bar, "TOPLEFT", MH.presetsPanel, "BOTTOMLEFT", 0, -6),
+        "On SendMailFrame with presets, MH.bar stacks underneath at TOPLEFT -> MH.presetsPanel BOTTOMLEFT (0, -6)")
+    check(not hasBottomMailAnchor(MH.bar), "On SendMailFrame, MH.bar NEVER anchors below MailFrame")
     check((MH.presetsPanel.statusFs:GetText() or ""):find("Saved: Auction", 1, true) ~= nil,
         "Status pill shows Saved: Auction for Elara Vance")
+    check(MH.presetsPanel.statusPill.frame:GetWidth() <= 260,
+        "Saved status pill stays <= 260px wide")
+
+    -- Verify long multi-role Saved pill clamps cleanly inside 260px without overflowing
+    MH.SetPresetCharacter("mainCrafter", "Grommash Hellscream")
+    MH.SetPresetCharacter("leatherworking", "Grommash Hellscream")
+    MH.SetPresetCharacter("blacksmithing", "Grommash Hellscream")
+    MH.SetPresetCharacter("engineering", "Grommash Hellscream")
+    nameBox:SetText("Grommash Hellscream")
+    check(MH.presetsPanel.statusPill.frame:GetWidth() <= 260,
+        "Long multi-role Saved status pill stays strictly <= 260px wide")
+    check(MH.presetsPanel.statusPill.label:GetStringWidth() <= 240,
+        "Long multi-role Saved status pill text fits within 240px inner bounds without overflowing")
+    -- Reset test multi-role character so subsequent index assertions stay clean
+    MH.SetPresetCharacter("mainCrafter", "")
+    MH.SetPresetCharacter("leatherworking", "")
+    MH.SetPresetCharacter("blacksmithing", "")
+    MH.SetPresetCharacter("engineering", "")
+    nameBox:SetText("Elara Vance")
+
+    -- Verify SendMailFrame and InboxFrame stacking when 0 presets are saved (MH.bar anchors directly at MailFrame TOPRIGHT 6,0)
+    local savedPresetsBackup = _G.MerchantMasterDB.mailPresets
+    _G.MerchantMasterDB.mailPresets = nil
+    MH.RefreshPresetsUI()
+    eq(MH.presetsPanel:IsShown(), false, "On SendMailFrame with 0 presets, MH.presetsPanel hides")
+    eq(MH.bar:IsShown(), true, "On SendMailFrame with 0 presets, MH.bar stays visible")
+    check(hasPoint(MH.bar, "TOPLEFT", mailFrame, "TOPRIGHT", 6, 0),
+        "On SendMailFrame with 0 presets, MH.bar anchors directly at MailFrame TOPRIGHT (6, 0)")
+    sendFrame:Hide()
+    inboxFrame:Show()
+    MH.RefreshPresetsUI()
+    eq(MH.presetsPanel:IsShown(), false, "On InboxFrame with 0 presets, MH.presetsPanel hides")
+    eq(MH.bar:IsShown(), true, "On InboxFrame with 0 presets, MH.bar stays visible")
+    check(hasPoint(MH.bar, "TOPLEFT", mailFrame, "TOPRIGHT", 6, 0),
+        "On InboxFrame with 0 presets, MH.bar anchors directly at MailFrame TOPRIGHT (6, 0)")
+    _G.MerchantMasterDB.mailPresets = savedPresetsBackup
+    inboxFrame:Hide()
+    sendFrame:Show()
+    MH.RefreshPresetsUI()
 
     -- Display option toggles & 2-letter initials fallback when all 3 unchecked
     MH.SetDisplayOption("showIcon", false)
@@ -1254,6 +1385,7 @@ do
 
     -- MAIL_CLOSED clears confirmation and hides panels
     MH.OnEvent(nil, "MAIL_CLOSED")
+    eq(MH.bar:IsShown(), false, "MAIL_CLOSED hides Mail Helper bar")
     eq(MH.presetsPanel:IsShown(), false, "MAIL_CLOSED hides presets panel")
     eq(MH.inboxQuickStrip:IsShown(), false, "MAIL_CLOSED hides inbox quick strip")
 
@@ -1277,6 +1409,7 @@ do
     _G.GetRealmName = savedGetRealm
     host.GetPlayerFullName = savedGetPlayer
     _G.MerchantMasterDB.mailPresets = savedMailPresets
+    MH.bar = savedBar
     MH.presetsPanel = savedPresetsPanel
     MH.inboxQuickStrip = savedInboxStrip
 end

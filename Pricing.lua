@@ -108,8 +108,48 @@ end
 function ns.IsTSMAvailable()
 	if not ns.IsTSMOptInEnabled() then return false end
 	local api = rawget(_G, "TSM_API")
-	return type(api) == "table" and type(api.GetCustomPriceValue) == "function"
+	local avail = type(api) == "table" and type(api.GetCustomPriceValue) == "function"
+	if avail and not ns._tsmLastSeenAt then
+		local now = (type(time) == "function" and time()) or 0
+		if type(now) == "number" and now > 0 then
+			ns._tsmLastSeenAt = math.floor(now)
+		end
+	end
+	return avail
 end
+
+function ns.GetTSMLastUpdateTime()
+	if not ns.IsTSMAvailable() then return nil end
+	local now = (type(time) == "function" and time()) or 0
+	local api = rawget(_G, "TSM_API")
+	if type(api) == "table" then
+		for _, fnName in ipairs({ "GetAuctionDBLastUpdate", "GetLastUpdate" }) do
+			local fn = api[fnName]
+			if type(fn) == "function" then
+				local ok, ts = pcall(fn)
+				if ok and readable(ts) and type(ts) == "number" and ts == ts and ts > 0 and ts < math.huge then
+					ts = math.floor(ts)
+					if now <= 0 or ts <= now then
+						return ts
+					end
+				end
+			end
+		end
+	end
+	local fallback = ns._tsmLastSeenAt
+	if type(fallback) == "number" and fallback == fallback and fallback > 0 and fallback < math.huge then
+		fallback = math.floor(fallback)
+		if now <= 0 or fallback <= now then
+			return fallback
+		end
+	end
+	if type(now) == "number" and now > 0 then
+		ns._tsmLastSeenAt = math.floor(now)
+		return ns._tsmLastSeenAt
+	end
+	return nil
+end
+ns.Pricing.GetTSMLastUpdateTime = ns.GetTSMLastUpdateTime
 
 function ns.NormalizePriceSourceKey(key)
 	if key == "live" then return "live_ah" end
@@ -220,6 +260,12 @@ end
 function ns.InvalidatePriceCache()
 	ns.priceCacheEpoch = (ns.priceCacheEpoch or 1) + 1
 	ns._evalCache = nil
+	if ns.IsTSMAvailable() then
+		local now = (type(time) == "function" and time()) or 0
+		ns._tsmLastSeenAt = (type(now) == "number" and now > 0) and math.floor(now) or nil
+	else
+		ns._tsmLastSeenAt = nil
+	end
 	ns.InvalidateCrateTooltipCache()
 	ns.InvalidateTooltipEconCache()
 	if ns.MP and ns.MP.InvalidateSolveCache then ns.MP.InvalidateSolveCache() end
@@ -2228,6 +2274,10 @@ function ns.QueryTSMMarketBundle(itemID)
 		numAuctions = numAuctions,
 		regionSoldPerDay = regionSoldPerDay,
 	}
+	local now = (type(time) == "function" and time()) or 0
+	if type(now) == "number" and now > 0 then
+		ns._tsmLastSeenAt = math.floor(now)
+	end
 	tsmBundleCache.items[id] = bundle
 	return bundle
 end

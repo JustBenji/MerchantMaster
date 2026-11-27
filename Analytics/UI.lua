@@ -349,19 +349,34 @@ local function ledgerTypeBadge(r)
     return "|cff" .. pal.hexMuted .. lbl .. "|r"
 end
 
+local function formatDeQty(q)
+    local n = tonumber(q) or 0
+    local r = math.floor(n + 0.5)
+    if math.abs(n - r) < 1e-6 then return num(r) end
+    return string.format("%.1f", n)
+end
+
 local function renderLedgerTotal(r)
+    local pal = getPalette()
     if r.type == "DISENCHANT_BROKEN" then
-        local estVal = tonumber(r.extra and r.extra.estValue) or 0
-        local p = r.profit
-        if p == nil then
-            p = (estVal > 0) and (estVal - (tonumber(r.cogs) or 0)) or 0
-        end
-        return money(p, true)
+        local cost = tonumber(r.cogs) or tonumber(r.extra and r.extra.deSrcCost) or 0
+        return "|cff" .. pal.hexMuted .. "Cost|r " .. money(cost, false)
     elseif r.type == "DISENCHANT_RECEIVE" then
-        local mv = tonumber(r.extra and r.extra.marketValue) or tonumber(r.extra and r.extra.allocBasis) or 0
-        return money(mv, false)
+        local basis = (r.extra and r.extra.allocBasis ~= nil) and tonumber(r.extra.allocBasis) or 0
+        return "|cff" .. pal.hexMuted .. "Cost|r " .. money(basis, false)
     end
     return money(r.total, true)
+end
+
+local function renderLedgerWhere(r)
+    local w = r.where or ""
+    local deOrigin = r.extra and r.extra.deOrigin
+    if type(deOrigin) == "table" and type(deOrigin.srcName) == "string" and deOrigin.srcName ~= "" then
+        local pal = getPalette()
+        local tag = "|cff" .. pal.hexMuted .. "via DE: " .. deOrigin.srcName .. "|r"
+        return (w ~= "" and (w .. " ") or "") .. tag
+    end
+    return w ~= "" and w or "-"
 end
 
 local TOP_COLS = {
@@ -372,7 +387,7 @@ local LEDGER_COLS = {
     column("time", "Time Frame", 98, "LEFT", function(r) return formatRelativeTime(r.time) end),
     column("char", "Character", 96, "LEFT", function(r) return r.charShort or r.char or "-" end),
     column("type", "Type", 94, "LEFT", ledgerTypeBadge),
-    column("where", "Where", 100, "LEFT"),
+    column("where", "Where", 100, "LEFT", renderLedgerWhere),
     column("itemName", "Item", 184, "LEFT", function(r) return item(r, "itemName") end),
     column("qty", "Qty", 46),
     column("unit", "Per Item", 80, nil, mfield("unit")),
@@ -698,11 +713,44 @@ local function tooltip(owner, row)
         return
     end
     if row.time then GameTooltip:AddLine(when(row.time) .. "  " .. (row.typeLabel or row.type or "")) end
-    for _, field in ipairs({ { "total", "Cash Flow" }, { "gross", "Gross" }, { "fee", "AH Fee" },
-        { "deposit", "Deposit" }, { "depositReturned", "Returned Deposit" }, { "cogs", "COGS" }, { "depLost", "Deposits Lost" }, { "profit", "Realized Profit" } }) do
-        local v = row[field[1]]
-        if v == nil then v = extra[field[1]] end
-        if v ~= nil then GameTooltip:AddDoubleLine(field[2], money(v, true)) end
+    if row.type == "DISENCHANT_BROKEN" then
+        GameTooltip:AddDoubleLine("Transferred Cost", money(row.cogs or extra.deSrcCost or 0, false))
+        GameTooltip:AddDoubleLine("Realized Profit", money(0, true))
+    elseif row.type == "DISENCHANT_RECEIVE" then
+        GameTooltip:AddDoubleLine("Carried-Over Cost", money(extra.allocBasis or 0, false))
+        if extra.srcName and extra.srcName ~= "" then
+            GameTooltip:AddDoubleLine("Disenchanted From", tostring(extra.srcName))
+        end
+        GameTooltip:AddDoubleLine("Realized Profit", money(0, true))
+    else
+        for _, field in ipairs({ { "total", "Cash Flow" }, { "gross", "Gross" }, { "fee", "AH Fee" },
+            { "deposit", "Deposit" }, { "depositReturned", "Returned Deposit" }, { "cogs", "COGS" }, { "depLost", "Deposits Lost" }, { "profit", "Realized Profit" } }) do
+            local v = row[field[1]]
+            if v == nil then v = extra[field[1]] end
+            if v ~= nil then GameTooltip:AddDoubleLine(field[2], money(v, true)) end
+        end
+    end
+    if type(extra.deOrigin) == "table" and extra.deOrigin.srcName and extra.deOrigin.srcName ~= "" then
+        GameTooltip:AddDoubleLine("Origin", "via DE: " .. tostring(extra.deOrigin.srcName))
+        if type(extra.deOrigins) == "table" and #extra.deOrigins > 1 then
+            for i, orig in ipairs(extra.deOrigins) do
+                if i > 4 then break end
+                GameTooltip:AddDoubleLine("  " .. tostring(orig.srcName or ("Item #" .. tostring(orig.srcItemID or 0))) .. " x" .. formatDeQty(orig.qty),
+                    "Cost " .. money(orig.srcCost or 0, false))
+            end
+        end
+    end
+    if (tonumber(row.deBrokenQty) or 0) > 0 or (tonumber(row.deIndirectProfit) or 0) ~= 0 then
+        GameTooltip:AddDoubleLine("Indirect via DE", money(row.deIndirectProfit or 0, true))
+        GameTooltip:AddDoubleLine("DE'd / Sold Mats", num(row.deBrokenQty or 0) .. "x / " .. formatDeQty(row.deSoldMatsQty or 0) .. "x")
+        if type(row.deSoldOutputs) == "table" then
+            for i, out in ipairs(row.deSoldOutputs) do
+                if i > 3 then break end
+                GameTooltip:AddDoubleLine("  " .. tostring(out.name or ("Item #" .. tostring(out.itemID or 0))) .. " x" .. formatDeQty(out.qty),
+                    money(out.profit or 0, true))
+            end
+        end
+        GameTooltip:AddLine("Already counted on sold mat (not double-counted).", 0.70, 0.70, 0.70)
     end
     if row.reprices ~= nil then GameTooltip:AddDoubleLine("Repriced Units", num(row.reprices)) end
     if row.relists ~= nil then GameTooltip:AddDoubleLine("Relisted Units", num(row.relists)) end
@@ -1696,6 +1744,20 @@ function UI.ShowItemDetail(itemKey)
         "Buy " .. money(detail.minBuy or 0) .. " - " .. money(detail.maxBuy or 0) ..
         " | Sell " .. money(detail.minSell or 0) .. " - " .. money(detail.maxSell or 0),
         "180d Sale Rate " .. percent(detail.saleRate) .. " | Expires " .. num(detail.expSinceSale) .. " | Cancels " .. num(detail.canSinceSale) }
+    if (tonumber(detail.deBrokenQty) or 0) > 0 or (tonumber(detail.deIndirectProfit) or 0) ~= 0 then
+        lines[#lines + 1] = "Indirect via DE: " .. money(detail.deIndirectProfit or 0, true)
+            .. " (DE'd " .. num(detail.deBrokenQty or 0) .. "x -> Sold mats: " .. formatDeQty(detail.deSoldMatsQty or 0)
+            .. "x; already counted on sold mat, not double-counted)"
+        if type(detail.deSoldOutputs) == "table" and #detail.deSoldOutputs > 0 then
+            local outs = {}
+            for i, out in ipairs(detail.deSoldOutputs) do
+                if i > 3 then break end
+                outs[#outs + 1] = tostring(out.name or ("Item #" .. tostring(out.itemID or 0)))
+                    .. " x" .. formatDeQty(out.qty) .. ": " .. money(out.profit or 0, true)
+            end
+            lines[#lines + 1] = "DE Sold Outputs: " .. table.concat(outs, ", ")
+        end
+    end
     local inv = detail.inventory or {}
     lines[#lines + 1] = "Cross-Alt Inventory: Bags " .. num(inv.bags) .. " | Bank " .. num(inv.bank) .. " | Mail " ..
         num(inv.mail) .. " | In-Transit " .. num(inv.inTransit) .. " | AH " .. num(inv.ah) .. " | Total " .. num(inv.total)
@@ -3845,6 +3907,37 @@ do
                 end
             end
         end
+        if cc and cc.heatStripFrame then
+            local hsf = cc.heatStripFrame
+            paintFsLocal(hsf.captionFs, pal.textSecondary)
+            if hsf._mode == "snapshot" and hsf.strip24h and hsf._stripData then
+                hsf.strip24h:Bind(hsf._stripData, pal, hsf._nowHour)
+            elseif hsf.spectrumSegs then
+                local stops = isLight and {
+                    { 0.10, 0.45, 0.88 }, { 0.08, 0.56, 0.88 }, { 0.06, 0.65, 0.82 }, { 0.08, 0.68, 0.64 },
+                    { 0.12, 0.68, 0.42 }, { 0.28, 0.70, 0.28 }, { 0.56, 0.70, 0.16 }, { 0.78, 0.64, 0.10 },
+                    { 0.88, 0.54, 0.08 }, { 0.90, 0.40, 0.10 }, { 0.86, 0.26, 0.14 }, { 0.80, 0.16, 0.18 },
+                } or {
+                    { 0.18, 0.56, 0.96 }, { 0.14, 0.68, 0.94 }, { 0.14, 0.78, 0.88 }, { 0.16, 0.80, 0.70 },
+                    { 0.20, 0.82, 0.48 }, { 0.40, 0.84, 0.32 }, { 0.68, 0.84, 0.22 }, { 0.90, 0.76, 0.16 },
+                    { 0.96, 0.64, 0.16 }, { 0.98, 0.48, 0.14 }, { 0.96, 0.34, 0.18 }, { 0.94, 0.22, 0.24 },
+                }
+                local frac = math.max(0, math.min(1, tonumber(hsf._heatFrac) or 0.12))
+                local activeSeg = math.max(1, math.min(#stops, math.floor(frac * #stops) + 1))
+                for i, seg in ipairs(hsf.spectrumSegs) do
+                    local c = stops[i] or stops[#stops]
+                    local a = (i == activeSeg) and 1.0 or (isLight and 0.82 or 0.78)
+                    seg:SetColorTexture(c[1], c[2], c[3], a)
+                end
+                if hsf.spectrumMarker then
+                    if isLight then
+                        hsf.spectrumMarker:SetColorTexture(0.08, 0.10, 0.14, 1.0)
+                    else
+                        hsf.spectrumMarker:SetColorTexture(1.0, 1.0, 1.0, 0.98)
+                    end
+                end
+            end
+        end
 
         local lc = state.ledgerCard
         if lc then
@@ -4572,6 +4665,28 @@ do
             tf.lblFs:SetText(spec.label)
             state.compCard.heatTiers[i] = tf
         end
+        local hsf = CreateFrame("Frame", nil, state.compCard)
+        hsf:SetHeight(26)
+        hsf.captionFs = makeFs(hsf, 9, "semibold", "LEFT", "textSecondary")
+        if hsf.captionFs.SetWordWrap then hsf.captionFs:SetWordWrap(false) end
+        hsf.captionFs:SetHeight(12)
+        hsf.captionFs:SetText("Sales Heat")
+        hsf.strip24h = (ns.Chart and ns.Chart.CreateHeatStrip24h)
+            and ns.Chart.CreateHeatStrip24h(hsf, { height = 8, showNowTick = true })
+            or nil
+        hsf.spectrumBar = CreateFrame("Frame", nil, hsf)
+        hsf.spectrumBar:SetHeight(8)
+        hsf.spectrumSegs = {}
+        for i = 1, 12 do
+            local seg = hsf.spectrumBar:CreateTexture(nil, "ARTWORK", nil, 0)
+            seg:SetHeight(8)
+            hsf.spectrumSegs[i] = seg
+        end
+        hsf.spectrumMarker = hsf.spectrumBar:CreateTexture(nil, "OVERLAY", nil, 2)
+        hsf.spectrumMarker:SetSize(4, 12)
+        hsf._mode = "spectrum"
+        hsf._heatFrac = 0.12
+        state.compCard.heatStripFrame = hsf
 
         state.ledgerCard = makeInfoCard("PERSONAL LEDGER & CROSS-ALT INVENTORY")
         local lc = state.ledgerCard
@@ -5216,7 +5331,45 @@ do
                     tf:SetPoint("TOPLEFT", card.heatBar, "TOPLEFT", tx, 0)
                     tf:SetSize(math.max(24, w), 22)
                 end
-                visualH = 58
+                if card.heatStripFrame then
+                    local hsf = card.heatStripFrame
+                    hsf:ClearAllPoints()
+                    hsf:SetPoint("TOPLEFT", card, "TOPLEFT", 12, -56)
+                    hsf:SetSize(bodyW, 26)
+                    if hsf.captionFs then
+                        hsf.captionFs:ClearAllPoints()
+                        hsf.captionFs:SetPoint("TOPLEFT", hsf, "TOPLEFT", 0, 0)
+                        hsf.captionFs:SetSize(bodyW, 12)
+                    end
+                    if hsf.strip24h and hsf.strip24h.frame then
+                        hsf.strip24h.frame:ClearAllPoints()
+                        hsf.strip24h.frame:SetPoint("TOPLEFT", hsf, "TOPLEFT", 0, -15)
+                        hsf.strip24h:Layout(bodyW)
+                    end
+                    if hsf.spectrumBar then
+                        hsf.spectrumBar:ClearAllPoints()
+                        hsf.spectrumBar:SetPoint("TOPLEFT", hsf, "TOPLEFT", 0, -15)
+                        hsf.spectrumBar:SetSize(bodyW, 8)
+                        local nSeg = #(hsf.spectrumSegs or {})
+                        for i, seg in ipairs(hsf.spectrumSegs or {}) do
+                            local x0 = math.floor((i - 1) * bodyW / nSeg)
+                            local x1 = math.floor(i * bodyW / nSeg)
+                            seg:ClearAllPoints()
+                            seg:SetPoint("TOPLEFT", hsf.spectrumBar, "TOPLEFT", x0, 0)
+                            seg:SetSize(math.max(1, x1 - x0), 8)
+                        end
+                        if hsf.spectrumMarker then
+                            local frac = math.max(0.02, math.min(0.98, tonumber(hsf._heatFrac) or 0.12))
+                            local mx = math.max(0, math.min(bodyW - 4, math.floor(bodyW * frac - 2 + 0.5)))
+                            hsf.spectrumMarker:ClearAllPoints()
+                            hsf.spectrumMarker:SetPoint("TOPLEFT", hsf.spectrumBar, "TOPLEFT", mx, 2)
+                            hsf.spectrumMarker:SetSize(4, 12)
+                        end
+                    end
+                    visualH = 86
+                else
+                    visualH = 58
+                end
             elseif card == state.ledgerCard then
                 local yOff = 28
                 if card._hasTrades and card.horizonFrame then
@@ -6491,6 +6644,64 @@ do
 
         -- Row 3 Right Column Card 1: Competition, Velocity & Quality
         state.compCard._activeTier = resolveHeatTier(heatLabel, demandInfo, liveSales)
+        if state.compCard.heatStripFrame then
+            local hsf = state.compCard.heatStripFrame
+            local strip24h = (itemID and h and h.Pricing and type(h.Pricing.GetItemHeatStrip24h) == "function")
+                and h.Pricing.GetItemHeatStrip24h(itemID, econKey) or nil
+            if (not strip24h or type(strip24h.hourly) ~= "table")
+                and itemID and h and h.Pricing and type(h.Pricing.GetItemHeatmap) == "function" then
+                local hmObj = h.Pricing.GetItemHeatmap(itemID, econKey)
+                if type(hmObj) == "table" and type(hmObj.hourly) == "table" then
+                    strip24h = {
+                        hourly = hmObj.hourly,
+                        avgPrice = hmObj.avgPrice,
+                        medianPrice = hmObj.medianPrice,
+                        updatedAt = hmObj.updatedAt,
+                        hasLiveOverlay = hmObj.hasLiveOverlay,
+                    }
+                end
+            end
+            local hasHourlyData = false
+            if type(strip24h) == "table" and type(strip24h.hourly) == "table" then
+                for hr = 0, 23 do
+                    local raw = strip24h.hourly[hr]
+                    local v = (type(raw) == "table") and tonumber(raw.avgPrice) or tonumber(raw)
+                    if v and v > 0 then hasHourlyData = true; break end
+                end
+            end
+            if hasHourlyData and hsf.strip24h then
+                local nowHr = tonumber(dateFn and dateFn("!%H")) or 12
+                hsf._mode = "snapshot"
+                hsf._stripData = strip24h
+                hsf._nowHour = nowHr
+                hsf.strip24h:Bind(strip24h, pal, nowHr)
+                hsf.spectrumBar:Hide()
+                local srcLbl = (salesSrc and salesSrc ~= "") and tostring(salesSrc) or "Snapshot"
+                hsf.captionFs:SetText("24h Heatmap | Cold (Buy) -> Hot (Sell) | " .. srcLbl)
+            else
+                hsf._mode = "spectrum"
+                hsf._stripData = nil
+                if hsf.strip24h then hsf.strip24h:Clear() end
+                hsf.spectrumBar:Show()
+                local tierIdx = state.compCard._activeTier or 1
+                local sRate = tonumber(liveSales)
+                local frac
+                if tierIdx >= 4 then
+                    frac = 0.88
+                elseif tierIdx == 3 then
+                    frac = (sRate and sRate > 0) and (0.62 + math.min(0.20, math.log(1 + sRate / 15) * 0.14)) or 0.72
+                elseif tierIdx == 2 then
+                    frac = (sRate and sRate > 0) and (0.34 + math.min(0.22, (sRate / 15) * 0.22)) or 0.45
+                else
+                    frac = (sRate and sRate > 0) and (0.10 + math.min(0.18, (sRate / 2) * 0.18)) or 0.10
+                end
+                hsf._heatFrac = frac
+                local tierSpec = HEAT_TIERS[tierIdx] or HEAT_TIERS[1]
+                local rateTxt = (sRate ~= nil) and (daRate(sRate) .. "/day") or "Unscanned"
+                hsf.captionFs:SetText("Sales Heat | " .. tierSpec.label .. " (" .. rateTxt .. ")")
+            end
+            hsf:Show()
+        end
         local compLines = {}
         local mutedHex = daHex(pal, "hexMuted")
         local textHex = daHex(pal, "hexText")
@@ -6610,13 +6821,26 @@ do
                 ch.lblFs:SetText(sp[1] .. " " .. daNum(sp[2]))
             end
         end
-        local ledgerSummary = mutedHex .. "Owned:|r " .. textHex
-            .. "Bags " .. daNum(qBags) .. " | Bank " .. daNum(qBank)
-            .. " | Mail " .. daNum(qMail) .. " | AH " .. daNum(qAH)
-            .. " (Total " .. daNum(qTotal) .. ")"
-            .. (hasTrades and (" | Sold 7d " .. daNum(w7.sold or 0) .. " / All " .. daNum(allSold)) or "")
-            .. (ownedScroll > 0 and (" | Scrolls " .. daNum(ownedScroll)) or "") .. "|r"
-        lc.bodyFs:SetText(ledgerSummary)
+        local ledgerLines = {
+            mutedHex .. "Owned:|r " .. textHex
+                .. "Bags " .. daNum(qBags) .. " | Bank " .. daNum(qBank)
+                .. " | Mail " .. daNum(qMail) .. " | AH " .. daNum(qAH)
+                .. " (Total " .. daNum(qTotal) .. ")"
+                .. (hasTrades and (" | Sold 7d " .. daNum(w7.sold or 0) .. " / All " .. daNum(allSold)) or "")
+                .. (ownedScroll > 0 and (" | Scrolls " .. daNum(ownedScroll)) or "") .. "|r"
+        }
+        local deBrokenQty = detail and (tonumber(detail.deBrokenQty) or 0) or 0
+        local deSoldMatsQty = detail and (tonumber(detail.deSoldMatsQty) or 0) or 0
+        local deIndirectProfit = detail and (tonumber(detail.deIndirectProfit) or 0) or 0
+        if deBrokenQty > 0 or deIndirectProfit ~= 0 then
+            local deLine = mutedHex .. "Indirect via Disenchant:|r " .. textHex
+                .. "DE'd " .. daNum(deBrokenQty) .. "x -> Sold mats"
+                .. (deSoldMatsQty > 0 and (" (" .. formatDeQty(deSoldMatsQty) .. "x)") or "")
+                .. ":|r " .. daMoney(deIndirectProfit, true)
+                .. mutedHex .. " (counted on sold mat)|r"
+            ledgerLines[#ledgerLines + 1] = deLine
+        end
+        lc.bodyFs:SetText(table.concat(ledgerLines, "\n"))
 
         -- Row 3 Right Column Card 3: Acquisition, Scroll, Skill & Cooldown
         local ac = state.acqCard
