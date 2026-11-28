@@ -3271,11 +3271,12 @@ local function buildUnifiedShoppingListImpl(db, opts)
 	local overrides = opts.subCraftOverrides or db.subCraftOverrides
 	local ownedCounts = opts.ownedCounts
 		or (ns.GetOwnedItemCounts and ns.GetOwnedItemCounts())
+		or (_G.MerchantMasterAPI and _G.MerchantMasterAPI.GetOwnedCounts and _G.MerchantMasterAPI.GetOwnedCounts())
 		or (_G.MerchantMaster and _G.MerchantMaster.GetOwnedCounts and _G.MerchantMaster.GetOwnedCounts())
 		or {}
 	local deductOwned = opts.deductOwned
 	if deductOwned == nil then
-		deductOwned = (db.deductOwnedMats == true)
+		deductOwned = (db.craftOrderDeductOwned == true) or (db.deductOwnedMats == true)
 	end
 
 	local groups = {}

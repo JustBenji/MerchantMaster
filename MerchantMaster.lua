@@ -298,46 +298,54 @@ function app.getBagContainers()
 end
 
 function app.getBankContainers()
-	local bank, seen = {}, {}
+	local bagSet = {}
+	for _, bagID in ipairs(app.getBagContainers()) do
+		bagSet[bagID] = true
+	end
+	local bank, seen, accountBankSet = {}, {}, {}
+	local enumIdx = _G.Enum and _G.Enum.BagIndex
+	if enumIdx then
+		for ai = 1, 5 do
+			local aid = tonumber(enumIdx["AccountBankTab_" .. ai])
+			if aid then accountBankSet[aid] = true end
+		end
+	end
 	local function add(id)
-		if type(id) == "number" and not seen[id] then
+		if type(id) == "number" and not seen[id] and not bagSet[id] and not accountBankSet[id] then
 			seen[id] = true
 			bank[#bank + 1] = id
 		end
 	end
 	local numBags = tonumber(_G.NUM_BAG_SLOTS) or 4
 	local numTotal = tonumber(_G.NUM_TOTAL_EQUIPPED_BAG_SLOTS) or 0
-	local enumIdx = _G.Enum and _G.Enum.BagIndex
 	local reagentBag = enumIdx and tonumber(enumIdx.ReagentBag) or nil
 	local enumBankBag1 = enumIdx and tonumber(enumIdx.BankBag_1) or nil
 	local hasCharTabs = enumIdx and tonumber(enumIdx.CharacterBankTab_1) ~= nil
-	local hasReagentBag = reagentBag ~= nil and reagentBag > numBags and (enumBankBag1 == nil or reagentBag ~= enumBankBag1)
-		and (numTotal > numBags or hasCharTabs)
+	local hasReagentBag = (reagentBag ~= nil and bagSet[reagentBag])
+		or (reagentBag ~= nil and reagentBag > numBags and (enumBankBag1 == nil or reagentBag ~= enumBankBag1) and (numTotal > numBags or hasCharTabs))
 	if hasCharTabs then
-		if enumIdx and tonumber(enumIdx.Bank) and tonumber(enumIdx.Bank) ~= reagentBag then
+		if enumIdx and tonumber(enumIdx.Bank) then
 			add(tonumber(enumIdx.Bank))
 		end
 		for ti = 1, 9 do
 			local tabId = enumIdx and tonumber(enumIdx["CharacterBankTab_" .. ti]) or nil
-			if tabId and tabId ~= reagentBag then add(tabId) end
+			if tabId then add(tabId) end
 		end
 		return bank
 	end
 	add(-1)
 	if enumIdx and tonumber(enumIdx.Bank) then add(tonumber(enumIdx.Bank)) end
 	local reagentBankID = (enumIdx and tonumber(enumIdx.Reagentbank)) or -3
-	local reagentUnlocked = true
+	local reagentUnlocked = false
 	if type(_G.IsReagentBankUnlocked) == "function" then
 		local ok, unlocked = pcall(_G.IsReagentBankUnlocked)
-		reagentUnlocked = ok and unlocked == true
+		if ok and unlocked == true then reagentUnlocked = true end
 	end
 	if reagentUnlocked then add(reagentBankID) end
 	local firstBankBag = enumBankBag1 or (hasReagentBag and (reagentBag + 1) or (numBags + 1))
 	local bankSlots = tonumber(_G.NUM_BANKBAGSLOTS) or 7
 	for bag = firstBankBag, firstBankBag + bankSlots - 1 do
-		if not (hasReagentBag and bag == reagentBag) then
-			add(bag)
-		end
+		add(bag)
 	end
 	return bank
 end
@@ -486,6 +494,7 @@ local function alts()
 		end
 	end
 	local curFirstLow = (type(curFirst) == "string" and curFirst ~= "") and curFirst:lower() or nil
+	local candidates = {}
 	for key, c in pairs(MerchantMasterDB.chars) do
 		if key ~= app.charKey and type(c) == "table" then
 			local isSelfGuid = (curGuid ~= nil and c.guid ~= nil and c.guid == curGuid)
@@ -493,17 +502,143 @@ local function alts()
 			local isStaleSelfFirst = (curFirstLow ~= nil and type(c.name) == "string" and c.name:lower() == curFirstLow
 				and sameScope and (c.guid == nil or curGuid == nil or c.guid == curGuid))
 			if not isSelfGuid and not isStaleSelfFirst then
-				if c.economy == cur.economy then
-					list[#list + 1] = c
-				elseif not c.economy and c.realm == cur.realm and c.faction == cur.faction then
-					list[#list + 1] = c
+				if c.economy == cur.economy or (not c.economy and c.realm == cur.realm and c.faction == cur.faction) then
+					candidates[#candidates + 1] = { key = key, char = c }
 				end
 			end
+		end
+	end
+	local function altScore(entry)
+		local c = entry.char
+		local nm = tostring(c.name or "")
+		local twoWord = nm:find("%s") and 1 or 0
+		local upd = tonumber(c.updatedAt) or 0
+		return twoWord, upd, entry.key
+	end
+	local byGuid = {}
+	for _, entry in ipairs(candidates) do
+		local g = entry.char.guid
+		if g and g ~= "" then
+			local prev = byGuid[g]
+			if not prev then
+				byGuid[g] = entry
+			else
+				local w1, u1, k1 = altScore(entry)
+				local w2, u2, k2 = altScore(prev)
+				if (w1 ~= w2 and w1 > w2) or (w1 == w2 and u1 ~= u2 and u1 > u2) or (w1 == w2 and u1 == u2 and k1 > k2) then
+					byGuid[g] = entry
+				end
+			end
+		end
+	end
+	local twoWordFirsts = {}
+	local filtered = {}
+	for _, entry in ipairs(candidates) do
+		local g = entry.char.guid
+		if not g or g == "" or byGuid[g] == entry then
+			filtered[#filtered + 1] = entry
+			local nm = type(entry.char.name) == "string" and entry.char.name or ""
+			local firstW, restW = nm:match("^([^%s]+)%s+(.+)$")
+			if firstW and restW and restW ~= "" then
+				local fk = tostring(entry.char.economy or "") .. "|" .. firstW:lower()
+				twoWordFirsts[fk] = (twoWordFirsts[fk] or 0) + 1
+			end
+		end
+	end
+	for _, entry in ipairs(filtered) do
+		local c = entry.char
+		local nm = type(c.name) == "string" and c.name or ""
+		local isSingle = (nm ~= "" and not nm:find("%s"))
+		local dropAlias = false
+		if isSingle then
+			local fk = tostring(c.economy or "") .. "|" .. nm:lower()
+			if twoWordFirsts[fk] == 1 and (not c.guid or c.guid == "") then
+				dropAlias = true
+			end
+		end
+		if not dropAlias then
+			list[#list + 1] = c
 		end
 	end
 	return list
 end
 app.getAlts = alts
+
+local function nowEpochSafe()
+	local v = _G.time and _G.time()
+	if type(v) == "number" then return v end
+	return (os and os.time and os.time()) or 0
+end
+
+local function hasOrderFlowTrackedAHPurchase(itemID, itemName)
+	local of = app.orderFlow
+	if not (of and of.HasAnyItems and of.HasAnyItems() and of.GetState) then return false end
+	local st = of.GetState()
+	local ahItems = st and st.stages and st.stages.ah and st.stages.ah.items
+	if type(ahItems) == "table" then
+		for _, it in ipairs(ahItems) do
+			if (tonumber(it and it.bought) or 0) > 0 then
+				if (itemID and it.itemID == itemID) or (itemName and it.name == itemName) then
+					return true
+				end
+			end
+		end
+	end
+	local colItems = st and st.stages and st.stages.collect and st.stages.collect.items
+	if type(colItems) == "table" then
+		for _, it in ipairs(colItems) do
+			if it and it.source == "mail" and it.purchasedFromAH == true and (tonumber(it.remaining) or 0) > 0 then
+				if (itemID and it.itemID == itemID) or (itemName and it.name == itemName) then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
+local function inTransitItemsForTarget(targetKey, targetChar, outByID, outByName, excludeOrderFlowAH)
+	local ldb = _G.MerchantMasterLedgerDB
+	local list = ldb and ldb.inTransitMail
+	if type(list) ~= "table" then return end
+	local nowT = nowEpochSafe()
+	local tName = type(targetChar) == "table" and targetChar.name or nil
+	local tFirst = type(targetChar) == "table" and targetChar.firstName or (type(tName) == "string" and tName:match("^([^%s]+)%s+") or nil)
+	local tEcon = (type(targetChar) == "table" and targetChar.economy) or (app.char and app.char.economy) or nil
+	local tRealm = (type(targetChar) == "table" and targetChar.realm) or (GetRealmName and GetRealmName()) or nil
+	local firstKey = (tEcon and tRealm and tFirst and tFirst ~= "") and (tostring(tEcon) .. "-" .. tostring(tRealm) .. "-" .. tostring(tFirst)) or nil
+	for _, e in ipairs(list) do
+		if type(e) == "table" and (tonumber(e.expiresAt) or 0) > nowT and (not tEcon or not e.econ or e.econ == tEcon) then
+			if (targetKey and e.toChar == targetKey) or (firstKey and e.toChar == firstKey) then
+				local isAHTransit = (e.fromChar == "Auction House")
+				for id, q in pairs(e.items or {}) do
+					local nid = tonumber(id)
+					local qty = tonumber(q) or 0
+					if nid and nid > 0 and qty > 0 then
+						local nm = (ns.ItemName and ns.ItemName(nid))
+							or (_G.GetItemInfo and _G.GetItemInfo(nid))
+							or (app.itemIDs_reverse and app.itemIDs_reverse[nid])
+							or ("Item #" .. tostring(nid))
+						if not (excludeOrderFlowAH and isAHTransit and hasOrderFlowTrackedAHPurchase(nid, nm)) then
+							if outByID then outByID[nid] = (outByID[nid] or 0) + qty end
+							if outByName then
+								outByName[nm] = (outByName[nm] or 0) + qty
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
+local function findCharKeyByTable(targetTbl)
+	if not (targetTbl and MerchantMasterDB and MerchantMasterDB.chars) then return nil end
+	for k, v in pairs(MerchantMasterDB.chars) do
+		if v == targetTbl then return k end
+	end
+	return nil
+end
 
 local function mailCount(name)
 	return (app.char.mail and app.char.mail[name]) or 0
@@ -517,10 +652,10 @@ local function altCount(name)
 	local n = 0
 	for _, c in ipairs(alts()) do
 		n = n + ((c.bags or {})[name] or 0)
-		if MerchantMasterDB and MerchantMasterDB.includeMail then
+		if not MerchantMasterDB or MerchantMasterDB.includeMail ~= false then
 			n = n + ((c.mail or {})[name] or 0)
 		end
-		if MerchantMasterDB and MerchantMasterDB.includeBank then
+		if not MerchantMasterDB or MerchantMasterDB.includeBank ~= false then
 			n = n + ((c.bank or {})[name] or 0)
 		end
 	end
@@ -539,18 +674,19 @@ local function ownedCounts()
 			end
 		end
 	end
-	local function addChar(c, withBags)
+	local function addChar(c, cKey, withBags)
 		if withBags then add(c.bags) end
-		if MerchantMasterDB and MerchantMasterDB.includeMail then
+		if not MerchantMasterDB or MerchantMasterDB.includeMail ~= false then
 			add(c.mail)
+			inTransitItemsForTarget(cKey, c, nil, counts, c == app.char)
 		end
-		if MerchantMasterDB and MerchantMasterDB.includeBank then
+		if not MerchantMasterDB or MerchantMasterDB.includeBank ~= false then
 			add(c.bank)
 		end
 	end
-	addChar(app.char, false)
+	addChar(app.char, app.charKey, false)
 	if MerchantMasterDB and MerchantMasterDB.includeAlts then
-		for _, c in ipairs(alts()) do addChar(c, true) end
+		for _, c in ipairs(alts()) do addChar(c, findCharKeyByTable(c), true) end
 	end
 	app._cachedOwnedCounts, app._cachedOwnedCountsRev = counts, rev
 	return counts
@@ -584,19 +720,20 @@ local function ownedCountsByID()
 			end
 		end
 	end
-	local function addCharByID(c, withBags)
+	local function addCharByID(c, cKey, withBags)
 		if not c then return end
 		if withBags then addByName(c.bags) end
-		if MerchantMasterDB and MerchantMasterDB.includeMail then
+		if not MerchantMasterDB or MerchantMasterDB.includeMail ~= false then
 			addByName(c.mail)
+			inTransitItemsForTarget(cKey, c, byID, nil, c == app.char)
 		end
-		if MerchantMasterDB and MerchantMasterDB.includeBank then
+		if not MerchantMasterDB or MerchantMasterDB.includeBank ~= false then
 			addByName(c.bank)
 		end
 	end
-	addCharByID(app.char, false)
+	addCharByID(app.char, app.charKey, false)
 	if MerchantMasterDB and MerchantMasterDB.includeAlts then
-		for _, c in ipairs(alts()) do addCharByID(c, true) end
+		for _, c in ipairs(alts()) do addCharByID(c, findCharKeyByTable(c), true) end
 	end
 	app._cachedOwnedCountsByID, app._cachedOwnedCountsByIDRev = byID, rev
 	return byID
@@ -631,9 +768,21 @@ function app.getItemOwnershipBreakdown(itemID, name)
 			bank = bankCount(itemName)
 		end
 	end
+	local transitHere = 0
 	if not db or db.includeMail ~= false then
 		if itemName then
 			mail = mailCount(itemName)
+		end
+		if id and id > 0 then
+			local trByID = {}
+			inTransitItemsForTarget(app.charKey, app.char, trByID, nil, true)
+			transitHere = trByID[id] or 0
+			mail = mail + transitHere
+		elseif itemName then
+			local trByName = {}
+			inTransitItemsForTarget(app.charKey, app.char, nil, trByName, true)
+			transitHere = trByName[itemName] or 0
+			mail = mail + transitHere
 		end
 	end
 	local altEntries = {}
@@ -652,11 +801,18 @@ function app.getItemOwnershipBreakdown(itemID, name)
 				if db.includeMail ~= false then
 					local mq = (c.mail and c.mail[itemName]) or 0
 					if mq > 0 then altEntries[#altEntries + 1] = { name = c.name or "Alt", location = "Mail", qty = mq } end
+					local tq = 0
+					if id and id > 0 then
+						local atr = {}
+						inTransitItemsForTarget(findCharKeyByTable(c), c, atr, nil)
+						tq = atr[id] or 0
+					end
+					if tq > 0 then altEntries[#altEntries + 1] = { name = c.name or "Alt", location = "In-Transit", qty = tq } end
 				end
 			end
 		end
 	end
-	return { bags = math.max(0, bags), bank = math.max(0, bank), mail = math.max(0, mail), alts = altEntries }
+	return { bags = math.max(0, bags), bank = math.max(0, bank), mail = math.max(0, mail), inTransit = math.max(0, transitHere), alts = altEntries }
 end
 
 local function sameCounts(a,b)
@@ -670,7 +826,7 @@ local function sameProfKeys(a,b)
     return true
 end
 function app.CommitMailboxSnapshot(snapshot)
-    if not snapshot or not snapshot.names or not app.char then return false end
+    if not snapshot or snapshot.partial == true or not snapshot.names or not app.char then return false end
     local prior=app.char.mail or {}
     local priorItems=app.mailboxItems
     if not priorItems then
@@ -679,14 +835,21 @@ function app.CommitMailboxSnapshot(snapshot)
     end
     local changed=not sameCounts(prior,snapshot.names) or not sameCounts(priorItems,snapshot.items)
     app.mailboxItems=snapshot.items
-    app.char.mail=snapshot.names; app.char.bought={}
+    app.char.mail=snapshot.names
+    if snapshot.partial ~= true then
+        app.char.bought = {}
+    end
     for name,id in pairs(snapshot.itemIDs or {}) do app.itemIDs[name]=id end
     local analytics=ns.Analytics
     if analytics and analytics.Inventory then
-        local _,arrived=analytics.Inventory.AcceptMailboxSnapshot(snapshot)
-        analytics.Inventory.ReceiveTransitMail(app.charKey,arrived)
+        local invSnap,arrived=analytics.Inventory.AcceptMailboxSnapshot(snapshot)
+        analytics.Inventory.ReceiveTransitMail(app.charKey,arrived,{
+            snapshotAt=(invSnap and invSnap.mailAt) or nowEpochSafe(),
+            fullScan=(snapshot.partial ~= true),
+        })
     end
     if changed then
+        app.ownershipRev = (app.ownershipRev or 0) + 1
         app.invalidateRecipeStats("ownership")
         if ns.MapPins and ns.MapPins.InvalidateOwnership then ns.MapPins.InvalidateOwnership() end
         if app.scheduleRecipeRefresh then app.scheduleRecipeRefresh() end
@@ -694,7 +857,7 @@ function app.CommitMailboxSnapshot(snapshot)
     if analytics and analytics.Capture and analytics.Capture.MailboxSnapshotCommitted then analytics.Capture.MailboxSnapshotCommitted() end
     return changed
 end
-local function readMailboxOwnership(allowEmpty)
+local function readMailboxOwnership(allowEmpty, allowPartial)
     if not _G.GetInboxNumItems or not _G.GetInboxHeaderInfo or not _G.GetInboxItem then return end
     local count,total=_G.GetInboxNumItems()
     local function secret(v)
@@ -703,34 +866,65 @@ local function readMailboxOwnership(allowEmpty)
     if secret(count) or secret(total) or count==nil then return end
     count=tonumber(count)
     if not count or count<0 or count%1~=0 or (count==0 and (not allowEmpty or (tonumber(total) or 0)>0)) then return end
-    local snapshot={names={},items={},itemIDs={}}
+    local snapshot={names={},items={},itemIDs={},totalInbox=(tonumber(total) or count),visibleInbox=count}
     local maxAtt=tonumber(_G.ATTACHMENTS_MAX_RECEIVE) or 12
     for index=1,count do
-        local _,_,_,subject,_,_,_,hasItem=_G.GetInboxHeaderInfo(index)
-        if secret(subject) or secret(hasItem) or subject==nil or subject==_G.RETRIEVING_DATA then return end
-        local declared=tonumber(hasItem)
-        local loaded=0
-        for slot=1,maxAtt do
-            local name,id,_,qty=_G.GetInboxItem(index,slot)
-            local link=_G.GetInboxItemLink and _G.GetInboxItemLink(index,slot)
-            if secret(name) or secret(id) or secret(qty) or secret(link) then return end
-            id=tonumber(id) or (type(link)=="string" and tonumber(link:match("item:(%d+)")))
-            if name or (id and (hasItem==true or (tonumber(hasItem) or 0)>0)) then
-                if not id or not name or name==_G.RETRIEVING_DATA then return end
-                loaded=loaded+1
-                qty=tonumber(qty) or 1
-                snapshot.items[id]=(snapshot.items[id] or 0)+qty
-                snapshot.names[name]=(snapshot.names[name] or 0)+qty
-                snapshot.itemIDs[name]=id
+        local _,_,_,subject,_,codAmount,_,hasItem=_G.GetInboxHeaderInfo(index)
+        if secret(subject) or secret(codAmount) or secret(hasItem) or subject==nil or subject==_G.RETRIEVING_DATA then
+            return nil
+        elseif (tonumber(codAmount) or 0)<=0 then
+            local declared=tonumber(hasItem)
+            local loaded=0
+            local mailItems={}
+            local mailOK=true
+            for slot=1,maxAtt do
+                local name,id,_,qty=_G.GetInboxItem(index,slot)
+                local link=_G.GetInboxItemLink and _G.GetInboxItemLink(index,slot)
+                if secret(name) or secret(id) or secret(qty) or secret(link) then
+                    return nil
+                end
+                id=tonumber(id) or (type(link)=="string" and tonumber(link:match("item:(%d+)")))
+                if name or (id and (hasItem==true or (tonumber(hasItem) or 0)>0)) then
+                    if not id or not name or name==_G.RETRIEVING_DATA then
+                        return nil
+                    end
+                    loaded=loaded+1
+                    qty=tonumber(qty) or 1
+                    mailItems[#mailItems+1]={id=id,name=name,qty=qty}
+                end
+            end
+            if mailOK then
+                if (declared and loaded~=declared) or (hasItem==true and loaded==0) then
+                    if not allowPartial then return nil end
+                    snapshot.partial=true
+                else
+                    for _,att in ipairs(mailItems) do
+                        snapshot.items[att.id]=(snapshot.items[att.id] or 0)+att.qty
+                        snapshot.names[att.name]=(snapshot.names[att.name] or 0)+att.qty
+                        snapshot.itemIDs[att.name]=att.id
+                    end
+                end
             end
         end
-        if (declared and loaded~=declared) or (hasItem==true and loaded==0) then return end
     end
     return snapshot
 end
+app.readMailboxOwnership = readMailboxOwnership
 function app.QueueMailboxScan(reason)
-    if not app.atMailbox or (reason~="open" and reason~="take") then return end
+    if not app.atMailbox or (reason~="open" and reason~="take" and reason~="settled" and reason~="sync") then return end
     if ns.MailHelper and ns.MailHelper.IsActive and ns.MailHelper.IsActive() then return end
+    local capture=ns.Analytics and ns.Analytics.Capture
+    if reason=="settled" or reason=="sync" then
+        app.mailboxScanPending=nil
+        local snapshot=capture and capture.ScanMailboxSnapshot and capture.ScanMailboxSnapshot(true)
+        if type(snapshot)~="table" then
+            snapshot=readMailboxOwnership(true,false)
+        end
+        if snapshot then
+            app.CommitMailboxSnapshot(snapshot)
+            return
+        end
+    end
     local request=app.mailboxScanPending
     if request then
         if reason=="take" then
@@ -739,7 +933,7 @@ function app.QueueMailboxScan(reason)
         return
     end
     local token=app.mailboxSession
-    request={attempt=0,actionPending=reason=="take",inboxReady=false}; app.mailboxScanPending=request
+    request={attempt=0,actionPending=(reason=="take"),inboxReady=(reason=="settled" or reason=="sync")}; app.mailboxScanPending=request
     local function schedule()
         request.generation=(request.generation or 0)+1
         local generation=request.generation
@@ -747,17 +941,18 @@ function app.QueueMailboxScan(reason)
             if app.mailboxSession~=token or not app.atMailbox or app.mailboxScanPending~=request or request.generation~=generation then return end
             if ns.MailHelper and ns.MailHelper.IsActive and ns.MailHelper.IsActive() then app.mailboxScanPending=nil; return end
             request.attempt=request.attempt+1
-            local capture=ns.Analytics and ns.Analytics.Capture
-            local snapshot=capture and capture.ScanMailboxSnapshot and capture.ScanMailboxSnapshot(request.inboxReady or reason=="take")
+            local allowEmpty=request.inboxReady or reason=="take" or reason=="settled" or reason=="sync" or not (app.char and next(app.char.mail or {}))
+            local snapshot=capture and capture.ScanMailboxSnapshot and capture.ScanMailboxSnapshot(allowEmpty)
             if type(snapshot)~="table" then
-                snapshot=readMailboxOwnership(request.inboxReady or reason=="take" or not (app.char and next(app.char.mail or {})))
+                snapshot=readMailboxOwnership(allowEmpty, false)
             end
             if snapshot and (not request.actionPending or request.inboxReady) then
                 app.mailboxScanPending=nil; app.CommitMailboxSnapshot(snapshot)
             elseif request.attempt<3 then
                 schedule()
-            elseif not request.actionPending then
-                app.mailboxScanPending=nil
+            else
+                if snapshot then app.CommitMailboxSnapshot(snapshot) end
+                if not request.actionPending then app.mailboxScanPending=nil end
             end
         end)
     end
@@ -786,8 +981,15 @@ local function scanBank()
 	if changed then app.ownershipRev = (app.ownershipRev or 0) + 1 end
 	app.char.bank = counts
 	app.char.boundBank = boundCounts
+	if ns.Analytics and ns.Analytics.Inventory and type(ns.Analytics.Inventory.ScanBank) == "function" then
+		if type(ns.Analytics.Inventory.IsBankOpen) == "function" and ns.Analytics.Inventory.IsBankOpen() then
+			pcall(ns.Analytics.Inventory.ScanBank)
+		end
+	end
 	return changed
 end
+app.scanBags = bagCounts
+app.scanBank = scanBank
 
 local function scanGear()
 	if not GetInventoryItemLink then return end
@@ -1365,8 +1567,8 @@ end
 local function bundleText(b)
 	local text = string.format("%d/%d %s", math.min(b.have, b.count), b.count, b.name)
 	local where = {}
-	local mail = MerchantMasterDB and MerchantMasterDB.includeMail and mailCount(b.name) or 0
-	local bank = MerchantMasterDB and MerchantMasterDB.includeBank and bankCount(b.name) or 0
+	local mail = (not MerchantMasterDB or MerchantMasterDB.includeMail ~= false) and mailCount(b.name) or 0
+	local bank = (not MerchantMasterDB or MerchantMasterDB.includeBank ~= false) and bankCount(b.name) or 0
 	if mail > 0 then where[#where + 1] = string.format("%d in mail", mail) end
 	if bank > 0 then where[#where + 1] = string.format("%d in bank", bank) end
 	local onAlts = MerchantMasterDB and MerchantMasterDB.includeAlts and altCount(b.name) or 0
@@ -9529,10 +9731,30 @@ do
 	cartBuyerModal.filterFs = cbFilterFs
 	cartBuyerModal.filterClearBtn = cbFilterClearBtn
 
-	-- Big Bottom-Left General Collect All Button (Stage 2 Overview footer)
-	local cbCollectAllBtn = makeFramedBtn(cbStripPane, 356, 34, "Collect All", 12, { useSkinArt = true, withDot = false })
+	-- Big Bottom-Left General Collect All Button + Refresh Button (Stage 2 Overview footer)
+	local cbCollectRefreshBtn = makeFramedBtn(cbStripPane, 82, 34, "Refresh", 11, { useSkinArt = true, withDot = false })
+	cbCollectRefreshBtn:SetPoint("BOTTOMRIGHT", cbStripPane, "BOTTOMRIGHT", -2, 2)
+	cbCollectRefreshBtn:SetSize(82, 34)
+	cbCollectRefreshBtn:SetScript("OnClick", function()
+		if not app.orderFlow then return end
+		if app.orderFlow.IsCollectAllActive and app.orderFlow.IsCollectAllActive() then
+			app.orderFlow.StopCollectAll("user_stop")
+		end
+		if app.orderFlow.RefreshCollectForCurrentChar then
+			app.orderFlow.RefreshCollectForCurrentChar()
+		end
+		if app.syncOrderFlowDockAndRender then
+			app.syncOrderFlowDockAndRender()
+		end
+	end)
+	addSellTip(cbCollectRefreshBtn, "Scan Current Character", "Scan this character's bags (and open Mailbox or Bank) and re-assign where each needed item should be collected from.")
+	cbCollectRefreshBtn:Hide()
+	ui.collectRefreshBtn = cbCollectRefreshBtn
+	cartBuyerModal.collectRefreshBtn = cbCollectRefreshBtn
+
+	local cbCollectAllBtn = makeFramedBtn(cbStripPane, 264, 34, "Collect All", 12, { useSkinArt = true, withDot = false })
 	cbCollectAllBtn:SetPoint("BOTTOMLEFT", cbStripPane, "BOTTOMLEFT", 2, 2)
-	cbCollectAllBtn:SetPoint("BOTTOMRIGHT", cbStripPane, "BOTTOMRIGHT", -2, 2)
+	cbCollectAllBtn:SetPoint("RIGHT", cbCollectRefreshBtn, "LEFT", -6, 0)
 	cbCollectAllBtn:SetHeight(34)
 	cbCollectAllBtn:SetScript("OnClick", function()
 		if not app.orderFlow then return end
@@ -11454,9 +11676,19 @@ do
 				cbCollectAllBtn:PaintStyle(df, subtleBorder, dt, 0.08, nil)
 			end
 			cbCollectAllBtn:Show()
+			if cbCollectRefreshBtn then
+				local rFill = isLight and { 0.94, 0.95, 0.97, 1 } or (isCustom and { 0.06, 0.17, 0.12, 0.95 } or { 0.16, 0.17, 0.20, 0.94 })
+				local rStroke = isLight and { 0.68, 0.45, 0.02, 0.72 } or ((isCustom and pal.frameBorder) or pal.cartMainAccent or { 0.83, 0.64, 0.24, 0.88 })
+				local rText = isLight and (pal.text or { 0, 0, 0, 1 }) or ((isCustom and pal.headGold) or pal.text or { 0.97, 0.84, 0.49, 1 })
+				cbCollectRefreshBtn:SetText("Refresh")
+				cbCollectRefreshBtn:SetEnabled(true)
+				cbCollectRefreshBtn:PaintStyle(rFill, rStroke, rText, isLight and 0.10 or 0.24)
+				cbCollectRefreshBtn:Show()
+			end
 			cbListFrame:SetPoint("BOTTOMRIGHT", cbStripPane, "BOTTOMRIGHT", -2, 42)
 		else
 			cbCollectAllBtn:Hide()
+			if cbCollectRefreshBtn then cbCollectRefreshBtn:Hide() end
 			cbListFrame:SetPoint("BOTTOMRIGHT", cbStripPane, "BOTTOMRIGHT", -2, 0)
 		end
 
@@ -12757,6 +12989,9 @@ do
 		local parts = {
 			tostring(db.subCraftMode or "smart"),
 			tostring(db.craftOrderDeductOwned == true),
+			tostring(db.includeBank ~= false),
+			tostring(db.includeMail ~= false),
+			tostring(db.includeAlts == true),
 			tostring(db.forgedHumanDiplomacy == true),
 			tostring(db.crateMode or "cheapest"),
 			tostring(db.writMode or "cheapest"),
@@ -12834,8 +13069,94 @@ do
 			return {}, 0, 0, meta, ""
 		end
 		local opts = cachedOpts or {}
-		local rawRows, totalCost, missingCount, meta = ns.BuildUnifiedShoppingList(db, {
-			profMap = opts.profMap or ns.GetPlayerProfessions(),
+		local profMapArg = opts.profMap or ns.GetPlayerProfessions()
+		local shopDB = db
+		local deductedMainList = {}
+		local subDeductedTotal = {}
+		local of = app.orderFlow
+		local isOrderIncomplete = of and of.HasAnyItems and of.HasAnyItems()
+			and of.IsCraftCycleComplete and (not of.IsCraftCycleComplete())
+		if isOrderIncomplete and type(db.craftOrderQueue) == "table" and #db.craftOrderQueue > 0 and of.GetState then
+			local st = of.GetState()
+			local crTasks = st and st.stages and st.stages.craft and st.stages.craft.tasks
+			if type(crTasks) == "table" and #crTasks > 0 then
+				local bySpell, byOut = {}, {}
+				for _, t in ipairs(crTasks) do
+					local cc = tonumber(t and t.completedCrafts) or 0
+					if t and cc > 0 then
+						cc = math.floor(cc + 0.5)
+						if t.isSubCraft == true or t.tier == "sub_craft" then
+							for _, r in ipairs(t.reagents or {}) do
+								if type(r) == "table" then
+									local rk = r.itemID or r[1] or (type(r.name) == "string" and r.name:lower())
+									local rq = tonumber(r.qty or r[2]) or 0
+									if rk and rq > 0 then
+										subDeductedTotal[rk] = (subDeductedTotal[rk] or 0) + rq * cc
+									end
+								end
+							end
+						else
+							if t.spellID then bySpell[t.spellID] = (bySpell[t.spellID] or 0) + cc end
+							local tid = t.itemID or t.outputItemID
+							if tid then byOut[tid] = (byOut[tid] or 0) + cc end
+						end
+					end
+				end
+				if next(bySpell) ~= nil or next(byOut) ~= nil then
+					local adjQueue = {}
+					local anyAdjusted = false
+					for _, q in ipairs(db.craftOrderQueue) do
+						local origQty = math.floor((tonumber(q and q.qty) or 0) + 0.5)
+						if origQty > 0 then
+							local rec = ns.ResolveCraftingOrderRecipe and ns.ResolveCraftingOrderRecipe(q, profMapArg, false) or nil
+							local sp = (rec and rec.spellID) or q.spellID
+							local oid = (rec and rec.outputItemID) or q.outputItemID
+							local cc = (sp and bySpell[sp]) or (oid and byOut[oid]) or 0
+							if cc > 0 and rec then
+								if sp and bySpell[sp] then bySpell[sp] = 0 end
+								if oid and byOut[oid] then byOut[oid] = 0 end
+								local made = math.max(1, tonumber(rec.numMade) or 1)
+								local adjQty = math.max(0, origQty - (cc * made))
+								local dedMats = {}
+								local rList = (type(q.reagentOverride) == "table" and #q.reagentOverride > 0) and q.reagentOverride or (rec.reagents or {})
+								for _, r in ipairs(rList) do
+									if type(r) == "table" then
+										local rk = r.itemID or r[1] or (type(r.name) == "string" and r.name:lower())
+										local rq = tonumber(r.qty or r[2]) or 0
+										if rk and rq > 0 then
+											dedMats[rk] = (dedMats[rk] or 0) + rq * cc
+										end
+									end
+								end
+								anyAdjusted = true
+								if adjQty > 0 then
+									local copyQ = {}
+									for k, v in pairs(q) do copyQ[k] = v end
+									copyQ.qty = adjQty
+									adjQueue[#adjQueue + 1] = copyQ
+								end
+								deductedMainList[#deductedMainList + 1] = {
+									spellID = sp,
+									outputItemID = oid,
+									completedCrafts = cc,
+									origQty = origQty,
+									deductedReagents = dedMats,
+								}
+							else
+								adjQueue[#adjQueue + 1] = q
+							end
+						end
+					end
+					if anyAdjusted then
+						shopDB = {}
+						for k, v in pairs(db) do shopDB[k] = v end
+						shopDB.craftOrderQueue = adjQueue
+					end
+				end
+			end
+		end
+		local rawRows, totalCost, missingCount, meta = ns.BuildUnifiedShoppingList(shopDB, {
+			profMap = profMapArg,
 			repState = opts.repState or ns.GetMerchantReputation(),
 			subCraftMode = db.subCraftMode or "smart",
 			subCraftOverrides = db.subCraftOverrides,
@@ -12848,6 +13169,30 @@ do
 			writProfitRowsByItemID = opts.writProfitRowsByItemID,
 			priceBank = app.getUIPriceBank and app.getUIPriceBank() or nil,
 		})
+		if (#deductedMainList > 0 or next(subDeductedTotal) ~= nil) and type(rawRows) == "table" then
+			local bySp, byOut, dedTotal = {}, {}, {}
+			for rk, rq in pairs(subDeductedTotal) do
+				dedTotal[rk] = (dedTotal[rk] or 0) + rq
+			end
+			for _, dm in ipairs(deductedMainList) do
+				if dm.spellID then bySp[dm.spellID] = dm end
+				if dm.outputItemID then byOut[dm.outputItemID] = dm end
+				for rk, rq in pairs(dm.deductedReagents or {}) do
+					dedTotal[rk] = (dedTotal[rk] or 0) + rq
+				end
+			end
+			rawRows._deductedReagentsTotal = dedTotal
+			for _, row in ipairs(rawRows) do
+				if row and row.isMainRow then
+					local dm = (row.spellID and bySp[row.spellID]) or (row.itemID and byOut[row.itemID])
+					if dm then
+						row._completedCraftsDeducted = dm.completedCrafts
+						row._origOrderQty = dm.origQty
+						row._deductedReagents = dm.deductedReagents
+					end
+				end
+			end
+		end
 		local mc = (meta and meta.mainCount) or 0
 		-- Heading stays in primary ink (the title label is semibold); only the caption and warning are tinted.
 		local sumStr = themeText(string.format(
@@ -22944,7 +23289,8 @@ local function flushBagResync(forceAll)
 	elseif counts and not app._lastBagCountsByID and newByID then
 		app._lastBagCountsByID = copyCountsTable(newByID)
 	end
-	if app.orderFlow and app.orderFlow.OnBagUpdateDelayed and (forceAll or isOrderFlowVisible()) then
+	local hasPendingCollect = app.orderFlow and app.orderFlow.HasPendingCollectTake and app.orderFlow.HasPendingCollectTake()
+	if app.orderFlow and app.orderFlow.OnBagUpdateDelayed and (forceAll or isOrderFlowVisible() or app.atMailbox or app.atBank or hasPendingCollect) then
 		app.orderFlow.OnBagUpdateDelayed()
 	end
 	return counts
@@ -23839,9 +24185,11 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4)
             app.mailboxScanPending.inboxReady=true; app.mailboxScanPending.attempt=0
             app.mailboxScanPending.schedule()
         end
-		if app.orderFlow and isOrderFlowVisible() and app.orderFlow.OnMailInboxUpdate then
+		if app.orderFlow and app.orderFlow.OnMailInboxUpdate and app.orderFlow.HasAnyItems and app.orderFlow.HasAnyItems() then
 			app.orderFlow.OnMailInboxUpdate()
-			syncOrderFlowDockAndRender()
+			if isOrderFlowVisible() then
+				syncOrderFlowDockAndRender()
+			end
 		end
 	elseif event == "BANKFRAME_OPENED" then
 		app.atBank = true

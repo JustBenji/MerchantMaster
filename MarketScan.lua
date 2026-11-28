@@ -3326,6 +3326,7 @@ do
 		end
 		return {
 			version = 2,
+			ownerCharKey = orderFlow.ownerCharKey or (app and app.charKey) or nil,
 			title = orderFlow.title or "Shopping List",
 			cartSig = (type(orderFlow.cartSig) == "string" and orderFlow.cartSig ~= "") and orderFlow.cartSig or nil,
 			activeStage = (orderFlow.activeStage and STAGE_INDEX_BY_KEY[orderFlow.activeStage]) and orderFlow.activeStage or "ah",
@@ -3548,35 +3549,46 @@ do
 				return list
 			end
 		end
-		local out, seen = {}, {}
+		local out, seen, accountBankSet = {}, {}, {}
+		local bagSet = {}
+		for _, b in ipairs(getBagContainerList()) do
+			bagSet[b] = true
+		end
+		local numBags = safeNumber(NUM_BAG_SLOTS) or 4
+		local enumIdx = _G.Enum and _G.Enum.BagIndex
+		if enumIdx then
+			for ai = 1, 5 do
+				local aid = safeNumber(enumIdx["AccountBankTab_" .. ai], true)
+				if aid then accountBankSet[aid] = true end
+			end
+		end
 		local function add(id)
-			if type(id) == "number" and not seen[id] then
+			if type(id) == "number" and not seen[id] and not accountBankSet[id] then
 				seen[id] = true
 				out[#out + 1] = id
 			end
 		end
-		local numBags = safeNumber(NUM_BAG_SLOTS) or 4
-		local numTotal = safeNumber(_G.NUM_TOTAL_EQUIPPED_BAG_SLOTS) or 0
-		local enumIdx = _G.Enum and _G.Enum.BagIndex
 		local reagentBag = enumIdx and safeNumber(enumIdx.ReagentBag)
 		local enumBankBag1 = enumIdx and safeNumber(enumIdx.BankBag_1)
 		local hasCharTabs = enumIdx and safeNumber(enumIdx.CharacterBankTab_1) ~= nil
-		local hasReagentBag = reagentBag ~= nil and reagentBag > numBags and (not enumBankBag1 or reagentBag ~= enumBankBag1)
-			and (numTotal > numBags or hasCharTabs)
 		if hasCharTabs then
 			local bRoot = enumIdx and safeNumber(enumIdx.Bank, true)
-			if bRoot and bRoot ~= reagentBag then add(bRoot) end
+			if bRoot and not bagSet[bRoot] then add(bRoot) end
 			for ti = 1, 9 do
 				local tid = enumIdx and safeNumber(enumIdx["CharacterBankTab_" .. ti])
-				if tid and tid ~= reagentBag then add(tid) end
+				if tid and not bagSet[tid] then add(tid) end
 			end
 			return out
 		end
 		add(safeNumber(BANK_CONTAINER, true) or -1)
-		add(safeNumber(REAGENTBANK_CONTAINER, true) or -3)
-		local firstBankBag = enumBankBag1 or (hasReagentBag and (reagentBag + 1) or (numBags + 1))
-		for b = firstBankBag, 16 do
-			if not (hasReagentBag and b == reagentBag) then
+		local rb = safeNumber(REAGENTBANK_CONTAINER, true) or -3
+		if rb and type(_G.IsReagentBankUnlocked) == "function" and _G.IsReagentBankUnlocked() == true then
+			add(rb)
+		end
+		local numBankBags = safeNumber(_G.NUM_BANKBAGSLOTS) or 7
+		local firstBankBag = enumBankBag1 or ((reagentBag and bagSet[reagentBag]) and (reagentBag + 1) or (numBags + 1))
+		for b = firstBankBag, firstBankBag + numBankBags - 1 do
+			if not bagSet[b] then
 				add(b)
 			end
 		end
@@ -3870,8 +3882,11 @@ do
 			local cSt = orderFlow.stages.collect
 			local cBase = cSt.baselineBagQty
 			for _, it in ipairs(cSt.items or {}) do
-				if it.source == "bank" and it.itemID and ((becameBank and cSt.pendingTake == nil) or cBase[it.itemID] == nil) then
-					cBase[it.itemID] = getLiveBagCount(it.itemID)
+				if it.source == "bank" and it.itemID then
+					local liveQty = getLiveBagCount(it.itemID)
+					if cBase[it.itemID] == nil or liveQty < cBase[it.itemID] then
+						cBase[it.itemID] = liveQty
+					end
 				end
 			end
 			if becameBank or (next(orderFlow.liveBankSlots) == nil and hasCollectItemsOfSource("bank")) then
@@ -3888,15 +3903,20 @@ do
 			local cSt = orderFlow.stages.collect
 			local cBase = cSt.baselineBagQty
 			for _, it in ipairs(cSt.items or {}) do
-				if (it.source == "mail" or it.source == "alt") and it.itemID and ((becameMail and cSt.pendingTake == nil) or cBase[it.itemID] == nil) then
-					cBase[it.itemID] = getLiveBagCount(it.itemID)
+				if (it.source == "mail" or it.source == "alt") and it.itemID then
+					local liveQty = getLiveBagCount(it.itemID)
+					if cBase[it.itemID] == nil or liveQty < cBase[it.itemID] then
+						cBase[it.itemID] = liveQty
+					end
 				end
 			end
-			if becameMail or (next(orderFlow.liveMailSlots) == nil and (hasCollectItemsOfSource("mail") or hasCollectItemsOfSource("alt"))) then
+			if becameMail or orderFlow.env._mailDirty or (next(orderFlow.liveMailSlots) == nil and (hasCollectItemsOfSource("mail") or hasCollectItemsOfSource("alt") or hasCollectItemsOfSource("bank"))) then
+				orderFlow.env._mailDirty = false
 				OrderFlow.ScanOpenMailbox()
 			end
 		elseif orderFlow.env.atMail then
 			orderFlow.env.atMail = false
+			orderFlow.env._mailDirty = false
 			OrderFlow.ScanOpenMailbox()
 		end
 
@@ -4304,8 +4324,10 @@ do
 		if totalCount <= 0 then return false end
 
 		resetAllStages(saved.title)
+		orderFlow.ownerCharKey = (type(saved.ownerCharKey) == "string" and saved.ownerCharKey ~= "") and saved.ownerCharKey or nil
 		orderFlow.cartSig = (type(saved.cartSig) == "string" and saved.cartSig ~= "") and saved.cartSig or nil
 		orderFlow.selectedDestKey = (type(saved.selectedDestKey) == "string" and saved.selectedDestKey ~= "") and saved.selectedDestKey or nil
+		local isCharSwitched = (orderFlow.ownerCharKey ~= nil and app and type(app.charKey) == "string" and app.charKey ~= "" and orderFlow.ownerCharKey ~= app.charKey)
 
 		local ah = orderFlow.stages.ah
 		ah.items = clonePersistArray(sAh.items, function(it)
@@ -4375,6 +4397,11 @@ do
 		local rawColItems = clonePersistArray(sCol.items, function(it)
 			it.needed = math.max(1, math.floor((tonumber(it.needed) or 1) + 0.5))
 			it.collected = math.max(0, math.min(it.needed, math.floor((tonumber(it.collected) or 0) + 0.5)))
+			it._createdByAH = (it._createdByAH == true) and true or nil
+			it.purchasedFromAH = (it.purchasedFromAH == true) and true or nil
+			it.mailFromAlt = (it.mailFromAlt == true) and true or nil
+			local rawAhAdd = tonumber(it._ahAddedQty)
+			it._ahAddedQty = (rawAhAdd and rawAhAdd > 0) and math.floor(rawAhAdd + 0.5) or nil
 			local hasAltMeta = (type(it.altOwners) == "table" and #it.altOwners > 0)
 				or (type(it.altLabel) == "string" and it.altLabel ~= "")
 			if it.source == "alt" or it.status == "alt_info" or (it.source == "mail" and hasAltMeta) then
@@ -4398,7 +4425,7 @@ do
 		local filteredColItems = {}
 		for _, it in ipairs(rawColItems) do
 			local dropItem = false
-			if it.source == "alt" or it.status == "alt_info" then
+			if not isCharSwitched and (it.source == "alt" or it.status == "alt_info") then
 				if type(it.altOwners) == "table" and #it.altOwners > 0 then
 					local keptAlts = {}
 					for _, a in ipairs(it.altOwners) do
@@ -4509,6 +4536,9 @@ do
 		if orderFlow.env.atVendor then OrderFlow.ScanOpenVendor() end
 		if orderFlow.env.atBank then OrderFlow.ScanOpenBank() end
 		if orderFlow.env.atMail then OrderFlow.ScanOpenMailbox() end
+		if isCharSwitched and OrderFlow.RefreshCollectForCurrentChar then
+			OrderFlow.RefreshCollectForCurrentChar({ silent = true, preserveStage = true, charSwitched = true })
+		end
 		notifyOrderFlow(true)
 		return true
 	end
@@ -4933,6 +4963,9 @@ do
 				venSpent = (not prevDone and st.vendor and tonumber(st.vendor.spentCopper)) or 0,
 				ah = {},
 				collect = {},
+				ownedUsedByKey = {},
+				mailCollectedByKey = {},
+				ahMail = {},
 				vendor = {},
 				craft = {},
 				craftBySpell = {},
@@ -4953,6 +4986,38 @@ do
 					local base = it.itemID or (type(it.name) == "string" and it.name:lower())
 					if base and it.source then
 						prevSnap.collect[tostring(it.source) .. ":" .. tostring(base)] = { collected = tonumber(it.collected) or 0, skipped = (it.status == "skipped") }
+						local itNeeded = tonumber(it.needed) or 0
+						local ahAdded = 0
+						if it.source == "mail" and it.purchasedFromAH == true then
+							local rawAdd = tonumber(it._ahAddedQty)
+							ahAdded = rawAdd and math.min(itNeeded, math.max(0, rawAdd)) or itNeeded
+						end
+						local ownedPortion = math.max(0, itNeeded - ahAdded)
+						if ownedPortion > 0 then
+							prevSnap.ownedUsedByKey[base] = (prevSnap.ownedUsedByKey[base] or 0) + ownedPortion
+						end
+						if it.source == "mail" then
+							prevSnap.mailCollectedByKey[base] = (prevSnap.mailCollectedByKey[base] or 0) + (tonumber(it.collected) or 0)
+						end
+						local ahRem = (it.source == "mail" and it.purchasedFromAH == true and it.status ~= "skipped")
+							and math.min(tonumber(it.remaining) or 0, ahAdded)
+							or 0
+						if ahRem > 0 then
+							local prevM = prevSnap.ahMail[base]
+							if prevM then
+								prevM.needed = prevM.needed + ahRem
+								prevM.remaining = prevM.remaining + ahRem
+							else
+								prevSnap.ahMail[base] = {
+									itemID = it.itemID,
+									name = it.name,
+									itemLink = it.itemLink,
+									needed = ahRem,
+									remaining = ahRem,
+									provenance = cloneProvenanceList(it.provenance),
+								}
+							end
+						end
 					end
 				end
 				for _, it in ipairs((st.vendor and st.vendor.items) or {}) do
@@ -4989,6 +5054,7 @@ do
 			end
 		end
 		resetAllStages(title)
+		orderFlow.ownerCharKey = (app and app.charKey) or nil
 		orderFlow.cartSig = (type(opts.cartSig) == "string" and opts.cartSig ~= "") and opts.cartSig or nil
 
 		local profMap = opts.profMap
@@ -5023,6 +5089,13 @@ do
 		local craftTasksByKey, craftTaskOrder = {}, {}
 		local craftStack = {}
 		local childReagentsByParent = {}
+		local deductedMats = {}
+		if preserveProgress and type(rows) == "table" and type(rows._deductedReagentsTotal) == "table" then
+			for rk, rq in pairs(rows._deductedReagentsTotal) do
+				local nq = tonumber(rq) or 0
+				if nq > 0 then deductedMats[rk] = (deductedMats[rk] or 0) + nq end
+			end
+		end
 		local discoverySeq = 0
 
 		local function resolveRowRecipe(row, isMain)
@@ -5103,7 +5176,17 @@ do
 			local rawProf = (recipe and recipe.prof) or row.craftProf or row.prof or "crafting"
 			local profKey, profName, profBadge = resolveProfMeta(rawProf)
 			local numMade = math.max(1, math.floor((safeNumber(recipe and recipe.numMade) or safeNumber(row.numMade) or 1) + 0.5))
-			local addOutputs = math.max(1, math.floor((tonumber(row.qty) or 1) + 0.5))
+			local dedCrafts = (preserveProgress and not isSub) and math.max(0, math.floor((tonumber(row._completedCraftsDeducted) or 0) + 0.5)) or 0
+			local origOutputs = (preserveProgress and not isSub and dedCrafts > 0 and tonumber(row._origOrderQty) and tonumber(row._origOrderQty) > 0)
+				and math.floor(tonumber(row._origOrderQty) + 0.5)
+				or nil
+			local addOutputs = origOutputs or (math.max(1, math.floor((tonumber(row.qty) or 1) + 0.5)) + (dedCrafts * numMade))
+			if preserveProgress and type(rows._deductedReagentsTotal) ~= "table" and type(row._deductedReagents) == "table" then
+				for rk, rq in pairs(row._deductedReagents) do
+					local nq = tonumber(rq) or 0
+					if nq > 0 then deductedMats[rk] = (deductedMats[rk] or 0) + nq end
+				end
+			end
 			local idKey = (spID and spID > 0) and ("s:" .. tostring(spID))
 				or ((outID and outID > 0) and ("i:" .. tostring(outID)) or ("n:" .. tostring(dispName)))
 			local taskKey = (isSub and "sub:" or "main:") .. idKey
@@ -5441,8 +5524,11 @@ do
 		-- Pass 2: Owned Bucket Splitting (Stage 2 Collect priority: Inventory/bags -> mail -> bank -> alt)
 		local cItems = orderFlow.stages.collect.items
 		local cBase = orderFlow.stages.collect.baselineBagQty
+		local newOwnedUsedByKey = {}
 		local collectSeq = 0
 		for _, oRec in ipairs(ownedOrder) do
+			local oKey = oRec.itemID or (type(oRec.name) == "string" and oRec.name:lower())
+			if oKey then newOwnedUsedByKey[oKey] = (newOwnedUsedByKey[oKey] or 0) + oRec.totalNeeded end
 			local ok, owned = pcall(ownershipFn, oRec.itemID, oRec.name)
 			owned = (ok and type(owned) == "table") and owned or { bags = getLiveBagCount(oRec.itemID), bank = 0, mail = 0, alts = {} }
 			local bagsHave = math.max(0, math.floor((tonumber(owned.bags) or 0) + 0.5))
@@ -5519,18 +5605,22 @@ do
 				rem = rem - useBank
 			end
 
+			local altStockSum = 0
 			if rem > 0 and type(owned.alts) == "table" and #owned.alts > 0 then
 				local matchedAlts = {}
 				for _, a in ipairs(owned.alts) do
-					if type(a) == "table" and (tonumber(a.qty) or 0) > 0 then
+					local aq = type(a) == "table" and math.floor((tonumber(a.qty) or 0) + 0.5) or 0
+					if aq > 0 then
 						matchedAlts[#matchedAlts + 1] = {
 							name = tostring(a.name or "Alt"),
 							location = tostring(a.location or "Bags"),
-							qty = math.floor((tonumber(a.qty) or 0) + 0.5),
+							qty = aq,
 						}
+						altStockSum = altStockSum + aq
 					end
 				end
-				if #matchedAlts > 0 then
+				if #matchedAlts > 0 and altStockSum > 0 then
+					local altTake = math.min(rem, altStockSum)
 					local altParts = {}
 					for _, a in ipairs(matchedAlts) do
 						altParts[#altParts + 1] = string.format("%s (%s %dx)", a.name, a.location, a.qty)
@@ -5542,21 +5632,48 @@ do
 						itemID = oRec.itemID,
 						name = oRec.name,
 						source = "alt",
-						needed = rem,
+						needed = altTake,
 						collected = 0,
-						remaining = rem,
+						remaining = altTake,
 						altOwners = matchedAlts,
 						altLabel = "On Alt: " .. table.concat(altParts, ", "),
 						availableHere = 0,
 						status = "alt_info",
-						provenance = cloneProvenanceList(oRec.provenance, rem, oRec.totalNeeded),
+						provenance = cloneProvenanceList(oRec.provenance, altTake, oRec.totalNeeded),
 					}
-					rem = 0
+					rem = rem - altTake
 				end
 			end
 
 			if rem > 0 then
-				if bagsEntry then
+				if (bagsHave + mailHave + bankHave + altStockSum) > 0 then
+					if oKey and newOwnedUsedByKey[oKey] then
+						newOwnedUsedByKey[oKey] = math.max(0, newOwnedUsedByKey[oKey] - rem)
+					end
+					local existingAH = nil
+					for _, ahIt in ipairs(ahItems) do
+						if (oRec.itemID and ahIt.itemID == oRec.itemID) or (oRec.name and ahIt.name == oRec.name) then
+							existingAH = ahIt
+							break
+						end
+					end
+					if existingAH then
+						existingAH.needed = (existingAH.needed or 0) + rem
+						existingAH.remaining = math.max(0, existingAH.needed - (existingAH.bought or 0))
+						existingAH.totalPrice = (existingAH.unitPrice or 0) * existingAH.remaining
+					else
+						local deficitEntry = buildAHEntryFromTerm({
+							searchString = oRec.name,
+							isExact = true,
+							quantity = rem,
+							itemID = oRec.itemID,
+							provenance = cloneProvenanceList(oRec.provenance, rem, oRec.totalNeeded),
+						}, title)
+						if deficitEntry then
+							ahItems[#ahItems + 1] = deficitEntry
+						end
+					end
+				elseif bagsEntry then
 					bagsEntry.needed = bagsEntry.needed + rem
 					bagsEntry.collected = bagsEntry.collected + rem
 					bagsEntry.availableHere = bagsEntry.needed
@@ -5769,13 +5886,21 @@ do
 
 		if prevSnap then
 			local keptAHSpent, keptVenSpent = false, false
+			local dbCfg = _G.MerchantMasterDB
+			local deductOwnedOn
+			if opts.deductOwned ~= nil then
+				deductOwnedOn = (opts.deductOwned == true)
+			else
+				deductOwnedOn = (type(dbCfg) == "table") and ((dbCfg.craftOrderDeductOwned == true) or (dbCfg.deductOwnedMats == true))
+			end
 			for _, it in ipairs(ahItems) do
 				local k = it.itemID or (type(it.name) == "string" and it.name:lower())
 				local old = k and prevSnap.ah[k]
 				if old then
-					local mailCol = prevSnap.collect and prevSnap.collect["mail:" .. tostring(k)]
-					local mailCollected = mailCol and (tonumber(mailCol.collected) or 0) or 0
-					local netBought = math.max(0, (tonumber(old.bought) or 0) - mailCollected)
+					local mailCollected = deductOwnedOn and ((prevSnap.mailCollectedByKey and prevSnap.mailCollectedByKey[k]) or 0) or 0
+					local ownedGrowth = math.max(0, (newOwnedUsedByKey[k] or 0) - ((prevSnap.ownedUsedByKey and prevSnap.ownedUsedByKey[k]) or 0))
+					local accounted = math.max(mailCollected, ownedGrowth) + (deductedMats[k] or 0)
+					local netBought = math.max(0, (tonumber(old.bought) or 0) - accounted)
 					local b = math.max(0, math.min(it.needed or 1, math.floor(netBought + 0.5)))
 					if b > 0 then
 						it.bought = b
@@ -5797,16 +5922,56 @@ do
 				if it.source ~= "bags" and it.source ~= "alt" then
 					local base = it.itemID or (type(it.name) == "string" and it.name:lower())
 					local old = base and prevSnap.collect[tostring(it.source or "") .. ":" .. tostring(base)]
-					if old then
-						local col = math.max(0, math.min(it.needed or 1, math.floor(old.collected + 0.5)))
-						if col > 0 then
-							it.collected = col
-							it.remaining = math.max(0, (it.needed or 1) - col)
+					if old and old.skipped then
+						it.status = "skipped"
+					end
+				end
+			end
+			if not prevSnap.pipelineComplete and type(prevSnap.ahMail) == "table" then
+				local maxOrd = 0
+				for _, it in ipairs(cItems) do
+					if (it._order or 0) > maxOrd then maxOrd = it._order end
+				end
+				for k, oldMail in pairs(prevSnap.ahMail) do
+					local ownedGrowth = math.max(0, (newOwnedUsedByKey[k] or 0) - ((prevSnap.ownedUsedByKey and prevSnap.ownedUsedByKey[k]) or 0))
+					local keepRem = math.max(0, (tonumber(oldMail.remaining) or 0) - ownedGrowth)
+					if keepRem > 0 then
+						local mergedAH = nil
+						for _, it in ipairs(cItems) do
+							if it.source == "mail" and it.mailFromAlt ~= true
+								and ((oldMail.itemID and it.itemID == oldMail.itemID) or (oldMail.name and it.name == oldMail.name)) then
+								mergedAH = it
+								break
+							end
 						end
-						if it.remaining <= 0 then
-							it.status = "done"
-						elseif old.skipped then
-							it.status = "skipped"
+						if mergedAH then
+							mergedAH.purchasedFromAH = true
+							mergedAH._ahAddedQty = (tonumber(mergedAH._ahAddedQty) or 0) + keepRem
+							mergedAH.needed = (mergedAH.needed or 0) + keepRem
+							mergedAH.remaining = (mergedAH.remaining or 0) + keepRem
+							if mergedAH.status == "done" then mergedAH.status = "pending" end
+						else
+							maxOrd = maxOrd + 1
+							local idStr = tostring(oldMail.itemID or oldMail.name or "item")
+							cItems[#cItems + 1] = {
+								_order = maxOrd,
+								key = idStr .. ":mail",
+								itemID = oldMail.itemID,
+								name = oldMail.name or ("Item #" .. idStr),
+								itemLink = oldMail.itemLink,
+								source = "mail",
+								needed = keepRem,
+								collected = 0,
+								remaining = keepRem,
+								altOwners = {},
+								altLabel = nil,
+								availableHere = 0,
+								status = "pending",
+								purchasedFromAH = true,
+								_createdByAH = true,
+								_ahAddedQty = keepRem,
+								provenance = cloneProvenanceList(oldMail.provenance),
+							}
 						end
 					end
 				end
@@ -5815,7 +5980,10 @@ do
 				local k = it.itemID or (type(it.name) == "string" and it.name:lower())
 				local old = k and prevSnap.vendor[k]
 				if old then
-					local b = math.max(0, math.min(it.needed or 1, math.floor(old.bought + 0.5)))
+					local ownedGrowth = math.max(0, (newOwnedUsedByKey[k] or 0) - ((prevSnap.ownedUsedByKey and prevSnap.ownedUsedByKey[k]) or 0))
+					local accounted = ownedGrowth + (deductedMats[k] or 0)
+					local netBought = math.max(0, (tonumber(old.bought) or 0) - accounted)
+					local b = math.max(0, math.min(it.needed or 1, math.floor(netBought + 0.5)))
 					if b > 0 then
 						it.bought = b
 						it.remaining = math.max(0, (it.needed or 1) - b)
@@ -5839,7 +6007,20 @@ do
 					if old.measuredCastMs and old.measuredCastMs > 0 then
 						t.measuredCastMs = old.measuredCastMs
 					end
-					local cc = math.max(0, math.min(t.neededCrafts or 1, math.floor(old.completedCrafts + 0.5)))
+					local oldCC = math.max(0, math.floor(old.completedCrafts + 0.5))
+					if t.isSubCraft and oldCC > 0 then
+						local outPer = math.max(1, tonumber(t.outputsPerCraft) or 1)
+						local tk = t.itemID or (type(t.name) == "string" and t.name:lower())
+						local subOwnedGrowth = tk and math.max(0, (newOwnedUsedByKey[tk] or 0) - ((prevSnap.ownedUsedByKey and prevSnap.ownedUsedByKey[tk]) or 0)) or 0
+						local subConsumed = tk and (deductedMats[tk] or 0) or 0
+						local subAlreadyReduced = math.min(oldCC * outPer, subConsumed + (deductOwnedOn and subOwnedGrowth or 0))
+						if subAlreadyReduced > 0 then
+							t.neededOutputs = (t.neededOutputs or 0) + subAlreadyReduced
+							t.neededCrafts = math.max(1, math.ceil(t.neededOutputs / outPer))
+							t.remainingCrafts = math.max(0, t.neededCrafts - (t.completedCrafts or 0))
+						end
+					end
+					local cc = math.max(0, math.min(t.neededCrafts or 1, oldCC))
 					if cc > 0 then
 						t.completedCrafts = cc
 						t.remainingCrafts = math.max(0, (t.neededCrafts or 1) - cc)
@@ -5948,7 +6129,19 @@ do
 		local function collectFromStage(stageKey, list)
 			for idx, it in ipairs(list or {}) do
 				local provList = it.provenance
-				if type(provList) == "table" and #provList > 0 then
+				local ahAdded = 0
+				local ownedMailCap = nil
+				if stageKey == "collect" and it.purchasedFromAH == true then
+					local rawAdd = tonumber(it._ahAddedQty)
+					if rawAdd and rawAdd > 0 then
+						ahAdded = math.min(tonumber(it.needed) or 0, rawAdd)
+						ownedMailCap = math.max(0, (tonumber(it.needed) or 0) - ahAdded)
+					elseif it._createdByAH == true then
+						ownedMailCap = 0
+					end
+				end
+				local skipCollectAH = (stageKey == "collect") and (it._createdByAH == true or (ownedMailCap ~= nil and ownedMailCap <= 0))
+				if not skipCollectAH and type(provList) == "table" and #provList > 0 then
 					local isDone, uPrice, neededTotal, doneCount
 					if stageKey == "craft" then
 						isDone = (it.status == "done" or it.status == "skipped" or (it.remainingCrafts or 0) <= 0)
@@ -5956,10 +6149,10 @@ do
 						neededTotal = it.neededCrafts or 1
 						doneCount = it.completedCrafts or 0
 					elseif stageKey == "collect" then
-						isDone = (it.status == "done" or it.status == "skipped" or (it.remaining or 0) <= 0)
 						uPrice = 0
-						neededTotal = it.needed or 1
-						doneCount = it.collected or 0
+						neededTotal = ownedMailCap or (it.needed or 1)
+						doneCount = math.min(it.collected or 0, neededTotal)
+						isDone = (doneCount >= neededTotal) or (it.status == "done" or it.status == "skipped" or (it.remaining or 0) <= 0)
 					else
 						isDone = (it.status == "done" or it.status == "skipped" or (it.remaining or 0) <= 0)
 						uPrice = (it.liveUnit and it.liveUnit > 0) and it.liveUnit or (it.targetUnit or it.unitPrice or 0)
@@ -5967,6 +6160,7 @@ do
 						doneCount = it.bought or 0
 					end
 					local seenForItem = {}
+					local ownedRemCap = ownedMailCap
 					for _, p in ipairs(provList) do
 						local tName = p.targetName or orderFlow.title or "Shopping List"
 						local sKind = p.sourceKind or "shopping"
@@ -5993,35 +6187,41 @@ do
 							out[#out + 1] = dest
 						end
 						local pQty = math.max(1, math.floor((tonumber(p.qty) or neededTotal or 1) + 0.5))
-						dest.items[#dest.items + 1] = {
-							stage = stageKey,
-							index = idx,
-							itemID = it.itemID,
-							name = it.name,
-							qty = pQty,
-							subCraftName = p.subCraftName,
-							done = isDone,
-							priceAlert = it.priceAlert,
-							priceDeltaPct = it.priceDeltaPct,
-						}
-						dest.totalUnits = dest.totalUnits + pQty
-						if isDone then
-							dest.boughtUnits = dest.boughtUnits + pQty
-						elseif neededTotal > 0 and doneCount > 0 then
-							dest.boughtUnits = dest.boughtUnits + math.min(pQty, doneCount)
+						if ownedRemCap ~= nil then
+							pQty = math.min(pQty, math.max(0, ownedRemCap))
+							ownedRemCap = math.max(0, ownedRemCap - pQty)
 						end
-						dest.estCopper = dest.estCopper + (uPrice * pQty)
-						local itemKey = stageKey .. ":" .. tostring(idx) .. ":" .. dKey
-						if not seenForItem[itemKey] then
-							seenForItem[itemKey] = true
-							if stageKey == "ah" then
-								dest.itemIndices[#dest.itemIndices + 1] = idx
-							end
-							dest.totalItems = dest.totalItems + 1
-							dest.totalMats = dest.totalItems
+						if pQty > 0 then
+							dest.items[#dest.items + 1] = {
+								stage = stageKey,
+								index = idx,
+								itemID = it.itemID,
+								name = it.name,
+								qty = pQty,
+								subCraftName = p.subCraftName,
+								done = isDone,
+								priceAlert = it.priceAlert,
+								priceDeltaPct = it.priceDeltaPct,
+							}
+							dest.totalUnits = dest.totalUnits + pQty
 							if isDone then
-								dest.boughtItems = dest.boughtItems + 1
-								dest.boughtMats = dest.boughtItems
+								dest.boughtUnits = dest.boughtUnits + pQty
+							elseif neededTotal > 0 and doneCount > 0 then
+								dest.boughtUnits = dest.boughtUnits + math.min(pQty, doneCount)
+							end
+							dest.estCopper = dest.estCopper + (uPrice * pQty)
+							local itemKey = stageKey .. ":" .. tostring(idx) .. ":" .. dKey
+							if not seenForItem[itemKey] then
+								seenForItem[itemKey] = true
+								if stageKey == "ah" then
+									dest.itemIndices[#dest.itemIndices + 1] = idx
+								end
+								dest.totalItems = dest.totalItems + 1
+								dest.totalMats = dest.totalItems
+								if isDone then
+									dest.boughtItems = dest.boughtItems + 1
+									dest.boughtMats = dest.boughtItems
+								end
 							end
 						end
 					end
@@ -6774,7 +6974,9 @@ do
 			if it.source == "bank" then
 				local total = 0
 				for _, entry in ipairs((it.itemID and orderFlow.liveBankSlots[it.itemID]) or {}) do
-					total = total + (entry.count or 0)
+					if not entry.locked then
+						total = total + (entry.count or 0)
+					end
 				end
 				it.availableHere = total
 				if total > 0 and (it.remaining or 0) > 0 and it.status ~= "done" and it.status ~= "skipped" then
@@ -6800,7 +7002,7 @@ do
 			end
 			return 0
 		end
-		if not (hasCollectItemsOfSource("mail") or hasCollectItemsOfSource("alt")) then
+		if not (hasCollectItemsOfSource("mail") or hasCollectItemsOfSource("alt") or hasCollectItemsOfSource("bank")) then
 			return 0
 		end
 		local numMail = safeNumber(GetInboxNumItems()) or 0
@@ -6872,12 +7074,14 @@ do
 		end
 		local matchedCount = 0
 		local mailNeededByID = {}
+		local mailAvailByID = {}
 		for _, it in ipairs(cItems) do
 			if it.source == "mail" then
 				local total = 0
 				for _, entry in ipairs((it.itemID and orderFlow.liveMailSlots[it.itemID]) or {}) do
 					total = total + (entry.count or 0)
 				end
+				if it.itemID then mailAvailByID[it.itemID] = total end
 				it.availableHere = total
 				if (it.remaining or 0) > 0 and it.status ~= "done" and it.status ~= "skipped" then
 					if it.itemID then
@@ -6900,7 +7104,7 @@ do
 			local trimmed = raw:match("^%s*(.-)%s*$") or ""
 			return (trimmed:gsub("%-.*$", "")):lower()
 		end
-		local function isEntryAuctionHouseMail(entry)
+		local function isEntryAuctionHouseMail(entry, matchedKnownAlt)
 			local mIdx = entry and entry.mailIdx
 			local invType, sdr, subj
 			if _G.GetInboxInvoiceInfo and mIdx then
@@ -6920,7 +7124,7 @@ do
 			if sdr and (sdr:find("auction house", 1, true) ~= nil or sdr:find("blackwater auction", 1, true) ~= nil) then
 				return true
 			end
-			if subj and (subj:find("^auction ") ~= nil or subj:find("^outbid on ") ~= nil) then
+			if not matchedKnownAlt and subj and (subj:find("^auction ") ~= nil or subj:find("^outbid on ") ~= nil) then
 				return true
 			end
 			return false
@@ -6929,9 +7133,11 @@ do
 			local owners = type(it.altOwners) == "table" and it.altOwners or nil
 			if not owners or #owners == 0 then return false end
 			local mIdx = entry and entry.mailIdx
-			if not (_G.GetInboxHeaderInfo and mIdx) then return false end
-			local okH, _, _, hSender = pcall(_G.GetInboxHeaderInfo, mIdx)
-			if not okH then return false end
+			local hSender = entry and entry.sender
+			if (not readable(hSender) or type(hSender) ~= "string" or hSender == "") and _G.GetInboxHeaderInfo and mIdx then
+				local okH, _, _, sdr = pcall(_G.GetInboxHeaderInfo, mIdx)
+				if okH then hSender = sdr end
+			end
 			local senderNorm = normalizeMailSenderName(hSender)
 			if senderNorm == "" then return false end
 			for _, a in ipairs(owners) do
@@ -6953,18 +7159,15 @@ do
 		local emptyAltRows = {}
 		for idxAlt, it in ipairs(cItems) do
 			if it.source == "alt" and (it.remaining or 0) > 0 and it.status ~= "done" and it.status ~= "skipped" and it.itemID then
-				local totalAll = 0
 				local totalFromAlt = 0
 				for _, entry in ipairs(orderFlow.liveMailSlots[it.itemID] or {}) do
 					local ec = entry.count or 0
-					totalAll = totalAll + ec
-					if ec > 0 and not isEntryAuctionHouseMail(entry) and entrySenderMatchesAltOwner(it, entry) then
+					local altMatch = ec > 0 and entrySenderMatchesAltOwner(it, entry)
+					if altMatch and not isEntryAuctionHouseMail(entry, true) then
 						totalFromAlt = totalFromAlt + ec
 					end
 				end
-				local unclaimedFromAlt = math.max(0, totalFromAlt - (altMailClaimedByID[it.itemID] or 0))
-				local surplusAll = math.max(0, totalAll - (mailNeededByID[it.itemID] or 0))
-				local altMailAvail = math.min(unclaimedFromAlt, surplusAll)
+				local altMailAvail = math.max(0, totalFromAlt - (altMailClaimedByID[it.itemID] or 0))
 				if altMailAvail > 0 then
 					local splitQty = math.min(it.remaining or 0, altMailAvail)
 					if splitQty > 0 then
@@ -6972,7 +7175,9 @@ do
 						it.remaining = math.max(0, it.needed - (it.collected or 0))
 						if it.needed <= 0 and (it.collected or 0) <= 0 then
 							emptyAltRows[idxAlt] = true
-						elseif type(it.altOwners) == "table" and #it.altOwners > 0 then
+						else
+							if (it.remaining or 0) <= 0 then it.status = "done" end
+							if type(it.altOwners) == "table" and #it.altOwners > 0 then
 							local decLeft = splitQty
 							local keptOwners, altParts = {}, {}
 							for _, a in ipairs(it.altOwners) do
@@ -6990,13 +7195,14 @@ do
 							end
 							it.altOwners = keptOwners
 							it.altLabel = #altParts > 0 and ("On Alt: " .. table.concat(altParts, ", ")) or (it.altLabel or "On Alt")
+							end
 						end
 						altSplitToAdd[#altSplitToAdd + 1] = {
 							itemID = it.itemID,
 							name = it.name,
 							itemLink = it.itemLink,
 							needed = splitQty,
-							availableHere = altMailAvail,
+							availableHere = mailAvailByID[it.itemID] or altMailAvail,
 						}
 						mailNeededByID[it.itemID] = (mailNeededByID[it.itemID] or 0) + splitQty
 						altMailClaimedByID[it.itemID] = (altMailClaimedByID[it.itemID] or 0) + splitQty
@@ -7013,13 +7219,12 @@ do
 		for _, add in ipairs(altSplitToAdd) do
 			local merged = nil
 			for _, it in ipairs(cItems) do
-				if it.source == "mail" and it.itemID == add.itemID and it.status ~= "skipped" and it.purchasedFromAH ~= true then
+				if it.source == "mail" and it.mailFromAlt == true and it.itemID == add.itemID and it.status ~= "skipped" and it.purchasedFromAH ~= true then
 					merged = it
 					break
 				end
 			end
 			if merged then
-				merged.mailFromAlt = true
 				merged.needed = (merged.needed or 0) + add.needed
 				merged.remaining = math.max(0, merged.needed - (merged.collected or 0))
 				merged.availableHere = math.max(merged.availableHere or 0, add.availableHere or 0)
@@ -7040,7 +7245,77 @@ do
 				}
 			end
 		end
-		if #altSplitToAdd > 0 and sortCollectItems then
+		-- If a pending Bank row's item is sitting as surplus in this character's open Mailbox, promote that surplus into Mail
+		local bankSplitToAdd = {}
+		local emptyBankRows = {}
+		for idxBank, it in ipairs(cItems) do
+			if it.source == "bank" and (it.remaining or 0) > 0 and it.status ~= "done" and it.status ~= "skipped" and it.itemID then
+				local totalAll = mailAvailByID[it.itemID]
+				if totalAll == nil then
+					totalAll = 0
+					for _, entry in ipairs(orderFlow.liveMailSlots[it.itemID] or {}) do
+						totalAll = totalAll + (entry.count or 0)
+					end
+					mailAvailByID[it.itemID] = totalAll
+				end
+				local surplus = math.max(0, totalAll - (mailNeededByID[it.itemID] or 0))
+				local splitQty = math.min(it.remaining or 0, surplus)
+				if splitQty > 0 then
+					it.needed = math.max(0, (it.needed or 0) - splitQty)
+					it.remaining = math.max(0, it.needed - (it.collected or 0))
+					if it.needed <= 0 and (it.collected or 0) <= 0 then
+						emptyBankRows[idxBank] = true
+					elseif (it.remaining or 0) <= 0 then
+						it.status = "done"
+					end
+					bankSplitToAdd[#bankSplitToAdd + 1] = {
+						itemID = it.itemID,
+						name = it.name,
+						itemLink = it.itemLink,
+						needed = splitQty,
+						availableHere = totalAll,
+						provenance = cloneProvenanceList(it.provenance),
+					}
+					mailNeededByID[it.itemID] = (mailNeededByID[it.itemID] or 0) + splitQty
+					matchedCount = matchedCount + 1
+				end
+			end
+		end
+		if next(emptyBankRows) ~= nil then
+			for idxBank = #cItems, 1, -1 do
+				if emptyBankRows[idxBank] then table.remove(cItems, idxBank) end
+			end
+		end
+		for _, add in ipairs(bankSplitToAdd) do
+			local merged = nil
+			for _, it in ipairs(cItems) do
+				if it.source == "mail" and it.itemID == add.itemID and it.status ~= "skipped" and it.purchasedFromAH ~= true and it.mailFromAlt ~= true then
+					merged = it
+					break
+				end
+			end
+			if merged then
+				merged.needed = (merged.needed or 0) + add.needed
+				merged.remaining = math.max(0, merged.needed - (merged.collected or 0))
+				merged.availableHere = math.max(merged.availableHere or 0, add.availableHere or 0)
+				if merged.remaining > 0 then merged.status = "ready" end
+			else
+				cItems[#cItems + 1] = {
+					itemID = add.itemID,
+					name = add.name,
+					itemLink = add.itemLink,
+					source = "mail",
+					needed = add.needed,
+					collected = 0,
+					remaining = add.needed,
+					availableHere = add.availableHere,
+					status = "ready",
+					sortBucket = 2,
+					provenance = add.provenance,
+				}
+			end
+		end
+		if (#altSplitToAdd > 0 or #bankSplitToAdd > 0) and sortCollectItems then
 			sortCollectItems()
 		end
 		return matchedCount
@@ -7059,7 +7334,11 @@ do
 				and it.status ~= "done" and it.status ~= "skipped" then
 				if src == "bank" then
 					local slots = it.itemID and orderFlow.liveBankSlots[it.itemID] or nil
-					if (it.availableHere or 0) > 0 or (slots and #slots > 0) then
+					local unlocked = false
+					for _, e in ipairs(slots or {}) do
+						if not e.locked and (e.count or 0) > 0 then unlocked = true; break end
+					end
+					if (it.availableHere or 0) > 0 or unlocked then
 						return true
 					end
 				elseif src == "mail" then
@@ -7102,6 +7381,20 @@ do
 		return funcName == nil and addonArg == nil
 	end
 
+	function OrderFlow.HasPendingCollectTake()
+		local cSt = orderFlow.stages and orderFlow.stages.collect
+		if not cSt then return false end
+		if cSt.pendingTake ~= nil then return true end
+		local grace = cSt._recentCloseGrace
+		if grace and grace.closedAt then
+			local nowT = (GetTime and GetTime()) or 0
+			if (nowT - grace.closedAt) <= 3.0 and (grace.hadPendingTake or grace.source == "mail") then
+				return true
+			end
+		end
+		return false
+	end
+
 	function OrderFlow.OnBankShow()
 		local wasAtBank = (orderFlow.env.atBank == true)
 		orderFlow.env._bankEventOpen = true
@@ -7110,10 +7403,14 @@ do
 		orderFlow.env._bankAwaitFrameHide = false
 		orderFlow.env.atBank = true
 		local cStShow = orderFlow.stages.collect
+		cStShow._recentCloseGrace = nil
 		local cBase = cStShow.baselineBagQty
 		for _, it in ipairs(cStShow.items or {}) do
-			if it.source == "bank" and it.itemID and (cStShow.pendingTake == nil or cBase[it.itemID] == nil) then
-				cBase[it.itemID] = getLiveBagCount(it.itemID)
+			if it.source == "bank" and it.itemID then
+				local liveQty = getLiveBagCount(it.itemID)
+				if cBase[it.itemID] == nil or liveQty < cBase[it.itemID] then
+					cBase[it.itemID] = liveQty
+				end
 			end
 		end
 		local matched = OrderFlow.ScanOpenBank()
@@ -7139,7 +7436,13 @@ do
 		orderFlow.env._bankAutoSwitched = false
 		orderFlow.env.atBank = false
 		local cStClose = orderFlow.stages.collect
-		if cStClose.pendingTake and cStClose.pendingTake.source == "bank" then
+		local hadBankPending = (cStClose.pendingTake and cStClose.pendingTake.source == "bank") and true or false
+		cStClose._recentCloseGrace = {
+			source = "bank",
+			closedAt = (GetTime and GetTime()) or 0,
+			hadPendingTake = hadBankPending,
+		}
+		if hadBankPending then
 			cStClose.pendingTake = nil
 		end
 		if cStClose.collectAll and cStClose.collectAll.active and cStClose.collectAll.source == "bank" then
@@ -7167,12 +7470,17 @@ do
 		orderFlow.env._mailEventFrame = _G.MailFrame
 		orderFlow.env._mailFrameSeenShown = isFrameShownSafe(_G.MailFrame)
 		orderFlow.env._mailAwaitFrameHide = false
+		orderFlow.env._mailDirty = false
 		orderFlow.env.atMail = true
 		local cStShow = orderFlow.stages.collect
+		cStShow._recentCloseGrace = nil
 		local cBase = cStShow.baselineBagQty
 		for _, it in ipairs(cStShow.items or {}) do
-			if (it.source == "mail" or it.source == "alt") and it.itemID and (cStShow.pendingTake == nil or cBase[it.itemID] == nil) then
-				cBase[it.itemID] = getLiveBagCount(it.itemID)
+			if (it.source == "mail" or it.source == "alt") and it.itemID then
+				local liveQty = getLiveBagCount(it.itemID)
+				if cBase[it.itemID] == nil or liveQty < cBase[it.itemID] then
+					cBase[it.itemID] = liveQty
+				end
 			end
 		end
 		local matched = OrderFlow.ScanOpenMailbox()
@@ -7191,7 +7499,13 @@ do
 	end
 
 	function OrderFlow.OnMailInboxUpdate()
+		if not OrderFlow.HasAnyItems() then return end
+		orderFlow.env._mailDirty = true
+		if ns.MailHelper and type(ns.MailHelper.IsActive) == "function" and ns.MailHelper.IsActive() then
+			return
+		end
 		if orderFlow.env.atMail then
+			orderFlow.env._mailDirty = false
 			OrderFlow.ScanOpenMailbox()
 			notifyOrderFlow()
 			local cSt = orderFlow.stages.collect
@@ -7208,9 +7522,18 @@ do
 		orderFlow.env._mailFrameSeenShown = false
 		orderFlow.env._mailAwaitFrameHide = isFrameShownSafe(_G.MailFrame)
 		orderFlow.env._mailAutoSwitched = false
+		orderFlow.env._mailDirty = false
 		orderFlow.env.atMail = false
 		local cStClose = orderFlow.stages.collect
-		if cStClose.pendingTake and cStClose.pendingTake.source == "mail" then
+		local hadMailPending = (cStClose.pendingTake and cStClose.pendingTake.source == "mail") and true or false
+		cStClose._recentCloseGrace = {
+			source = "mail",
+			closedAt = (GetTime and GetTime()) or 0,
+			hadPendingTake = hadMailPending,
+			itemID = hadMailPending and cStClose.pendingTake.itemID or nil,
+			expectedQty = hadMailPending and cStClose.pendingTake.expectedQty or nil,
+		}
+		if hadMailPending then
 			cStClose.pendingTake = nil
 		end
 		if cStClose.collectAll and cStClose.collectAll.active and cStClose.collectAll.source == "mail" then
@@ -7469,7 +7792,11 @@ do
 					local hasSlot = false
 					if src == "bank" then
 						local slots = it.itemID and orderFlow.liveBankSlots[it.itemID] or nil
-						hasSlot = ((it.availableHere or 0) > 0) or (slots ~= nil and #slots > 0)
+						local unlocked = false
+						for _, e in ipairs(slots or {}) do
+							if not e.locked and (e.count or 0) > 0 then unlocked = true; break end
+						end
+						hasSlot = ((it.availableHere or 0) > 0) or unlocked
 					else
 						local atts = it.itemID and orderFlow.liveMailSlots[it.itemID] or nil
 						hasSlot = ((it.availableHere or 0) > 0) or (atts ~= nil and #atts > 0)
@@ -7535,8 +7862,24 @@ do
 					orderFlow.noticeKind = "warning"
 				end
 			elseif count > 0 then
-				orderFlow.notice = "Collected all needed items from " .. srcLabel .. "!"
-				orderFlow.noticeKind = "positive"
+				local hasPendingSrc = src and hasPendingForSource(src) or false
+				local mailOverflow = 0
+				if src == "mail" and _G.GetInboxNumItems then
+					local okM, cnt, tot = pcall(_G.GetInboxNumItems)
+					if okM then
+						mailOverflow = math.max(0, (safeNumber(tot) or 0) - (safeNumber(cnt) or 0))
+					end
+				end
+				if mailOverflow > 0 and hasPendingSrc then
+					orderFlow.notice = string.format("Collected %d item(s) from Mailbox (%d more mail in inbox - close/reopen to load more).", count, mailOverflow)
+					orderFlow.noticeKind = "warning"
+				elseif hasPendingSrc then
+					orderFlow.notice = string.format("Collected %d item(s) from %s (some needed items still pending).", count, srcLabel)
+					orderFlow.noticeKind = "info"
+				else
+					orderFlow.notice = "Collected all needed items from " .. srcLabel .. "!"
+					orderFlow.noticeKind = "positive"
+				end
 			else
 				orderFlow.notice = "No matching pending items found at " .. srcLabel .. "."
 				orderFlow.noticeKind = "warning"
@@ -7871,6 +8214,369 @@ do
 		return stepCollectAllInternal(serial)
 	end
 
+	function OrderFlow.RefreshCollectForCurrentChar(opts)
+		opts = type(opts) == "table" and opts or {}
+		local cSt = orderFlow.stages and orderFlow.stages.collect
+		if not cSt then return false, "no_state" end
+
+		if OrderFlow.IsCollectAllActive and OrderFlow.IsCollectAllActive() then
+			OrderFlow.StopCollectAll("user_stop")
+		end
+		cSt.pendingTake = nil
+		cSt._recentCloseGrace = nil
+
+		syncLiveEnvironmentInternal()
+		local atBank = (orderFlow.env.atBank == true)
+		local atMail = (orderFlow.env.atMail == true)
+
+		if opts.skipLiveScan ~= true then
+			app.bagsDirty = true
+			app.bagCountsDirty = true
+			if type(app.scanBags) == "function" then
+				pcall(app.scanBags)
+			end
+			if ns.Analytics and ns.Analytics.Inventory and type(ns.Analytics.Inventory.ScanCurrentChar) == "function" then
+				pcall(ns.Analytics.Inventory.ScanCurrentChar, { skipGear = true })
+			end
+		end
+
+		local mailOverflow = 0
+		if atMail then
+			if _G.GetInboxNumItems then
+				local okM, cnt, tot = pcall(_G.GetInboxNumItems)
+				if okM then
+					mailOverflow = math.max(0, (safeNumber(tot) or 0) - (safeNumber(cnt) or 0))
+				end
+			end
+			if opts.skipLiveScan ~= true then
+				local capture = ns.Analytics and ns.Analytics.Capture
+				local mailSnap = capture and capture.ScanMailboxSnapshot and capture.ScanMailboxSnapshot(true) or nil
+				if type(mailSnap) ~= "table" and type(app.readMailboxOwnership) == "function" then
+					local okR, fallbackSnap = pcall(app.readMailboxOwnership, true, false)
+					if okR and type(fallbackSnap) == "table" then mailSnap = fallbackSnap end
+				end
+				if type(mailSnap) == "table" and type(app.CommitMailboxSnapshot) == "function" then
+					pcall(app.CommitMailboxSnapshot, mailSnap)
+				end
+			end
+		end
+
+		if atBank and opts.skipLiveScan ~= true and type(app.scanBank) == "function" then
+			pcall(app.scanBank)
+		end
+
+		app.ownershipRev = (app.ownershipRev or 0) + 1
+		app._cachedOwnedCounts = nil
+		app._cachedOwnedCountsByID = nil
+		if type(app.invalidateRecipeStats) == "function" then
+			app.invalidateRecipeStats("ownership")
+		end
+		bumpOwnershipRev()
+
+		local ownershipFn = (type(opts.ownershipProvider) == "function" and opts.ownershipProvider)
+			or (type(app.getItemOwnershipBreakdown) == "function" and app.getItemOwnershipBreakdown)
+			or defaultOwnershipProvider
+
+		local groups, groupOrder, skippedRows = {}, {}, {}
+		for _, it in ipairs(cSt.items or {}) do
+			if it.status == "skipped" then
+				skippedRows[#skippedRows + 1] = it
+			else
+				local k = (it.itemID and it.itemID > 0) and it.itemID or (type(it.name) == "string" and it.name:lower())
+				local g = k and groups[k]
+				if not g and k then
+					g = {
+						key = k,
+						itemID = it.itemID,
+						name = it.name,
+						itemLink = it.itemLink,
+						minOrder = it._order or 999999,
+						totalNeeded = 0,
+						alreadyCollected = 0,
+						fallbackSource = nil,
+						fallbackAltOwners = nil,
+						fallbackAltLabel = nil,
+						purchasedFromAH = false,
+						ahAddedQty = 0,
+						hasCreatedByAH = false,
+						hasBaseOwned = false,
+						provenance = {},
+					}
+					groups[k] = g
+					groupOrder[#groupOrder + 1] = g
+				end
+				if g then
+					g.minOrder = math.min(g.minOrder, it._order or 999999)
+					g.totalNeeded = g.totalNeeded + math.max(0, tonumber(it.needed) or 0)
+					g.alreadyCollected = g.alreadyCollected + math.max(0, tonumber(it.collected) or 0)
+					if not g.itemLink and it.itemLink then g.itemLink = it.itemLink end
+					if it._createdByAH == true then
+						g.hasCreatedByAH = true
+					else
+						g.hasBaseOwned = true
+					end
+					if it.purchasedFromAH then
+						g.purchasedFromAH = true
+						if it.source == "mail" then
+							local ahAdd = tonumber(it._ahAddedQty) or (it._createdByAH and tonumber(it.needed)) or tonumber(it.needed) or 0
+							g.ahAddedQty = g.ahAddedQty + math.max(0, math.min(tonumber(it.needed) or 0, ahAdd))
+						end
+					end
+					if (it.remaining or 0) > 0 and not g.fallbackSource and it.source ~= "bags" then
+						g.fallbackSource = it.source
+						if it.source == "alt" then
+							g.fallbackAltOwners = it.altOwners
+							g.fallbackAltLabel = it.altLabel
+						end
+					end
+					for _, p in ipairs(it.provenance or {}) do
+						if type(p) == "table" then
+							mergeProvenanceEntry(
+								g.provenance,
+								p.qty or (tonumber(it.needed) or 1),
+								p.subCraftName,
+								p.targetName or orderFlow.title or "Shopping List",
+								p.sourceKind or "shopping",
+								p.sourceLabel or "Shopping",
+								p.subCraftItemID,
+								p.targetItemID,
+								p.subCraftProf
+							)
+						end
+					end
+				end
+			end
+		end
+
+		table.sort(groupOrder, function(a, b) return a.minOrder < b.minOrder end)
+
+		local newItems = {}
+		local seq = 0
+		for _, g in ipairs(groupOrder) do
+			local okO, owned = pcall(ownershipFn, g.itemID, g.name)
+			owned = (okO and type(owned) == "table") and owned or { bags = getLiveBagCount(g.itemID), bank = 0, mail = 0, alts = {} }
+			local bagsHave = math.max(0, math.floor((tonumber(owned.bags) or 0) + 0.5))
+			local mailHave = math.max(0, math.floor((tonumber(owned.mail) or 0) + 0.5))
+			local bankHave = math.max(0, math.floor((tonumber(owned.bank) or 0) + 0.5))
+			local idStr = tostring(g.itemID or g.name or "item")
+
+			local inBagsDone
+			if opts.charSwitched == true then
+				inBagsDone = math.min(g.totalNeeded, bagsHave)
+			else
+				inBagsDone = math.min(g.totalNeeded, math.max(g.alreadyCollected, bagsHave))
+			end
+			local rem = math.max(0, g.totalNeeded - inBagsDone)
+			local remAhAdded = math.min(rem, g.ahAddedQty or 0)
+			local pureCreatedByAH = (g.hasCreatedByAH and not g.hasBaseOwned) and true or nil
+
+			if inBagsDone > 0 then
+				seq = seq + 1
+				newItems[#newItems + 1] = {
+					_order = seq,
+					key = idStr .. ":bags",
+					itemID = g.itemID,
+					name = g.name,
+					itemLink = g.itemLink,
+					source = "bags",
+					needed = inBagsDone,
+					collected = inBagsDone,
+					remaining = 0,
+					altOwners = {},
+					altLabel = nil,
+					availableHere = inBagsDone,
+					status = "done",
+					provenance = cloneProvenanceList(g.provenance, inBagsDone, g.totalNeeded),
+				}
+			end
+
+			local useMail = math.min(rem, mailHave)
+			if useMail > 0 then
+				local addAH = math.min(useMail, remAhAdded)
+				remAhAdded = math.max(0, remAhAdded - addAH)
+				seq = seq + 1
+				newItems[#newItems + 1] = {
+					_order = seq,
+					key = idStr .. ":mail",
+					itemID = g.itemID,
+					name = g.name,
+					itemLink = g.itemLink,
+					source = "mail",
+					needed = useMail,
+					collected = 0,
+					remaining = useMail,
+					altOwners = {},
+					altLabel = nil,
+					availableHere = 0,
+					status = "pending",
+					purchasedFromAH = (g.purchasedFromAH or addAH > 0) and true or nil,
+					_createdByAH = pureCreatedByAH,
+					_ahAddedQty = (addAH > 0) and addAH or nil,
+					provenance = cloneProvenanceList(g.provenance, useMail, g.totalNeeded),
+				}
+				rem = rem - useMail
+			end
+
+			local useBank = math.min(rem, bankHave)
+			if useBank > 0 then
+				seq = seq + 1
+				newItems[#newItems + 1] = {
+					_order = seq,
+					key = idStr .. ":bank",
+					itemID = g.itemID,
+					name = g.name,
+					itemLink = g.itemLink,
+					source = "bank",
+					needed = useBank,
+					collected = 0,
+					remaining = useBank,
+					altOwners = {},
+					altLabel = nil,
+					availableHere = 0,
+					status = "pending",
+					provenance = cloneProvenanceList(g.provenance, useBank, g.totalNeeded),
+				}
+				rem = rem - useBank
+			end
+
+			if rem > 0 and type(owned.alts) == "table" and #owned.alts > 0 then
+				local matchedAlts, altParts = {}, {}
+				local altStockSum = 0
+				for _, a in ipairs(owned.alts) do
+					local aq = type(a) == "table" and math.floor((tonumber(a.qty) or 0) + 0.5) or 0
+					if aq > 0 then
+						matchedAlts[#matchedAlts + 1] = { name = tostring(a.name or "Alt"), location = tostring(a.location or "Bags"), qty = aq }
+						altParts[#altParts + 1] = string.format("%s (%s %dx)", tostring(a.name or "Alt"), tostring(a.location or "Bags"), aq)
+						altStockSum = altStockSum + aq
+					end
+				end
+				if #matchedAlts > 0 and altStockSum > 0 then
+					local altTake = math.min(rem, altStockSum)
+					seq = seq + 1
+					newItems[#newItems + 1] = {
+						_order = seq,
+						key = idStr .. ":alt",
+						itemID = g.itemID,
+						name = g.name,
+						itemLink = g.itemLink,
+						source = "alt",
+						needed = altTake,
+						collected = 0,
+						remaining = altTake,
+						altOwners = matchedAlts,
+						altLabel = "On Alt: " .. table.concat(altParts, ", "),
+						availableHere = 0,
+						status = "alt_info",
+						provenance = cloneProvenanceList(g.provenance, altTake, g.totalNeeded),
+					}
+					rem = rem - altTake
+				end
+			end
+
+			if rem > 0 then
+				local keepSrc = g.fallbackSource or "mail"
+				local mergedRow = nil
+				for idxN = #newItems, 1, -1 do
+					local cand = newItems[idxN]
+					if cand.itemID == g.itemID and cand.name == g.name and cand.source == keepSrc and cand.mailFromAlt ~= true then
+						mergedRow = cand
+						break
+					end
+				end
+				if mergedRow then
+					local addAH = (keepSrc == "mail") and math.min(rem, remAhAdded) or 0
+					if addAH > 0 then
+						remAhAdded = math.max(0, remAhAdded - addAH)
+						mergedRow._ahAddedQty = (tonumber(mergedRow._ahAddedQty) or 0) + addAH
+						mergedRow.purchasedFromAH = true
+					end
+					mergedRow.needed = mergedRow.needed + rem
+					mergedRow.remaining = mergedRow.remaining + rem
+					mergedRow.provenance = cloneProvenanceList(g.provenance, mergedRow.needed, g.totalNeeded)
+				else
+					local addAH = (keepSrc == "mail") and math.min(rem, remAhAdded) or 0
+					if addAH > 0 then remAhAdded = math.max(0, remAhAdded - addAH) end
+					seq = seq + 1
+					newItems[#newItems + 1] = {
+						_order = seq,
+						key = idStr .. ":" .. keepSrc,
+						itemID = g.itemID,
+						name = g.name,
+						itemLink = g.itemLink,
+						source = keepSrc,
+						needed = rem,
+						collected = 0,
+						remaining = rem,
+						altOwners = (keepSrc == "alt" and g.fallbackAltOwners) or {},
+						altLabel = (keepSrc == "alt" and g.fallbackAltLabel) or nil,
+						availableHere = 0,
+						status = (keepSrc == "alt") and "alt_info" or "pending",
+						purchasedFromAH = (keepSrc == "mail" and (g.purchasedFromAH or addAH > 0)) and true or nil,
+						_createdByAH = (keepSrc == "mail" and pureCreatedByAH) or nil,
+						_ahAddedQty = (keepSrc == "mail" and addAH > 0) and addAH or nil,
+						provenance = cloneProvenanceList(g.provenance, rem, g.totalNeeded),
+					}
+				end
+			end
+		end
+
+		for _, sk in ipairs(skippedRows) do
+			seq = seq + 1
+			sk._order = seq
+			newItems[#newItems + 1] = sk
+		end
+
+		cSt.items = newItems
+		orderFlow.ownerCharKey = (app and app.charKey) or orderFlow.ownerCharKey
+		cSt.baselineBagQty = {}
+		for _, it in ipairs(cSt.items) do
+			if it.itemID and it.itemID > 0 then
+				cSt.baselineBagQty[it.itemID] = getLiveBagCount(it.itemID)
+			end
+		end
+
+		if atBank then OrderFlow.ScanOpenBank() end
+		if atMail then OrderFlow.ScanOpenMailbox() end
+		sortCollectItems()
+		selectNextPendingCollectInternal(1, nil)
+
+		local crSt = orderFlow.stages.craft
+		for _, t in ipairs((crSt and crSt.tasks) or {}) do
+			t._readiness = OrderFlow.ComputeTaskReadiness(t)
+		end
+		local slSt = orderFlow.stages.sell
+		for _, sIt in ipairs((slSt and slSt.items) or {}) do
+			if sIt.itemID and sIt.itemID > 0 then
+				sIt.inBags = getSellableBagCount(sIt.itemID, sIt.channel == "vendor", sIt.itemLink)
+			end
+		end
+
+		local sum = OrderFlow.GetCollectAllSummary()
+		local cStats = OrderFlow.GetStageStats("collect")
+		if opts.silent ~= true then
+			if cStats.complete then
+				orderFlow.notice = "Refreshed - all owned items are ready in your bags!"
+				orderFlow.noticeKind = "positive"
+			elseif mailOverflow > 0 then
+				orderFlow.notice = string.format("Refreshed - %d item(s) ready in Mailbox (%d more mail behind 50-mail cap).", sum.itemCount or 0, mailOverflow)
+				orderFlow.noticeKind = "warning"
+			elseif sum.source and (sum.itemCount or 0) > 0 then
+				local lbl = (sum.source == "bank") and "Bank" or "Mailbox"
+				orderFlow.notice = string.format("Refreshed - %d item(s) (%dx) ready in %s.", sum.itemCount, sum.unitCount or 0, lbl)
+				orderFlow.noticeKind = "positive"
+			elseif not atBank and not atMail then
+				orderFlow.notice = "Refreshed bags (Bank & Mail closed - cached snapshots kept)."
+				orderFlow.noticeKind = "info"
+			else
+				local lbl = atBank and "Bank" or "Mailbox"
+				orderFlow.notice = string.format("Refreshed - no pending items found in open %s.", lbl)
+				orderFlow.noticeKind = "warning"
+			end
+		end
+		notifyOrderFlow()
+		return true, sum
+	end
+
 	if type(_G.CreateFrame) == "function" then
 		local okF, af = pcall(_G.CreateFrame, "Frame")
 		if okF and af and type(af.SetScript) == "function" and type(af.RegisterEvent) == "function" then
@@ -7889,9 +8595,16 @@ do
 		local idx = index or cSt.activeIndex
 		local item = cSt.items[idx]
 		if not item then return false end
+		local remDone = math.max(0, tonumber(item.remaining) or ((item.needed or 0) - (item.collected or 0)))
 		item.collected = item.needed
 		item.remaining = 0
 		item.status = "done"
+		if item.source == "mail" and item.purchasedFromAH == true and item.itemID and remDone > 0 then
+			local inv = ns.Analytics and ns.Analytics.Inventory
+			if inv and type(inv.ReceiveTransitMail) == "function" and app.charKey and app.charKey ~= "" then
+				pcall(inv.ReceiveTransitMail, app.charKey, { [item.itemID] = remDone }, { fromChar = "Auction House" })
+			end
+		end
 		if item.itemID then
 			cSt.baselineBagQty[item.itemID] = getLiveBagCount(item.itemID)
 		end
@@ -8829,10 +9542,13 @@ do
 		local cSt = orderFlow.stages.collect
 		local nextCollectAllSerial = nil
 		local stopItemCollectAllDone = false
-		if orderFlow.env.atBank or orderFlow.env.atMail or cSt.pendingTake ~= nil then
+		local grace = cSt._recentCloseGrace
+		local graceActive = (grace and grace.closedAt and (((GetTime and GetTime()) or 0) - grace.closedAt) <= 3.0 and (grace.hadPendingTake or grace.source == "mail")) and true or false
+		if orderFlow.env.atBank or orderFlow.env.atMail or cSt.pendingTake ~= nil or graceActive then
 			local activeSrc = (cSt.pendingTake and cSt.pendingTake.source)
 				or (orderFlow.env.atBank and "bank")
 				or (orderFlow.env.atMail and "mail")
+				or (graceActive and grace.source)
 				or nil
 			local pendingIDs = {}
 			local seenID = {}
@@ -8846,14 +9562,19 @@ do
 			end
 			local collectCompletedAny = false
 			local reconciledCollect = false
+			local mailReconciledClosedByID = {}
+			local ahMailCollectedByID = {}
 			for _, itemID in ipairs(pendingIDs) do
 				local liveQty = getLiveBagCount(itemID)
 				local base = cSt.baselineBagQty[itemID]
 				if base == nil then
 					cSt.baselineBagQty[itemID] = liveQty
 				elseif liveQty > base then
-					local delta = liveQty - base
+					local rawDelta = liveQty - base
+					local delta = rawDelta
 					cSt.baselineBagQty[itemID] = liveQty
+					local closedMailApplied = 0
+					local closedMailName = nil
 					local function applyToSource(matchSrc)
 						for _, it in ipairs(cSt.items or {}) do
 							if delta <= 0 then break end
@@ -8864,6 +9585,13 @@ do
 								it.remaining = math.max(0, (it.needed or 0) - it.collected)
 								delta = delta - applied
 								reconciledCollect = true
+								if matchSrc == "mail" and it.purchasedFromAH == true then
+									ahMailCollectedByID[itemID] = (ahMailCollectedByID[itemID] or 0) + applied
+								end
+								if matchSrc == "mail" and not orderFlow.env.atMail then
+									closedMailApplied = closedMailApplied + applied
+									if not closedMailName then closedMailName = it.name or itemSearchName(itemID) end
+								end
 								if it.remaining <= 0 then
 									it.status = "done"
 									collectCompletedAny = true
@@ -8877,7 +9605,45 @@ do
 						if activeSrc ~= "bank" and orderFlow.env.atBank then applyToSource("bank") end
 						if delta > 0 and activeSrc ~= "mail" and orderFlow.env.atMail then applyToSource("mail") end
 					end
+					if closedMailApplied > 0 then
+						local dec = (graceActive and grace.itemID == itemID and grace.expectedQty)
+							and math.min(rawDelta, grace.expectedQty)
+							or rawDelta
+						dec = math.max(closedMailApplied, dec)
+						mailReconciledClosedByID[itemID] = (mailReconciledClosedByID[itemID] or 0) + dec
+						local mName = closedMailName or itemSearchName(itemID)
+						if app.char and type(app.char.mail) == "table" and mName and app.char.mail[mName] then
+							local nx = app.char.mail[mName] - dec
+							app.char.mail[mName] = nx > 0 and nx or nil
+						end
+					end
 				end
+			end
+			if next(ahMailCollectedByID) ~= nil then
+				local inv = ns.Analytics and ns.Analytics.Inventory
+				if inv and type(inv.ReceiveTransitMail) == "function" and app.charKey and app.charKey ~= "" then
+					pcall(inv.ReceiveTransitMail, app.charKey, ahMailCollectedByID, { fromChar = "Auction House" })
+				end
+			end
+			if next(mailReconciledClosedByID) ~= nil then
+				local ldb = ns.Analytics and ns.Analytics.Store and ns.Analytics.Store.db
+				local invMail = ldb and ldb.inventory and app.charKey and ldb.inventory[app.charKey] and ldb.inventory[app.charKey].mail
+				for mid, decQty in pairs(mailReconciledClosedByID) do
+					if type(app.mailboxItems) == "table" and app.mailboxItems[mid] then
+						local nx = app.mailboxItems[mid] - decQty
+						app.mailboxItems[mid] = nx > 0 and nx or nil
+					end
+					if type(invMail) == "table" and invMail[mid] then
+						local nx = invMail[mid] - decQty
+						invMail[mid] = nx > 0 and nx or nil
+					end
+				end
+				if ns.Analytics and ns.Analytics.Inventory and ns.Analytics.Inventory.version then
+					ns.Analytics.Inventory.version = ns.Analytics.Inventory.version + 1
+				end
+				app.ownershipRev = (app.ownershipRev or 0) + 1
+				app._cachedOwnedCounts = nil
+				app._cachedOwnedCountsByID = nil
 			end
 			if reconciledCollect then
 				cSt.pendingTake = nil
@@ -8889,8 +9655,14 @@ do
 				local pref = (orderFlow.env.atBank and not orderFlow.env.atMail) and "bank" or "mail"
 				local nextIdx = selectNextPendingCollectInternal((cSt.activeIndex or 1) + 1, pref)
 				if not nextIdx then
-					orderFlow.notice = "All owned items collected!"
-					orderFlow.noticeKind = "positive"
+					local cStats = OrderFlow.GetStageStats("collect")
+					if (cStats.altCount or 0) > 0 then
+						orderFlow.notice = string.format("Collected available items (%d item(s) still on Alt).", cStats.altCount)
+						orderFlow.noticeKind = "info"
+					else
+						orderFlow.notice = "All owned items collected!"
+						orderFlow.noticeKind = "positive"
+					end
 				end
 			end
 			if reconciledCollect and cSt.collectAll and cSt.collectAll.active then
@@ -11818,6 +12590,28 @@ do
 		return nil
 	end
 
+	local recordPurchasedToCollectMail
+
+	local function recordAHInTransit(item, qtyBought)
+		local qty = math.max(0, math.floor((tonumber(qtyBought) or 0) + 0.5))
+		if not (item and qty > 0) then return end
+		local itemID = safeNumber(item.itemID)
+		if (not itemID or itemID <= 0) and type(item.name) == "string" and lookupID then
+			itemID = safeNumber(lookupID(item.name))
+		end
+		if not (itemID and itemID > 0) then return end
+		local inv = ns.Analytics and ns.Analytics.Inventory
+		local store = ns.Analytics and ns.Analytics.Store
+		local toChar = app and app.charKey
+		if inv and type(inv.RecordInTransitMail) == "function" and toChar and toChar ~= "" then
+			local econ = (app.char and app.char.economy)
+				or (store and type(store.DeriveEcon) == "function" and store.DeriveEcon(toChar))
+				or nil
+			local nowT = (type(_G.time) == "function" and _G.time()) or (os and os.time and os.time()) or 0
+			pcall(inv.RecordInTransitMail, toChar, { { itemID = itemID, qty = qty } }, 0, nowT, "Auction House", econ)
+		end
+	end
+
 	function CartBuyer.MarkBought(index)
 		local ah = orderFlow.stages.ah
 		if ah.directBuy then
@@ -11835,6 +12629,12 @@ do
 		item.remaining = 0
 		item.totalPrice = 0
 		item.status = "done"
+		if remBefore > 0 then
+			if recordPurchasedToCollectMail then
+				recordPurchasedToCollectMail(item, remBefore)
+			end
+			recordAHInTransit(item, remBefore)
+		end
 		local nextIdx = selectNextPendingAH(idx + 1)
 		if nextIdx then
 			if atAH() then
@@ -12311,7 +13111,7 @@ do
 		cur.priceDeltaPct = nil
 	end
 
-	local function recordPurchasedToCollectMail(item, qtyBought)
+	recordPurchasedToCollectMail = function(item, qtyBought)
 		local col = orderFlow.stages and orderFlow.stages.collect
 		local qty = math.max(0, math.floor((tonumber(qtyBought) or 0) + 0.5))
 		if not (col and type(col.items) == "table" and item and qty > 0) then return false end
@@ -12324,13 +13124,34 @@ do
 		local maxOrder = 0
 		for _, it in ipairs(col.items) do
 			if (it._order or 0) > maxOrder then maxOrder = it._order end
-			if it.source == "mail" and ((itemID and it.itemID == itemID) or (itemName and it.name == itemName)) then
+			if it.source == "mail" and it.mailFromAlt ~= true
+				and ((itemID and it.itemID == itemID) or (itemName and it.name == itemName)) then
 				mailEntry = it
 			end
 		end
 		if mailEntry then
+			mailEntry.purchasedFromAH = true
+			mailEntry._ahAddedQty = (tonumber(mailEntry._ahAddedQty) or 0) + qty
 			mailEntry.needed = (mailEntry.needed or 0) + qty
 			mailEntry.remaining = (mailEntry.remaining or 0) + qty
+			if type(item.provenance) == "table" and #item.provenance > 0 then
+				mailEntry.provenance = mailEntry.provenance or {}
+				for _, p in ipairs(item.provenance) do
+					if type(p) == "table" then
+						mergeProvenanceEntry(
+							mailEntry.provenance,
+							qty,
+							p.subCraftName,
+							p.targetName or orderFlow.title or "Shopping List",
+							p.sourceKind or "shopping",
+							p.sourceLabel or "Shopping",
+							p.subCraftItemID,
+							p.targetItemID,
+							p.subCraftProf
+						)
+					end
+				end
+			end
 			if mailEntry.status == "done" or mailEntry.status == "skipped" then
 				mailEntry.status = ((mailEntry.availableHere or 0) > 0) and "ready" or "pending"
 			end
@@ -12346,6 +13167,9 @@ do
 				itemID = itemID,
 				name = itemName or ("Item #" .. idStr),
 				source = "mail",
+				purchasedFromAH = true,
+				_createdByAH = true,
+				_ahAddedQty = qty,
 				needed = qty,
 				collected = 0,
 				remaining = qty,
@@ -12376,6 +13200,7 @@ do
 		item.totalPrice = (item.unitPrice or 0) * item.remaining
 		clearItemLiveAH(item)
 		recordPurchasedToCollectMail(item, qtyBought)
+		recordAHInTransit(item, qtyBought)
 		if item.remaining <= 0 then
 			item.status = "done"
 			local nextIdx = selectNextPendingAH(matchedIdx + 1)

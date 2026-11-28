@@ -881,9 +881,11 @@ cacheMail=function(identityOnly,rejectEmpty)
             end
         else
             if (m.hasItem==true or (tonumber(m.hasItem) or 0)>0) and not next(m.items or {}) then ownershipComplete=false end
-            for id,qty in pairs(m.items or {}) do ownership.items[id]=(ownership.items[id] or 0)+qty end
-            for name,qty in pairs(m.names or {}) do ownership.names[name]=(ownership.names[name] or 0)+qty end
-            for name,id in pairs(m.itemIDs or {}) do ownership.itemIDs[name]=id end
+            if (tonumber(m.cod) or 0)<=0 then
+                for id,qty in pairs(m.items or {}) do ownership.items[id]=(ownership.items[id] or 0)+qty end
+                for name,qty in pairs(m.names or {}) do ownership.names[name]=(ownership.names[name] or 0)+qty end
+                for name,id in pairs(m.itemIDs or {}) do ownership.itemIDs[name]=id end
+            end
             local baseFp=mailFingerprint(char,m,1); m.baseFp=baseFp; m.slotSig=mailSlotSig(char,m)
             if mailCollectable(m) then rawTotalIdentical[baseFp]=(rawTotalIdentical[baseFp] or 0)+1
             elseif mailEmptyShell(m) then newShells[baseFp]=(newShells[baseFp] or 0)+1 end
@@ -1298,7 +1300,51 @@ local function completeSendMail()
     end
     if p.cod>0 and #p.items>0 then local cod=ensureTable(db().stats,"codExpectations"); cod[#cod+1]={sellerChar=Store.CurrentCharAndEcon(),recipient=ownChar or p.recipient:lower(),items=p.items,cod=p.cod,at=p.at} end
     if internal and #p.items>0 and p.cod<=0 and ns.Inventory then
-        local char,econ=Store.CurrentCharAndEcon(); ns.Inventory.RecordInTransitMail(ownChar,p.items,p.money,p.at,char,econ)
+        local char,econ=Store.CurrentCharAndEcon()
+        ns.Inventory.RecordInTransitMail(ownChar,p.items,p.money,p.at,char,econ)
+        local invChar=db().inventory and db().inventory[char]
+        local invBags=invChar and invChar.bags
+        local h=H()
+        local app=h and h.app
+        local isCurrentAppChar=(app and app.charKey==char)
+        local charBags=(isCurrentAppChar and app.char and app.char.bags) or nil
+        local appCachedBags=(isCurrentAppChar and app.cachedBagCounts) or nil
+        local appByID=(isCurrentAppChar and app.cachedBagCountsByID) or nil
+        for _,sent in ipairs(p.items) do
+            local sid=tonumber(sent and sent.itemID)
+            local sqty=tonumber(sent and sent.qty) or 0
+            if sid and sid>0 and sqty>0 then
+                if invBags and invBags[sid] then
+                    local nextInv=invBags[sid]-sqty
+                    invBags[sid]=nextInv>0 and nextInv or nil
+                end
+                if appByID and appByID[sid] then
+                    local nextAppID=appByID[sid]-sqty
+                    appByID[sid]=nextAppID>0 and nextAppID or nil
+                end
+                if charBags or appCachedBags then
+                    local nm=(h and h.ItemName and h.ItemName(sid))
+                        or (app and app.itemIDs_reverse and app.itemIDs_reverse[sid])
+                        or (_G.GetItemInfo and _G.GetItemInfo(sid))
+                    if nm then
+                        if charBags and charBags[nm] then
+                            local nextApp=charBags[nm]-sqty
+                            charBags[nm]=nextApp>0 and nextApp or nil
+                        end
+                        if appCachedBags and appCachedBags[nm] then
+                            local nextCached=appCachedBags[nm]-sqty
+                            appCachedBags[nm]=nextCached>0 and nextCached or nil
+                        end
+                    end
+                end
+            end
+        end
+        if isCurrentAppChar then
+            app.ownershipRev=(app.ownershipRev or 0)+1
+            app._cachedOwnedCounts=nil
+            app._cachedOwnedCountsByID=nil
+            if app.invalidateRecipeStats then app.invalidateRecipeStats("ownership") end
+        end
     end
 end
 local function durabilitySnapshot()
@@ -2158,10 +2204,6 @@ function Capture.CollectCharEntries(h,hostDB,charTbl)
     push("bank",charTbl.bank,charTbl.boundBank)
     local mailCombined={}
     for name,v in pairs(charTbl.mail or {}) do
-        local q=tonumber(type(v)=="table" and (v.count or v.qty) or v) or 0
-        if q>0 then mailCombined[name]=(mailCombined[name] or 0)+q end
-    end
-    for name,v in pairs(charTbl.bought or {}) do
         local q=tonumber(type(v)=="table" and (v.count or v.qty) or v) or 0
         if q>0 then mailCombined[name]=(mailCombined[name] or 0)+q end
     end

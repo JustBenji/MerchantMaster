@@ -1287,7 +1287,7 @@ app.getBagCountByID = origGetBagCountByID
 	_G.C_TradeSkillUI = nil
 	ns.IsForeignTradeSkill = function() return false end
 
-	local uiBags = { [71001] = 10, [71002] = 0, [71003] = 0, [71004] = 0, [71005] = 0 }
+	local uiBags = { [71001] = 6, [71002] = 0, [71003] = 0, [71004] = 0, [71005] = 0 }
 	app.getBagCountByID = function(id) return uiBags[id] or 0 end
 
 	local uiMerchantBuyCalls = {}
@@ -1323,19 +1323,28 @@ app.getBagCountByID = origGetBagCountByID
 	}
 
 	local uiMailTakeCalls = {}
-	_G.GetInboxNumItems = function() return 1, 1 end
+	local uiSnapperTaken = false
+	_G.GetInboxNumItems = function() return 2, 2 end
 	_G.GetInboxHeaderInfo = function(i)
-		if i == 1 then return nil, nil, "Bankalt", "Mats", 0, 0, 10, 1 end
+		if i == 1 then return nil, nil, "Bankalt", "Mats", 0, 0, 10, (uiBags[71004] == 0) and 1 or 0
+		elseif i == 2 then return nil, nil, "Auction House", "Auction won: UI Snapper", 0, 0, 10, uiSnapperTaken and 0 or 1 end
 	end
 	_G.GetInboxItem = function(m, a)
-		if m == 1 and a == 1 and uiBags[71004] == 0 then return "UI Mail Herb", 71004, nil, 4 end
+		if m == 1 and a == 1 and uiBags[71004] == 0 then return "UI Mail Herb", 71004, nil, 4
+		elseif m == 2 and a == 1 and not uiSnapperTaken then return "UI Snapper", 71001, nil, 4 end
 	end
 	_G.GetInboxItemLink = function(m, a)
-		if m == 1 and a == 1 and uiBags[71004] == 0 then return "|cffffffff|Hitem:71004::::::::60:::::::|h[UI Mail Herb]|h|r" end
+		if m == 1 and a == 1 and uiBags[71004] == 0 then return "|cffffffff|Hitem:71004::::::::60:::::::|h[UI Mail Herb]|h|r"
+		elseif m == 2 and a == 1 and not uiSnapperTaken then return "|cffffffff|Hitem:71001::::::::60:::::::|h[UI Snapper]|h|r" end
 	end
 	_G.TakeInboxItem = function(m, a)
 		uiMailTakeCalls[#uiMailTakeCalls + 1] = { mail = m, attach = a }
-		uiBags[71004] = 4
+		if m == 1 then
+			uiBags[71004] = 4
+		elseif m == 2 and not uiSnapperTaken then
+			uiSnapperTaken = true
+			uiBags[71001] = (uiBags[71001] or 0) + 4
+		end
 	end
 
 	local uiCraftCalls = {}
@@ -1399,6 +1408,9 @@ app.getBagCountByID = origGetBagCountByID
 		"Stage 2 Mail open shows Collect 1x and All This Item buttons")
 	modal.buyBtn:Click("LeftButton")
 	check(#uiMailTakeCalls == 1, "Stage 2 UI click executes TakeInboxItem")
+	fireEvent("BAG_UPDATE_DELAYED")
+	modal.buyBtn:Click("LeftButton")
+	check(#uiMailTakeCalls == 2, "Stage 2 UI second click collects AH-bought UI Snapper from Mail")
 	fireEvent("BAG_UPDATE_DELAYED")
 	uiMLF:Hide()
 	fireEvent("MAIL_CLOSED")
@@ -4406,6 +4418,10 @@ local function runForeverSurnameAltRegression()
 	MerchantMasterDB.includeAlts = origIncludeAlts
 	MerchantMasterDB.enableLegacyPriceAddons = origLegacy
 	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+	app.cachedBagCounts = nil
+	app.cachedBagCountsByID = nil
+	app._cachedOwnedCounts = nil
+	app._cachedOwnedCountsByID = nil
 	app.bagsDirty = true
 	app.bagCountsDirty = true
 	app.ownershipRev = (app.ownershipRev or 0) + 1
@@ -4553,6 +4569,10 @@ local function runForeverBagResyncRegression()
 	app.charKey = origCharKey
 	app.char = origChar
 	ns.activeChar = origActiveChar
+	app.cachedBagCounts = nil
+	app.cachedBagCountsByID = nil
+	app._cachedOwnedCounts = nil
+	app._cachedOwnedCountsByID = nil
 	app.bagsDirty = true
 	app.bagCountsDirty = true
 	app.ownershipRev = (app.ownershipRev or 0) + 1
@@ -5799,9 +5819,9 @@ local function runCollectAllTests()
 	check(byID[78103].status == "done" and byID[78103].collected == 2
 		and byID[78102].status ~= "done" and byID[78102].remaining == 3
 		and of.IsCollectAllActive() == false
-		and of.GetState().notice == "Collected all needed items from Bank!"
-		and of.GetState().noticeKind == "positive",
-		"CollectAll Bank: Completes all present items, leaves missing item untouched, and posts positive completion notice")
+		and of.GetState().notice == "Collected 2 item(s) from Bank (some needed items still pending)."
+		and of.GetState().noticeKind == "info",
+		"CollectAll Bank: Completes all present items, leaves missing item untouched, and posts honest pending notice")
 
 	-- 3. Bank bags-full stop
 	clearCont(0); clearCont(1); clearCont(-1)
@@ -5925,9 +5945,9 @@ local function runCollectAllTests()
 	for _, it in ipairs(of.GetState().stages.collect.items) do mByID[it.itemID] = it end
 	check(mByID[78201].status == "done" and mByID[78203].status == "done" and mByID[78202].status ~= "done"
 		and of.IsCollectAllActive() == false
-		and of.GetState().notice == "Collected all needed items from Mailbox!"
-		and of.GetState().noticeKind == "positive",
-		"CollectAll Mail: Finishes batch with positive Mailbox completion notice")
+		and of.GetState().notice == "Collected 2 item(s) from Mailbox (some needed items still pending)."
+		and of.GetState().noticeKind == "info",
+		"CollectAll Mail: Finishes batch with honest pending Mailbox notice")
 
 	-- Mail bags-full stop
 	clearCont(0); clearCont(1)
@@ -6388,6 +6408,1021 @@ end)()
 	_G.MerchantMasterProfTabBtn = origTabGlobal
 	app.ui.profMMTab = origUiTab
 	ns.Window.ClearSavedPosition(nil)
+end)()
+
+-- 12. Collect Refresh Button, Cross-Char Rebucket, Heart-of-the-Wild Bank->Mail Promotion,
+--     Honest Completion Notices, AH inTransit Lifecycle, Locked Bank Slots, Quick-Close Grace,
+--     Inventory.ScanMailbox Guards, alts() GUID Dedup & Partial-Craft Resize Conservation
+;(function()
+	local of = app.orderFlow
+	local origCharKey = app.charKey
+	local origChar = app.char
+	local origMailboxItems = app.mailboxItems
+	local origAtBank, origAtMail = app.atBank, app.atMail
+	local origCharsDB = MerchantMasterDB.chars
+	local origOrderFlowState = MerchantMasterDB.orderFlowState
+	local origLedgerDB = _G.MerchantMasterLedgerDB
+	local origCCont = _G.C_Container
+	local origBF = _G.BankFrame
+	local origMailF = _G.MailFrame
+	local origAHF = _G.AuctionHouseFrame
+	local origGetTime = _G.GetTime
+	local origTimerAfter = _G.C_Timer and _G.C_Timer.After
+	local origGetInboxNum = _G.GetInboxNumItems
+	local origGetInboxHeader = _G.GetInboxHeaderInfo
+	local origGetInboxItem = _G.GetInboxItem
+	local origGetInboxLink = _G.GetInboxItemLink
+	local origTakeInbox = _G.TakeInboxItem
+	local origRetrieving = _G.RETRIEVING_DATA
+	local origMailHelper = ns.MailHelper
+	local origGetBag = app.getBagCountByID
+	local origUnitName = _G.UnitName
+	local origIncludeMail = MerchantMasterDB.includeMail
+	local origIncludeBank = MerchantMasterDB.includeBank
+	local origIncludeAlts = MerchantMasterDB.includeAlts
+
+	local mockNow = 80000
+	_G.GetTime = function() return mockNow end
+
+	local scheduledTimers = {}
+	if _G.C_Timer then
+		_G.C_Timer.After = function(delay, fn)
+			scheduledTimers[#scheduledTimers + 1] = { at = mockNow + (tonumber(delay) or 0), fn = fn }
+		end
+	end
+	local function advanceTimers(sec)
+		mockNow = mockNow + sec
+		local keep, run = {}, {}
+		for _, t in ipairs(scheduledTimers) do
+			if t.at <= mockNow then run[#run + 1] = t.fn else keep[#keep + 1] = t end
+		end
+		scheduledTimers = keep
+		for _, fn in ipairs(run) do fn() end
+	end
+
+	local itemNames = {
+		[79101] = "Refresh Herb",
+		[79102] = "Skipped Root",
+		[79103] = "Switch Ore",
+		[8140]  = "Heart of the Wild",
+		[79104] = "Reg Snapper",
+		[79105] = "Locked Crystal",
+		[79106] = "Quick Mail Moss",
+		[79107] = "SlotTwo Bar",
+		[79108] = "COD Scam Pearl",
+		[79109] = "Safe Ink",
+		[79110] = "Alt Dedup Silk",
+		[79111] = "Partial AH Bloom",
+		[79112] = "Partial Vendor Vial",
+		[79113] = "Partial Bank Dust",
+	}
+	local origNames, origIDs = {}, {}
+	for id, nm in pairs(itemNames) do
+		origNames[id] = ns.ITEM_NAMES_BY_ID and ns.ITEM_NAMES_BY_ID[id]
+		origIDs[nm] = ns.ITEM_IDS_BY_NAME and ns.ITEM_IDS_BY_NAME[nm]
+		if ns.ITEM_NAMES_BY_ID then ns.ITEM_NAMES_BY_ID[id] = nm end
+		if ns.ITEM_IDS_BY_NAME then ns.ITEM_IDS_BY_NAME[nm] = id end
+		app.itemIDs[nm] = id
+	end
+
+	local mockBagMax = { [0] = 6, [1] = 6, [-1] = 6 }
+	local mockCont = { [0] = {}, [1] = {}, [-1] = {} }
+	local function resetContainers()
+		mockCont[0] = {}
+		mockCont[1] = {}
+		mockCont[-1] = {}
+	end
+	local function setSlot(bag, slot, itemID, qty, locked)
+		if itemID and qty and qty > 0 then
+			local nm = itemNames[itemID] or ("Item #" .. tostring(itemID))
+			local lnk = "|cffffffff|Hitem:" .. tostring(itemID) .. "::::::::60:::::|h[" .. nm .. "]|h|r"
+			mockCont[bag][slot] = { itemID = itemID, stackCount = qty, isLocked = locked or false, hyperlink = lnk }
+		else
+			mockCont[bag][slot] = nil
+		end
+	end
+	local function addBagItem(itemID, qty)
+		for b = 0, 1 do
+			for s = 1, mockBagMax[b] do
+				local c = mockCont[b][s]
+				if c and c.itemID == itemID then
+					c.stackCount = c.stackCount + qty
+					return true
+				end
+			end
+		end
+		for b = 0, 1 do
+			for s = 1, mockBagMax[b] do
+				if not mockCont[b][s] then
+					setSlot(b, s, itemID, qty, false)
+					return true
+				end
+			end
+		end
+		return false
+	end
+	local function countBag(itemID)
+		local tot = 0
+		for b = 0, 1 do
+			for s = 1, mockBagMax[b] do
+				local c = mockCont[b][s]
+				if c and c.itemID == itemID then tot = tot + (c.stackCount or 0) end
+			end
+		end
+		return tot
+	end
+
+	_G.C_Container = {
+		GetContainerNumSlots = function(b) return mockBagMax[b] or 0 end,
+		GetContainerItemInfo = function(b, s)
+			local c = mockCont[b] and mockCont[b][s]
+			if not c then return nil end
+			return { itemID = c.itemID, stackCount = c.stackCount, isLocked = c.isLocked, hyperlink = c.hyperlink }
+		end,
+		GetContainerItemID = function(b, s)
+			local c = mockCont[b] and mockCont[b][s]
+			return c and c.itemID or nil
+		end,
+		GetContainerNumFreeSlots = function() return 4, 0 end,
+		UseContainerItem = function(b, s)
+			local c = mockCont[b] and mockCont[b][s]
+			if c and not c.isLocked then
+				addBagItem(c.itemID, c.stackCount)
+				mockCont[b][s] = nil
+			end
+		end,
+	}
+	app.getBagCountByID = function(id) return countBag(id) end
+
+	local bf = _G.CreateFrame("Frame")
+	bf:Hide()
+	_G.BankFrame = bf
+	local mf = _G.CreateFrame("Frame")
+	mf:Hide()
+	_G.MailFrame = mf
+	if _G.AuctionHouseFrame then _G.AuctionHouseFrame:Hide() end
+	ns.MailHelper = { IsActive = function() return false end }
+
+	local mockInbox = {}
+	local mockInboxTotal = nil
+	_G.RETRIEVING_DATA = "Retrieving data"
+	_G.GetInboxNumItems = function()
+		return #mockInbox, (mockInboxTotal ~= nil and mockInboxTotal or #mockInbox)
+	end
+	_G.GetInboxHeaderInfo = function(idx)
+		local m = mockInbox[idx]
+		if not m then return nil end
+		return nil, nil, m.sender, m.subject, 0, m.cod or 0, 30, m.hasItem
+	end
+	_G.GetInboxItem = function(mailIdx, attachIdx)
+		local m = mockInbox[mailIdx]
+		local a = m and m.attach and m.attach[attachIdx]
+		if not a then return nil end
+		return a.name, a.itemID, 134400, a.count, 1, true
+	end
+	_G.GetInboxItemLink = function(mailIdx, attachIdx)
+		local m = mockInbox[mailIdx]
+		local a = m and m.attach and m.attach[attachIdx]
+		if not a then return nil end
+		return "|cffffffff|Hitem:" .. tostring(a.itemID) .. "::::::::60:::::|h[" .. a.name .. "]|h|r"
+	end
+	_G.TakeInboxItem = function(mailIdx, attachIdx)
+		local m = mockInbox[mailIdx]
+		local a = m and m.attach and m.attach[attachIdx]
+		if a then
+			addBagItem(a.itemID, a.count)
+			m.attach[attachIdx] = nil
+		end
+	end
+
+	local function switchChar(charKey, charTbl, firstName)
+		MerchantMasterDB.chars[charKey] = charTbl
+		app.charKey = charKey
+		app.char = charTbl
+		_G.UnitName = function() return firstName or charTbl.firstName or charTbl.name end
+		if ns.Analytics and ns.Analytics.Store and ns.Analytics.Store.ResetForTest then
+			-- leave Store untouched if ResetForTest absent; SyncCurrentChar handles below
+		end
+		app.bagsDirty = true
+		app.bagCountsDirty = true
+		app.ownershipRev = (app.ownershipRev or 0) + 1
+	end
+
+	MerchantMasterDB.includeMail = true
+	MerchantMasterDB.includeBank = true
+	MerchantMasterDB.includeAlts = true
+	MerchantMasterDB.chars = {
+		["Benji Mongoose-Forever"] = {
+			name = "Benji Mongoose", firstName = "Benji", guid = "Player-99-0001",
+			realm = "Forever", faction = "Horde", economy = "EU|Horde|Forever|sc",
+			bags = {}, bank = { ["Refresh Herb"] = 20, ["Skipped Root"] = 5 }, mail = {}, updatedAt = 100,
+		},
+		["The Endboss-Forever"] = {
+			name = "The Endboss", firstName = "The", guid = "Player-99-0002",
+			realm = "Forever", faction = "Horde", economy = "EU|Horde|Forever|sc",
+			bags = {}, bank = { ["Switch Ore"] = 10, ["Heart of the Wild"] = 20 }, mail = {}, updatedAt = 100,
+		},
+	}
+	if ns.Analytics and ns.Analytics.Store and ns.Analytics.Store.db then
+		ns.Analytics.Store.db.inTransitMail = {}
+		ns.Analytics.Store.db.inventory = {}
+	end
+	switchChar("Benji Mongoose-Forever", MerchantMasterDB.chars["Benji Mongoose-Forever"], "Benji")
+
+	-- (1) Collect Refresh button UI + RefreshCollectForCurrentChar (closed-station snapshot preservation + mail/bags rebucket + 50-mail cap warning)
+	resetContainers()
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Refresh Herb", itemID = 79101, qty = 0, ownedUsed = 20, ahUnitPrice = 100 },
+		{ name = "Skipped Root", itemID = 79102, qty = 0, ownedUsed = 5, ahUnitPrice = 100 },
+	}, {
+		title = "Collect Refresh Test",
+		ownershipProvider = function(id)
+			if id == 79101 then return { bags = 0, bank = 20, mail = 0, alts = {} } end
+			if id == 79102 then return { bags = 0, bank = 5, mail = 0, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	-- Mark Skipped Root as skipped before refresh
+	for idx, it in ipairs(of.GetState().stages.collect.items) do
+		if it.itemID == 79102 then
+			of.SetActiveStage("collect")
+			of.SkipCollectItem(idx)
+			break
+		end
+	end
+	app.enterOrderFlowMode("collect")
+	modal.Render()
+	check(modal.collectRefreshBtn ~= nil and modal.collectRefreshBtn:IsShown() and modal.collectRefreshBtn:IsEnabled()
+		and modal.collectRefreshBtn:GetText() == "Refresh",
+		"Regress 1: Stage 2 Collect shows enabled Refresh footer button")
+	local caW = (modal.collectAllBtn and modal.collectAllBtn:GetWidth()) or 0
+	local crW = (modal.collectRefreshBtn and modal.collectRefreshBtn:GetWidth()) or 0
+	check(crW == 82 and (caW + 6 + crW) <= 372,
+		"Regress 1: Collect All + Refresh widths fit footer cleanly without overlap")
+
+	-- Closed Bank & Mail: cached bank/mail snapshots must be preserved when clicking Refresh!
+	app.char.bank["Refresh Herb"] = 5
+	app.char.mail["Refresh Herb"] = 15
+	app.ownershipRev = (app.ownershipRev or 0) + 1
+	modal.collectRefreshBtn:Click("LeftButton")
+	check(app.char.bank["Refresh Herb"] == 5 and app.char.mail["Refresh Herb"] == 15,
+		"Regress 1: Refresh preserves cached Bank and Mail snapshots while stations are closed")
+	local mailQty1, bankQty1, skipStatus1 = 0, 0, nil
+	for _, it in ipairs(of.GetState().stages.collect.items) do
+		if it.itemID == 79101 and it.source == "mail" then mailQty1 = mailQty1 + (it.remaining or 0)
+		elseif it.itemID == 79101 and it.source == "bank" then bankQty1 = bankQty1 + (it.remaining or 0)
+		elseif it.itemID == 79102 then skipStatus1 = it.status end
+	end
+	check(mailQty1 == 15 and bankQty1 == 5 and skipStatus1 == "skipped",
+		"Regress 1: Refresh re-buckets Bank->Mail (15 Mail, 5 Bank) and preserves skipped status")
+
+	-- Now put 5x in Bags + open Mailbox with 15x and total=55 (50-mail cap overflow)
+	setSlot(0, 1, 79101, 5, false)
+	mockInbox = {
+		{ sender = "The Endboss", subject = "Mats", cod = 0, hasItem = 1, attach = { [1] = { name = "Refresh Herb", itemID = 79101, count = 15 } } },
+	}
+	mockInboxTotal = 55
+	app.atMailbox = true
+	mf:Show()
+	of.OnMailShow()
+	of.RefreshCollectForCurrentChar()
+	local bagsDone1, mailRem1 = 0, 0
+	for _, it in ipairs(of.GetState().stages.collect.items) do
+		if it.itemID == 79101 and it.source == "bags" and it.status == "done" then bagsDone1 = bagsDone1 + (it.collected or 0)
+		elseif it.itemID == 79101 and it.source == "mail" then mailRem1 = mailRem1 + (it.remaining or 0) end
+	end
+	check(bagsDone1 == 5 and mailRem1 == 15 and of.GetState().noticeKind == "warning"
+		and (of.GetState().notice or ""):find("50%-mail cap", 1, false) ~= nil,
+		"Regress 1: Refresh marks 5x Bags [OK], keeps 15x Mail, and warns on 50-mail cap overflow")
+	mf:Hide()
+	app.atMailbox = false
+	of.OnMailClosed()
+	mockInboxTotal = nil
+
+	-- (2) Cross-character RestoreState auto-rebucket via ownerCharKey
+	resetContainers()
+	switchChar("The Endboss-Forever", MerchantMasterDB.chars["The Endboss-Forever"], "The")
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Switch Ore", itemID = 79103, qty = 0, ownedUsed = 10, ahUnitPrice = 100 },
+	}, { title = "Cross Char Switch Test" })
+	local savedEndboss = of.SerializeState()
+	check(savedEndboss and savedEndboss.ownerCharKey == "The Endboss-Forever",
+		"Regress 2: SerializeState stamps ownerCharKey")
+	MerchantMasterDB.chars["Benji Mongoose-Forever"].bank = {}
+	MerchantMasterDB.chars["Benji Mongoose-Forever"].mail = { ["Switch Ore"] = 10 }
+	switchChar("Benji Mongoose-Forever", MerchantMasterDB.chars["Benji Mongoose-Forever"], "Benji")
+	local restoredOk = of.RestoreState(savedEndboss)
+	local switchIt = of.GetState().stages.collect.items[1]
+	check(restoredOk == true and of.GetState().ownerCharKey == "Benji Mongoose-Forever"
+		and switchIt and switchIt.source == "mail" and switchIt.remaining == 10,
+		"Regress 2: RestoreState auto-rebuckets Bank->Mail when switched to a different character")
+
+	-- (3) Bank-only Mailbox scan & Heart of the Wild Bank->Mail promotion + Alt subject guard
+	resetContainers()
+	MerchantMasterDB.chars["Benji Mongoose-Forever"].bank = { ["Heart of the Wild"] = 20 }
+	MerchantMasterDB.chars["Benji Mongoose-Forever"].mail = {}
+	app.ownershipRev = (app.ownershipRev or 0) + 1
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Heart of the Wild", itemID = 8140, qty = 0, ownedUsed = 20, ahUnitPrice = 100 },
+	}, { title = "Heart Bank->Mail Test" })
+	of.SetActiveStage("collect")
+	check(of.GetState().stages.collect.items[1].source == "bank", "Regress 3: Precondition starts in Bank")
+	mockInbox = {
+		{ sender = "The Endboss", subject = "Auction mats from bank", cod = 0, hasItem = 1, attach = { [1] = { name = "Heart of the Wild", itemID = 8140, count = 160 } } },
+	}
+	app.atMailbox = true
+	mf:Show()
+	of.OnMailShow()
+	local heartIt = of.GetState().stages.collect.items[1]
+	check(heartIt.source == "mail" and heartIt.remaining == 20 and heartIt.availableHere == 160 and heartIt.status == "ready",
+		"Regress 3a: Bank-only Mailbox open promotes Heart of the Wild Bank->Mail (availableHere=160)")
+	mf:Hide()
+	app.atMailbox = false
+	of.OnMailClosed()
+
+	-- Alt source with known alt sender + 'Auction ...' subject promotes Alt->Mail with mailFromAlt=true
+	resetContainers()
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Heart of the Wild", itemID = 8140, qty = 0, ownedUsed = 20, ahUnitPrice = 100 },
+	}, {
+		title = "Alt Subject Guard Test",
+		ownershipProvider = function(id)
+			if id == 8140 then
+				return { bags = 0, bank = 0, mail = 0, alts = { { name = "The Endboss", location = "Bank", qty = 20 } } }
+			end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	check(of.GetState().stages.collect.items[1].source == "alt", "Regress 3b: Precondition starts in Alt")
+	mockInbox = {
+		{ sender = "The Endboss", subject = "Auction mats from bank", cod = 0, hasItem = 1, attach = { [1] = { name = "Heart of the Wild", itemID = 8140, count = 20 } } },
+	}
+	app.atMailbox = true
+	mf:Show()
+	of.OnMailShow()
+	local altPromoIt = of.GetState().stages.collect.items[1]
+	check(altPromoIt.source == "mail" and altPromoIt.mailFromAlt == true and altPromoIt.remaining == 20,
+		"Regress 3b: Known alt sender promotes Alt->Mail with mailFromAlt=true despite 'Auction' subject")
+	mf:Hide()
+	app.atMailbox = false
+	of.OnMailClosed()
+
+	-- (4) StopCollectAll('done') honest outcomes (positive vs warning overflow) + altCount pending guard
+	resetContainers()
+	MerchantMasterDB.chars["Benji Mongoose-Forever"].bank = {}
+	MerchantMasterDB.chars["Benji Mongoose-Forever"].mail = { ["Heart of the Wild"] = 10 }
+	app.ownershipRev = (app.ownershipRev or 0) + 1
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Heart of the Wild", itemID = 8140, qty = 0, ownedUsed = 10, ahUnitPrice = 100 },
+	}, {
+		title = "StopCollectAll Outcomes",
+		ownershipProvider = function(id)
+			if id == 8140 then return { bags = 0, bank = 0, mail = 10, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	mockInbox = {
+		{ sender = "AH", subject = "Won Heart", cod = 0, hasItem = 1, attach = { [1] = { name = "Heart of the Wild", itemID = 8140, count = 6 } } },
+	}
+	for i = 2, 50 do
+		mockInbox[i] = { sender = "Other", subject = "Other", cod = 0, hasItem = 0 }
+	end
+	mockInboxTotal = 54 -- 4 behind 50-mail cap
+	app.atMailbox = true
+	mf:Show()
+	of.OnMailShow()
+	scheduledTimers = {}
+	of.CollectAllAtCurrentSource()
+	of.OnBagUpdateDelayed()
+	advanceTimers(0.2)
+	check(of.GetState().noticeKind == "warning" and (of.GetState().notice or ""):find("4 more mail", 1, true) ~= nil,
+		"Regress 4a: Partial Mail Collect All + 50-mail cap emits honest warning banner (not green)")
+	mockInboxTotal = nil
+	mf:Hide()
+	app.atMailbox = false
+	of.OnMailClosed()
+
+	-- Partial pending without 50-mail cap overflow -> info pending notice; full Bank completion -> positive notice
+	resetContainers()
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Heart of the Wild", itemID = 8140, qty = 0, ownedUsed = 10, ahUnitPrice = 100 },
+	}, {
+		title = "StopCollectAll Info Outcome",
+		ownershipProvider = function(id)
+			if id == 8140 then return { bags = 0, bank = 0, mail = 10, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	mockInbox = {
+		{ sender = "AH", subject = "Won Heart", cod = 0, hasItem = 1, attach = { [1] = { name = "Heart of the Wild", itemID = 8140, count = 6 } } },
+	}
+	app.atMailbox = true
+	mf:Show()
+	of.OnMailShow()
+	scheduledTimers = {}
+	of.CollectAllAtCurrentSource()
+	of.OnBagUpdateDelayed()
+	advanceTimers(0.2)
+	check(of.GetState().noticeKind == "info" and (of.GetState().notice or ""):find("still pending", 1, true) ~= nil,
+		"Regress 4b: Partial Mail Collect All without overflow emits honest info pending banner")
+	mf:Hide()
+	app.atMailbox = false
+	of.OnMailClosed()
+
+	resetContainers()
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Heart of the Wild", itemID = 8140, qty = 0, ownedUsed = 4, ahUnitPrice = 100 },
+	}, {
+		title = "StopCollectAll Positive Outcome",
+		ownershipProvider = function(id)
+			if id == 8140 then return { bags = 0, bank = 4, mail = 0, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	setSlot(-1, 1, 8140, 4, false)
+	app.atBank = true
+	bf:Show()
+	of.OnBankShow()
+	scheduledTimers = {}
+	of.CollectAllAtCurrentSource()
+	of.OnBagUpdateDelayed()
+	advanceTimers(0.2)
+	check(of.GetState().noticeKind == "positive" and of.GetState().notice == "Collected all needed items from Bank!",
+		"Regress 4c: Complete Bank Collect All emits positive completion banner")
+	bf:Hide()
+	app.atBank = false
+	of.OnBankClosed()
+
+	-- Pending Alt item blocks false 'All owned items collected!' notice
+	resetContainers()
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Alt Dedup Silk", itemID = 79110, qty = 0, ownedUsed = 5, ahUnitPrice = 100 },
+	}, {
+		title = "Pending Alt Notice Guard",
+		ownershipProvider = function(id)
+			if id == 79110 then
+				return { bags = 0, bank = 0, mail = 2, alts = { { name = "The Endboss", location = "Bank", qty = 3 } } }
+			end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	mockInbox = {
+		{ sender = "The Endboss", subject = "Silk", cod = 0, hasItem = 1, attach = { [1] = { name = "Alt Dedup Silk", itemID = 79110, count = 2 } } },
+	}
+	app.atMailbox = true
+	mf:Show()
+	of.OnMailShow()
+	local okTake2 = of.CollectFromMail(1)
+	check(okTake2 == true, "Regress 4d: Mail portion collected")
+	of.OnBagUpdateDelayed()
+	local altStats = of.GetStageStats("collect")
+	check(altStats.complete == false and altStats.altCount == 1
+		and of.GetState().notice ~= "All owned items collected!",
+		"Regress 4d: Pending Alt item prevents false 'All owned items collected!' notice")
+	mf:Hide()
+	app.atMailbox = false
+	of.OnMailClosed()
+
+	-- (5) MarkBought -> Collect Mail (_createdByAH, purchasedFromAH), GetAllDestinations exclusion, AH inTransitMail settle
+	resetContainers()
+	if ns.Analytics and ns.Analytics.Store and ns.Analytics.Store.db then
+		ns.Analytics.Store.db.inTransitMail = {}
+	end
+	MerchantMasterDB.chars["Benji Mongoose-Forever"].mail = {}
+	app.ownershipRev = (app.ownershipRev or 0) + 1
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "r5", name = "Dest Potion", itemID = 79901, qty = 1, sourceKind = "craft_order", sourceLabel = "Craft Order" },
+		{ indent = 1, mainGroupKey = "r5", name = "Reg Snapper", itemID = 79104, qty = 4, ahUnitPrice = 50, categoryName = "Dest Potion", sourceKind = "craft_order", sourceLabel = "Craft Order" },
+	}, {
+		title = "AH MarkBought Lifecycle",
+		ownershipProvider = function() return { bags = 0, bank = 0, mail = 0, alts = {} } end,
+	})
+	cb.MarkBought(1)
+	local ahMailRow = nil
+	for _, it in ipairs(of.GetState().stages.collect.items) do
+		if it.itemID == 79104 and it.source == "mail" then ahMailRow = it end
+	end
+	local destList = of.GetAllDestinations()
+	local ahTransitFound = 0
+	if ns.Analytics and ns.Analytics.Store and ns.Analytics.Store.db then
+		for _, e in ipairs(ns.Analytics.Store.db.inTransitMail or {}) do
+			if e and e.fromChar == "Auction House" and e.items and e.items[79104] then
+				ahTransitFound = ahTransitFound + (e.items[79104] or 0)
+			end
+		end
+	end
+	local bdBeforeMail = app.getItemOwnershipBreakdown(79104, "Reg Snapper")
+	check(ahMailRow ~= nil and ahMailRow.purchasedFromAH == true and ahMailRow._createdByAH == true and ahMailRow.remaining == 4,
+		"Regress 5: MarkBought queues Collect Mail item with purchasedFromAH & _createdByAH flags")
+	check(#destList == 1 and destList[1].totalItems == 2 and destList[1].boughtItems == 1,
+		"Regress 5: _createdByAH dynamic mail entry is excluded from GetAllDestinations counts (2 not 3)")
+	check(ahTransitFound == 4 and (bdBeforeMail.inTransit or 0) == 0,
+		"Regress 5: AH purchase records inTransitMail without double-counting active OrderFlow purchase in owned breakdown")
+	of.MarkCollected(1)
+	local ahTransitAfter = 0
+	if ns.Analytics and ns.Analytics.Store and ns.Analytics.Store.db then
+		for _, e in ipairs(ns.Analytics.Store.db.inTransitMail or {}) do
+			if e and e.fromChar == "Auction House" and e.items and e.items[79104] then
+				ahTransitAfter = ahTransitAfter + (e.items[79104] or 0)
+			end
+		end
+	end
+	check(ahTransitAfter == 0, "Regress 5: Collecting AH Mail settles Auction House inTransitMail to 0")
+
+	-- (6) Locked Bank slot exclusion
+	resetContainers()
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Locked Crystal", itemID = 79105, qty = 0, ownedUsed = 10, ahUnitPrice = 100 },
+	}, {
+		title = "Locked Bank Slot Test",
+		ownershipProvider = function(id)
+			if id == 79105 then return { bags = 0, bank = 10, mail = 0, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	setSlot(-1, 1, 79105, 10, true)
+	app.atBank = true
+	bf:Show()
+	of.OnBankShow()
+	check(of.GetState().stages.collect.items[1].availableHere == 0 and of.GetCollectAllSummary().itemCount == 0,
+		"Regress 6: Locked Bank slot is excluded from availableHere and CollectAllSummary")
+	setSlot(-1, 1, 79105, 10, false)
+	of.ScanOpenBank()
+	check(of.GetState().stages.collect.items[1].availableHere == 10 and of.GetCollectAllSummary().itemCount == 1,
+		"Regress 6: Unlocked Bank slot becomes availableHere=10 on ScanOpenBank")
+	bf:Hide()
+	app.atBank = false
+	of.OnBankClosed()
+
+	-- (7) Post-MAIL_CLOSED _recentCloseGrace + cached char.mail / mailboxItems decrement
+	resetContainers()
+	app.char.mail = { ["Quick Mail Moss"] = 5 }
+	app.mailboxItems = { [79106] = 5 }
+	app.ownershipRev = (app.ownershipRev or 0) + 1
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Quick Mail Moss", itemID = 79106, qty = 0, ownedUsed = 5, ahUnitPrice = 100 },
+	}, {
+		title = "Quick Close Grace Test",
+		ownershipProvider = function(id)
+			if id == 79106 then return { bags = 0, bank = 0, mail = 5, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	mockInbox = {
+		{ sender = "AH", subject = "Won Moss", cod = 0, hasItem = 1, attach = { [1] = { name = "Quick Mail Moss", itemID = 79106, count = 5 } } },
+	}
+	app.atMailbox = true
+	mf:Show()
+	of.OnMailShow()
+	-- Simulate TakeInboxItem where bag delta arrives right AFTER MAIL_CLOSED
+	local origTakeTmp = _G.TakeInboxItem
+	_G.TakeInboxItem = function() end
+	of.CollectFromMail(1)
+	_G.TakeInboxItem = origTakeTmp
+	mf:Hide()
+	app.atMailbox = false
+	of.OnMailClosed()
+	local cSt7 = of.GetState().stages.collect
+	check(cSt7.pendingTake == nil and cSt7._recentCloseGrace ~= nil and cSt7._recentCloseGrace.hadPendingTake == true,
+		"Regress 7: OnMailClosed clears pendingTake=nil while arming _recentCloseGrace")
+	mockNow = mockNow + 0.5
+	setSlot(0, 1, 79106, 5, false)
+	of.OnBagUpdateDelayed()
+	check(cSt7.items[1].status == "done" and (app.char.mail["Quick Mail Moss"] or 0) == 0
+		and (app.mailboxItems[79106] or 0) == 0,
+		"Regress 7: Late BAG_UPDATE_DELAYED within 3s grace completes Mail item and decrements cached char.mail & mailboxItems")
+
+	-- (8) Inventory.ScanMailbox slot-1-empty + COD skip + RETRIEVING_DATA abort + alts() GUID dedup
+	if ns.Analytics and ns.Analytics.Inventory and ns.Analytics.Inventory.ScanMailbox and ns.Analytics.Store then
+		local invMod = ns.Analytics.Inventory
+		local storeMod = ns.Analytics.Store
+		local charK, econK = storeMod.CurrentCharAndEcon and storeMod.CurrentCharAndEcon()
+		if charK then
+			mockInbox = {
+				{ sender = "Friend", subject = "Looted Slot 1", cod = 0, hasItem = 1, attach = { [2] = { name = "SlotTwo Bar", itemID = 79107, count = 8 } } },
+				{ sender = "Scam", subject = "COD Trap", cod = 50000, hasItem = 1, attach = { [1] = { name = "COD Scam Pearl", itemID = 79108, count = 10 } } },
+				{ sender = "Banker", subject = "Ink", cod = 0, hasItem = 1, attach = { [1] = { name = "Safe Ink", itemID = 79109, count = 4 } } },
+			}
+			local snapMail = invMod.ScanMailbox()
+			check(snapMail ~= nil and snapMail.mail and snapMail.mail[79107] == 8 and (snapMail.mail[79108] or 0) == 0 and snapMail.mail[79109] == 4,
+				"Regress 8a: Inventory.ScanMailbox counts attachment slot 2 when slot 1 is nil and skips COD mail")
+			mockInbox[3].subject = _G.RETRIEVING_DATA
+			local nilSnap = invMod.ScanMailbox()
+			check(nilSnap == nil and snapMail.mail[79107] == 8,
+				"Regress 8b: Inventory.ScanMailbox aborts with nil on RETRIEVING_DATA without corrupting prior snapshot")
+		end
+	end
+	MerchantMasterDB.chars = {
+		["ThirdChar-Forever"] = {
+			name = "Third Char", firstName = "Third", guid = "Player-99-0003",
+			realm = "Forever", faction = "Horde", economy = "EU|Horde|Forever|sc",
+			bags = {}, bank = {}, mail = {}, updatedAt = 100,
+		},
+		["Endboss-Forever"] = {
+			name = "Endboss", guid = "Player-99-DEDUP",
+			realm = "Forever", faction = "Horde", economy = "EU|Horde|Forever|sc",
+			bags = {}, bank = { ["Alt Dedup Silk"] = 20 }, mail = {}, updatedAt = 100,
+		},
+		["Endboss Forever-Forever"] = {
+			name = "Endboss Forever", firstName = "Endboss", guid = "Player-99-DEDUP",
+			realm = "Forever", faction = "Horde", economy = "EU|Horde|Forever|sc",
+			bags = {}, bank = { ["Alt Dedup Silk"] = 20 }, mail = {}, updatedAt = 200,
+		},
+	}
+	switchChar("ThirdChar-Forever", MerchantMasterDB.chars["ThirdChar-Forever"], "Third")
+	local bdDedup = app.getItemOwnershipBreakdown(79110, "Alt Dedup Silk")
+	local altSum = 0
+	for _, ae in ipairs(bdDedup.alts or {}) do altSum = altSum + (ae.qty or 0) end
+	check(altSum == 20, "Regress 8c: alts() GUID dedup counts shared-GUID Endboss once (20, not 40)")
+
+	-- (9) Partial-craft resize conservation (never double-credits consumed crafts or falsifies unbought/uncollected rows)
+	resetContainers()
+	MerchantMasterDB.chars["ThirdChar-Forever"].bank = { ["Partial Bank Dust"] = 5 }
+	app.ownershipRev = (app.ownershipRev or 0) + 1
+	of.ClearSavedState()
+	local r9RowsA = {
+		{ isMainRow = true, mainGroupKey = "p9", name = "Resized Elix", itemID = 79909, spellID = 99909, prof = "alchemy", qty = 5, sourceKind = "craft_order", sourceLabel = "Craft Order",
+			reagents = { { itemID = 79111, qty = 2 }, { itemID = 79112, qty = 1 }, { itemID = 79113, qty = 1 } } },
+		{ indent = 1, mainGroupKey = "p9", name = "Partial AH Bloom", itemID = 79111, qty = 10, ahUnitPrice = 100, categoryName = "Resized Elix" },
+		{ indent = 1, mainGroupKey = "p9", name = "Partial Vendor Vial", itemID = 79112, qty = 5, isVendor = true, vendorUnitPrice = 10, categoryName = "Resized Elix" },
+		{ indent = 1, mainGroupKey = "p9", name = "Partial Bank Dust", itemID = 79113, qty = 0, ownedUsed = 5, categoryName = "Resized Elix" },
+	}
+	local prov9 = function(id)
+		if id == 79113 then return { bags = 0, bank = 5, mail = 0, alts = {} } end
+		return { bags = countBag(id), bank = 0, mail = 0, alts = {} }
+	end
+	of.LoadFromShoppingRows(r9RowsA, { title = "Resize A", ownershipProvider = prov9 })
+	-- Bought all 10 AH Bloom, bought all 5 Vendor Vial, withdrew 5 Bank Dust, crafted 2 of 5 (consumed 4 AH, 2 Vial, 2 Dust; unconsumed in bags: 6 AH, 3 Vial, 3 Dust)
+	cb.MarkBought(1)
+	local ven9 = of.GetState().stages.vendor.items[1]
+	ven9.bought, ven9.remaining, ven9.status = 5, 0, "done"
+	setSlot(0, 1, 79111, 6, false)
+	setSlot(0, 2, 79112, 3, false)
+	setSlot(0, 3, 79113, 3, false)
+	local crT9 = of.GetState().stages.craft.tasks[1]
+	crT9.completedCrafts, crT9.remainingCrafts = 2, 3
+	-- Resize order from 5 -> 7 (+2 crafts total => net remaining crafts = 5, needing 4 more AH Bloom, 2 more Vendor Vial, 2 more Bank Dust; Bank still has 5? no, suppose 3 uncollected in bags, 2 new need in AH or remaining bank)
+	local r9RowsB = {
+		{ isMainRow = true, mainGroupKey = "p9", name = "Resized Elix", itemID = 79909, spellID = 99909, prof = "alchemy", qty = 5, _origOrderQty = 7, _completedCraftsDeducted = 2, sourceKind = "craft_order", sourceLabel = "Craft Order",
+			reagents = { { itemID = 79111, qty = 2 }, { itemID = 79112, qty = 1 }, { itemID = 79113, qty = 1 } } },
+		{ indent = 1, mainGroupKey = "p9", name = "Partial AH Bloom", itemID = 79111, qty = 4, ownedUsed = 6, ahUnitPrice = 100, categoryName = "Resized Elix" },
+		{ indent = 1, mainGroupKey = "p9", name = "Partial Vendor Vial", itemID = 79112, qty = 2, ownedUsed = 3, isVendor = true, vendorUnitPrice = 10, categoryName = "Resized Elix" },
+		{ indent = 1, mainGroupKey = "p9", name = "Partial Bank Dust", itemID = 79113, qty = 0, ownedUsed = 5, categoryName = "Resized Elix" },
+	}
+	r9RowsB._deductedReagentsTotal = { [79111] = 4, [79112] = 2, [79113] = 2 }
+	-- Put 3 AH in bags (say bags consumed), suppose bags have 0 unbought; live check: AH bought was 10, minus 4 consumed & any bags growth -> wait: row qty=4 already reflects live bags, old AH bought (10) - accounted(4 + mailCollected(0)) = 6? Wait: if live row says qty=4 more needed when AH row was preserved... let's verify exact conservation!
+	MerchantMasterDB.chars["ThirdChar-Forever"].bank = { ["Partial Bank Dust"] = 2 }
+	of.LoadFromShoppingRows(r9RowsB, {
+		title = "Resize B",
+		preserveProgress = true,
+		deductOwned = true,
+		ownershipProvider = function(id)
+			if id == 79113 then return { bags = 3, bank = 2, mail = 0, alts = {} } end
+			return { bags = countBag(id), bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	local ah9After = of.GetState().stages.ah.items[1]
+	local ven9After = of.GetState().stages.vendor.items[1]
+	local bankDustRem = 0
+	for _, it in ipairs(of.GetState().stages.collect.items) do
+		if it.itemID == 79113 and it.source == "bank" then bankDustRem = bankDustRem + (it.remaining or 0) end
+	end
+	check(ah9After ~= nil and ah9After.remaining == 4 and ah9After.status ~= "done",
+		"Regress 9: Resized AH row keeps unbought qty 4 pending cleanly")
+	check(ven9After ~= nil and ven9After.remaining == 2 and ven9After.status ~= "done",
+		"Regress 9: Resized Vendor row keeps unbought qty 2 pending instead of falsely copying prior bought=5")
+	check(bankDustRem == 2,
+		"Regress 9: Resized Bank Collect row keeps uncollected Bank Dust remaining=2 instead of falsely copying prior done")
+
+	-- (10) Finding #1: ReceiveTransitMail alias cleanup clears single-word Forever alias inTransitMail
+	if ns.Analytics and ns.Analytics.Inventory and ns.Analytics.Store and ns.Analytics.Store.db then
+		local invMod = ns.Analytics.Inventory
+		local storeDb = ns.Analytics.Store.db
+		storeDb.inTransitMail = {}
+		storeDb.inventory = {
+			["Normal-Horde-Forever-Benji Mongoose"] = { econ = "Normal-Horde", bags = {}, bank = {}, mail = {} },
+		}
+		local nowEpoch = _G.time()
+		invMod.RecordInTransitMail("Normal-Horde-Forever-Benji", { { itemID = 4304, qty = 25 } }, 0, nowEpoch, "Normal-Horde-Forever-The Endboss", "Normal-Horde")
+		local bdAliasBefore = invMod.GetItemBreakdown(4304)
+		invMod.ReceiveTransitMail("Normal-Horde-Forever-Benji Mongoose", {}, { fullScan = true, snapshotAt = nowEpoch + 10 })
+		local bdAliasAfter = invMod.GetItemBreakdown(4304)
+		check((bdAliasBefore.inTransit or 0) == 25 and (bdAliasAfter.inTransit or 0) == 0,
+			"Regress 10: ReceiveTransitMail clears single-word alias inTransitMail cleanly (no shadow upvalue bug)")
+	end
+
+	-- (11) Finding #2: Sub-craft completedCrafts + leaf subDeductedTotal conservation on resize
+	resetContainers()
+	of.ClearSavedState()
+	local r11RowsA = {
+		{ isMainRow = true, mainGroupKey = "m11", name = "Main Tonic", itemID = 79911, spellID = 99911, prof = "alchemy", qty = 10, sourceKind = "craft_order", sourceLabel = "Craft Order",
+			reagents = { { itemID = 79109, qty = 1 } } },
+		{ indent = 1, mainGroupKey = "m11", isSubBranchRoot = true, subGroupKey = "s11", name = "Sub Vial", itemID = 79109, spellID = 99910, prof = "alchemy", craftProf = "alchemy", qty = 10, makeMyself = true, categoryName = "Main Tonic",
+			reagents = { { itemID = 79112, qty = 1 } } },
+		{ indent = 2, isSubRow = true, mainGroupKey = "m11", subGroupKey = "s11", parentSubName = "Sub Vial", name = "Partial Vendor Vial", itemID = 79112, qty = 10, isVendor = true, vendorUnitPrice = 10, categoryName = "Main Tonic" },
+	}
+	of.LoadFromShoppingRows(r11RowsA, { title = "Subcraft Resize A", ownershipProvider = function() return { bags = 0, bank = 0, mail = 0, alts = {} } end })
+	local v11 = of.GetState().stages.vendor.items[1]
+	v11.bought, v11.remaining, v11.status = 10, 0, "done"
+	for _, t in ipairs(of.GetState().stages.craft.tasks) do
+		t.completedCrafts = 5
+		t.remainingCrafts = 5
+	end
+	setSlot(0, 1, 79112, 5, false) -- 5 left in bags, 5 already crafted into 5 Sub Vials and consumed
+	local r11RowsB = {
+		{ isMainRow = true, mainGroupKey = "m11", name = "Main Tonic", itemID = 79911, spellID = 99911, prof = "alchemy", qty = 9, _origOrderQty = 14, _completedCraftsDeducted = 5, sourceKind = "craft_order", sourceLabel = "Craft Order",
+			reagents = { { itemID = 79109, qty = 1 } } },
+		{ indent = 1, mainGroupKey = "m11", isSubBranchRoot = true, subGroupKey = "s11", name = "Sub Vial", itemID = 79109, spellID = 99910, prof = "alchemy", craftProf = "alchemy", qty = 9, makeMyself = true, categoryName = "Main Tonic",
+			reagents = { { itemID = 79112, qty = 1 } } },
+		{ indent = 2, isSubRow = true, mainGroupKey = "m11", subGroupKey = "s11", parentSubName = "Sub Vial", name = "Partial Vendor Vial", itemID = 79112, qty = 4, ownedUsed = 5, isVendor = true, vendorUnitPrice = 10, categoryName = "Main Tonic" },
+	}
+	r11RowsB._deductedReagentsTotal = { [79109] = 5, [79112] = 5 }
+	of.LoadFromShoppingRows(r11RowsB, {
+		title = "Subcraft Resize B",
+		preserveProgress = true,
+		deductOwned = true,
+		ownershipProvider = function(id) return { bags = countBag(id), bank = 0, mail = 0, alts = {} } end,
+	})
+	local subTask11 = nil
+	for _, t in ipairs(of.GetState().stages.craft.tasks) do
+		if t.isSubCraft then subTask11 = t end
+	end
+	local v11After = of.GetState().stages.vendor.items[1]
+	check(subTask11 and subTask11.neededCrafts == 14 and subTask11.completedCrafts == 5 and subTask11.remainingCrafts == 9,
+		"Regress 11: Resized sub-craft restores consumed crafts cleanly (remaining=9, not double-subtracted to 4)")
+	check(v11After and v11After.remaining == 4 and v11After.status ~= "done",
+		"Regress 11: Resized leaf Vendor mat behind sub-craft keeps 4 remaining pending cleanly")
+
+	-- (12) Finding #3: Pre-existing owned Mail (10) + AH buy (50) preserves S3.5 merge, GetAllDestinations units, ah.bought, and Refresh _createdByAH
+	resetContainers()
+	MerchantMasterDB.chars["ThirdChar-Forever"].mail = { ["Reg Snapper"] = 10 }
+	app.ownershipRev = (app.ownershipRev or 0) + 1
+	of.ClearSavedState()
+	local r12Rows = {
+		{ isMainRow = true, mainGroupKey = "m12", name = "Snapper Dish", itemID = 79912, qty = 1, sourceKind = "craft_order", sourceLabel = "Craft Order" },
+		{ indent = 1, mainGroupKey = "m12", name = "Reg Snapper", itemID = 79104, qty = 50, ownedUsed = 10, ahUnitPrice = 50, categoryName = "Snapper Dish", sourceKind = "craft_order", sourceLabel = "Craft Order" },
+	}
+	of.LoadFromShoppingRows(r12Rows, {
+		title = "Merged Owned + AH Mail",
+		ownershipProvider = function(id)
+			if id == 79104 then return { bags = 0, bank = 0, mail = 10, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	cb.MarkBought(1)
+	local mRow12 = nil
+	for _, it in ipairs(of.GetState().stages.collect.items) do
+		if it.itemID == 79104 and it.source == "mail" then mRow12 = it end
+	end
+	local dest12 = of.GetAllDestinations()
+	check(mRow12 and mRow12.needed == 60 and mRow12._ahAddedQty == 50 and mRow12._createdByAH == nil,
+		"Regress 12a: Merged owned (10) + AH (50) mail row preserves needed=60 and tracks _ahAddedQty=50")
+	check(#dest12 == 1 and dest12[1].totalItems == 3 and dest12[1].totalUnits == 61,
+		"Regress 12b: GetAllDestinations caps merged Mail provenance at owned portion (50+10+1=61, not 111)")
+	of.LoadFromShoppingRows(r12Rows, {
+		title = "Merged Owned + AH Mail Sync",
+		preserveProgress = true,
+		deductOwned = true,
+		ownershipProvider = function(id)
+			if id == 79104 then return { bags = 0, bank = 0, mail = 10, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	check(of.GetState().stages.ah.items[1].bought == 50 and of.GetState().stages.ah.items[1].remaining == 0,
+		"Regress 12c: preserveProgress reload keeps ah.bought=50 intact alongside 10 pre-owned mail")
+
+	-- Pure _createdByAH survives RefreshCollectForCurrentChar
+	resetContainers()
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ isMainRow = true, mainGroupKey = "m12b", name = "Pure AH Potion", itemID = 79913, qty = 1, sourceKind = "craft_order", sourceLabel = "Craft Order" },
+		{ indent = 1, mainGroupKey = "m12b", name = "Reg Snapper", itemID = 79104, qty = 4, ahUnitPrice = 50, categoryName = "Pure AH Potion", sourceKind = "craft_order", sourceLabel = "Craft Order" },
+	}, { title = "Pure AH Refresh", ownershipProvider = function() return { bags = 0, bank = 0, mail = 0, alts = {} } end })
+	cb.MarkBought(1)
+	of.RefreshCollectForCurrentChar({ silent = true, ownershipProvider = function() return { bags = 0, bank = 0, mail = 0, alts = {} } end })
+	local dest12p = of.GetAllDestinations()
+	local r12Pure = of.GetState().stages.collect.items[1]
+	check(r12Pure and r12Pure._createdByAH == true and #dest12p == 1 and dest12p[1].totalItems == 2,
+		"Regress 12d: RefreshCollectForCurrentChar preserves _createdByAH=true and GetAllDestinations excludes dynamic AH mail")
+
+	-- (13) Finding #4: RETRIEVING_DATA during RefreshCollectForCurrentChar never wipes cached app.char.mail
+	resetContainers()
+	app.char.mail = { ["Refresh Herb"] = 100 }
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Refresh Herb", itemID = 79101, qty = 0, ownedUsed = 100, ahUnitPrice = 100 },
+	}, {
+		title = "RETRIEVING_DATA Guard",
+		ownershipProvider = function(id)
+			if id == 79101 then return { bags = 0, bank = 0, mail = 100, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	mockInbox = {
+		{ sender = "AH", subject = _G.RETRIEVING_DATA, cod = 0, hasItem = 1, attach = { [1] = { name = _G.RETRIEVING_DATA, itemID = nil, count = 1 } } },
+	}
+	app.atMailbox = true
+	mf:Show()
+	of.RefreshCollectForCurrentChar()
+	check(app.char.mail["Refresh Herb"] == 100,
+		"Regress 13: RETRIEVING_DATA inbox during Refresh preserves cached app.char.mail (no wipe to 0)")
+	mf:Hide()
+	app.atMailbox = false
+	of.OnMailClosed()
+
+	-- (14) Finding #5: preserveProgress=true with opts.deductOwned=false honors opts even if DB default is true
+	resetContainers()
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Reg Snapper", itemID = 79104, qty = 100, ahUnitPrice = 50 },
+	}, { title = "DeductOwned False Test", ownershipProvider = function() return { bags = 0, bank = 0, mail = 0, alts = {} } end })
+	local origSearch14 = app.searchAH
+	app.searchAH = function() return true end
+	if _G.AuctionHouseFrame and _G.AuctionHouseFrame.Show then _G.AuctionHouseFrame:Show() end
+	app.enterOrderFlowMode("ah")
+	cb.OnCommodityPurchaseConfirmed(79104, 40)
+	ns.MarketScan.HandleEvent("COMMODITY_PURCHASE_SUCCEEDED")
+	if _G.AuctionHouseFrame and _G.AuctionHouseFrame.Hide then _G.AuctionHouseFrame:Hide() end
+	app.searchAH = origSearch14
+	local st14Pre = of.GetState().stages.ah.items[1]
+	check(st14Pre and st14Pre.bought == 40,
+		"Regress 14 precheck: bought=40, got " .. tostring(st14Pre and st14Pre.bought) .. ", col=" .. tostring(#(of.GetState().stages.collect.items)))
+	of.MarkCollected(1)
+	setSlot(0, 1, 79104, 40, false)
+	of.LoadFromShoppingRows({
+		{ name = "Reg Snapper", itemID = 79104, qty = 100, ahUnitPrice = 50 },
+	}, {
+		title = "DeductOwned False Sync",
+		preserveProgress = true,
+		deductOwned = false,
+		ownershipProvider = function() return { bags = 40, bank = 0, mail = 0, alts = {} } end,
+	})
+	local st14After = of.GetState().stages.ah.items[1]
+	check(st14After.bought == 40 and st14After.remaining == 60,
+		"Regress 14: preserveProgress with opts.deductOwned=false keeps bought=40, remaining=60; got b=" .. tostring(st14After.bought) .. ", r=" .. tostring(st14After.remaining))
+	if app.exitAHBuyingMode then app.exitAHBuyingMode(false) end
+
+	-- (15) Finding #6: Over-stack MAIL_CLOSED grace decrements full stack (20->0) & completeSendMail updates cachedBagCounts + ownershipRev
+	resetContainers()
+	app.char.mail = { ["Quick Mail Moss"] = 20 }
+	app.mailboxItems = { [79106] = 20 }
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Quick Mail Moss", itemID = 79106, qty = 0, ownedUsed = 5, ahUnitPrice = 100 },
+	}, {
+		title = "Over-Stack Grace Test",
+		ownershipProvider = function(id)
+			if id == 79106 then return { bags = 0, bank = 0, mail = 20, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	mockInbox = {
+		{ sender = "AH", subject = "Stack 20", cod = 0, hasItem = 1, attach = { [1] = { name = "Quick Mail Moss", itemID = 79106, count = 20 } } },
+	}
+	app.atMailbox = true
+	mf:Show()
+	of.OnMailShow()
+	local origTake15 = _G.TakeInboxItem
+	_G.TakeInboxItem = function() end
+	of.CollectFromMail(1)
+	_G.TakeInboxItem = origTake15
+	mf:Hide()
+	app.atMailbox = false
+	of.OnMailClosed()
+	mockNow = mockNow + 0.4
+	setSlot(0, 1, 79106, 20, false)
+	of.OnBagUpdateDelayed()
+	check((app.char.mail["Quick Mail Moss"] or 0) == 0 and (app.mailboxItems[79106] or 0) == 0,
+		"Regress 15a: Over-stack MAIL_CLOSED grace decrements cached char.mail by full attachment stack (20->0, not 15)")
+
+	if ns.Analytics and ns.Analytics.Capture and ns.Analytics.Capture._StageSendMail then
+		local origGetSendMailItem = _G.GetSendMailItem
+		local origGetSendMailItemLink = _G.GetSendMailItemLink
+		local origGetSendMailMoney = _G.GetSendMailMoney
+		local origGetSendMailCOD = _G.GetSendMailCOD
+		local origGetSendMailPrice = _G.GetSendMailPrice
+		if ns.Analytics.Store and ns.Analytics.Store.CurrentCharAndEcon then
+			local curK, curE = ns.Analytics.Store.CurrentCharAndEcon()
+			local revBefore = app.ownershipRev or 0
+			app.charKey = curK
+			app.char = { name = "Third Char", realm = "Forever", faction = "Horde", economy = curE, bags = { ["Safe Ink"] = 10 }, mail = {}, bank = {} }
+			app.cachedBagCounts = { ["Safe Ink"] = 10 }
+			app.cachedBagCountsByID = { [79109] = 10 }
+			app._cachedOwnedCounts = { ["Safe Ink"] = 10 }
+			MerchantMasterDB.chars[curK] = app.char
+			local recKey15 = tostring(curE or "Normal-Horde") .. "-Forever-Benji Mongoose"
+			MerchantMasterDB.chars[recKey15] = { name = "Benji Mongoose", realm = "Forever", faction = "Horde", economy = curE, bags = {}, bank = {}, mail = {} }
+			_G.GetSendMailItem = function(idx) if idx == 1 then return "Safe Ink", 79109, 134400, 4 end end
+			_G.GetSendMailItemLink = function(idx) if idx == 1 then return "|cffffffff|Hitem:79109::::::::60:::::|h[Safe Ink]|h|r" end end
+			_G.GetSendMailMoney = function() return 0 end
+			_G.GetSendMailCOD = function() return 0 end
+			_G.GetSendMailPrice = function() return 0 end
+			ns.Analytics.Capture._StageSendMail("Benji Mongoose")
+			ns.Analytics.Capture.OnEvent(nil, "MAIL_SEND_SUCCESS")
+			check((app.cachedBagCounts["Safe Ink"] or 0) == 6 and (app.cachedBagCountsByID[79109] or 0) == 6
+				and app._cachedOwnedCounts == nil and (app.ownershipRev or 0) > revBefore,
+				"Regress 15b: completeSendMail decrements cachedBagCounts & cachedBagCountsByID and bumps ownershipRev")
+		end
+		_G.GetSendMailItem = origGetSendMailItem
+		_G.GetSendMailItemLink = origGetSendMailItemLink
+		_G.GetSendMailMoney = origGetSendMailMoney
+		_G.GetSendMailCOD = origGetSendMailCOD
+		_G.GetSendMailPrice = origGetSendMailPrice
+	end
+
+	-- (16) Finding #7e: Partial Bank->Mail split marks residual Bank row 'done' cleanly
+	resetContainers()
+	of.ClearSavedState()
+	of.LoadFromShoppingRows({
+		{ name = "Heart of the Wild", itemID = 8140, qty = 0, ownedUsed = 20, ahUnitPrice = 100 },
+	}, {
+		title = "Partial Bank Split Status",
+		ownershipProvider = function(id)
+			if id == 8140 then return { bags = 0, bank = 20, mail = 0, alts = {} } end
+			return { bags = 0, bank = 0, mail = 0, alts = {} }
+		end,
+	})
+	of.SetActiveStage("collect")
+	local origBankIt16 = of.GetState().stages.collect.items[1]
+	origBankIt16.collected = 5
+	origBankIt16.remaining = 15
+	mockInbox = {
+		{ sender = "The Endboss", subject = "Heart", cod = 0, hasItem = 1, attach = { [1] = { name = "Heart of the Wild", itemID = 8140, count = 15 } } },
+	}
+	app.atMailbox = true
+	mf:Show()
+	of.OnMailShow()
+	local residualBank16, promotedMail16 = nil, nil
+	for _, it in ipairs(of.GetState().stages.collect.items) do
+		if it.itemID == 8140 and it.source == "bank" then residualBank16 = it
+		elseif it.itemID == 8140 and it.source == "mail" then promotedMail16 = it end
+	end
+	check(residualBank16 and residualBank16.needed == 5 and residualBank16.remaining == 0 and residualBank16.status == "done"
+		and promotedMail16 and promotedMail16.needed == 15 and promotedMail16.status == "ready",
+		"Regress 16: Partial Bank->Mail split marks residual Bank row status='done' (no zombie pending row)")
+	mf:Hide()
+	app.atMailbox = false
+	of.OnMailClosed()
+
+	-- Cleanup restored state
+	of.ClearSavedState()
+	resetContainers()
+	for id, nm in pairs(itemNames) do
+		if ns.ITEM_NAMES_BY_ID then ns.ITEM_NAMES_BY_ID[id] = origNames[id] end
+		if ns.ITEM_IDS_BY_NAME then ns.ITEM_IDS_BY_NAME[nm] = origIDs[nm] end
+		app.itemIDs[nm] = origIDs[nm]
+	end
+	MerchantMasterDB.chars = origCharsDB
+	MerchantMasterDB.orderFlowState = origOrderFlowState
+	MerchantMasterDB.includeMail = origIncludeMail
+	MerchantMasterDB.includeBank = origIncludeBank
+	MerchantMasterDB.includeAlts = origIncludeAlts
+	_G.MerchantMasterLedgerDB = origLedgerDB
+	app.charKey = origCharKey
+	app.char = origChar
+	app.mailboxItems = origMailboxItems
+	app.atBank, app.atMail = origAtBank, origAtMail
+	_G.C_Container = origCCont
+	_G.BankFrame = origBF
+	_G.MailFrame = origMailF
+	_G.AuctionHouseFrame = origAHF
+	_G.GetTime = origGetTime
+	if _G.C_Timer and origTimerAfter then _G.C_Timer.After = origTimerAfter end
+	_G.GetInboxNumItems = origGetInboxNum
+	_G.GetInboxHeaderInfo = origGetInboxHeader
+	_G.GetInboxItem = origGetInboxItem
+	_G.GetInboxItemLink = origGetInboxLink
+	_G.TakeInboxItem = origTakeInbox
+	_G.RETRIEVING_DATA = origRetrieving
+	ns.MailHelper = origMailHelper
+	app.getBagCountByID = origGetBag
+	_G.UnitName = origUnitName
+	app.cachedBagCounts = nil
+	app.cachedBagCountsByID = nil
+	app._cachedOwnedCounts = nil
+	app._cachedOwnedCountsByID = nil
+	app.bagsDirty = true
+	app.bagCountsDirty = true
+	app.ownershipRev = (app.ownershipRev or 0) + 1
 end)()
 
 print("PASS: test_cart_buyer (" .. n .. " assertions)")

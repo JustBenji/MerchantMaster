@@ -497,12 +497,19 @@ end
 local function triggerFinalMailboxScan()
     local app = ns.app
     if app and type(app.QueueMailboxScan) == "function" then
-        pcall(app.QueueMailboxScan, "take")
+        pcall(app.QueueMailboxScan, "settled")
         return
     end
     local cap = ns.Analytics and ns.Analytics.Capture
     if cap and type(cap.ScanMailboxSnapshot) == "function" then
-        pcall(cap.ScanMailboxSnapshot, true)
+        local ok, snap = pcall(cap.ScanMailboxSnapshot, true)
+        if ok and type(snap) == "table" then
+            if app and type(app.CommitMailboxSnapshot) == "function" then
+                pcall(app.CommitMailboxSnapshot, snap)
+            elseif ns.Analytics and ns.Analytics.Inventory and type(ns.Analytics.Inventory.AcceptMailboxSnapshot) == "function" then
+                pcall(ns.Analytics.Inventory.AcceptMailboxSnapshot, snap)
+            end
+        end
     end
 end
 

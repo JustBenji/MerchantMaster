@@ -4,6 +4,7 @@ local ns = host.Analytics
 _G.MerchantMasterAnalytics = ns
 local Inventory = { version=1 }
 ns.Inventory = Inventory
+local canonicalInventoryChars
 local function db()
     local store = ns.Store
     if store and store.db then return store.db end
@@ -57,13 +58,31 @@ function Inventory.RecordInTransitMail(toChar, items, money, at, fromChar, econ)
     Inventory.version=Inventory.version+1
     return entry
 end
-function Inventory.ReceiveTransitMail(toChar, items)
+function Inventory.ReceiveTransitMail(toChar, items, opts)
     if not writable() then return 0 end
     local root = db(); local list = root.inTransitMail or {}; local want = counts(items); local removed = 0; local expired=false
+    local fullScan = type(opts) == "table" and opts.fullScan == true
+    local snapAt = type(opts) == "table" and tonumber(opts.snapshotAt) or now()
+    local aliasMap = type(opts) == "table" and opts.aliasMap or nil
+    local filterFrom = type(opts) == "table" and opts.fromChar or nil
+    if fullScan and not aliasMap and type(canonicalInventoryChars) == "function" then
+        local raw = { [toChar] = true }
+        for _, e in ipairs(list) do
+            if e and e.toChar then raw[e.toChar] = true end
+        end
+        local _, resolved = canonicalInventoryChars(raw, toChar)
+        aliasMap = resolved
+    end
+    local function matchesRecipient(recChar)
+        if recChar == toChar then return true end
+        if aliasMap and recChar and aliasMap[recChar] == toChar then return true end
+        return false
+    end
     for i = #list, 1, -1 do
         local e = list[i]
-        if e.toChar == toChar then
-            if not items then table.remove(list, i); removed = removed + 1
+        if matchesRecipient(e.toChar) and (not filterFrom or e.fromChar == filterFrom) then
+            if not items or (fullScan and e.fromChar ~= "Auction House" and (tonumber(e.sentAt) or 0) <= snapAt) then
+                table.remove(list, i); removed = removed + 1
             else
                 for id, qty in pairs(want) do
                     local n = math.min(qty, (e.items and e.items[id]) or 0)
@@ -99,10 +118,19 @@ local function legacySnapshot(char, econ)
     if hit and hit._charRef == c and hit.econ == econ then
         return hit
     end
+    local h = host
+    local catalogByName = h and h.ITEM_IDS_BY_NAME or nil
     local reverse = legacyCache.reverse
     if not reverse then
         reverse = {}
-        for name, id in pairs(ids) do reverse[name] = tonumber(id) end
+        for name, id in pairs(type(catalogByName) == "table" and catalogByName or {}) do
+            local nid = tonumber(id)
+            if nid and nid > 0 then reverse[name] = nid end
+        end
+        for name, id in pairs(ids) do
+            local nid = tonumber(id)
+            if nid and nid > 0 then reverse[name] = nid end
+        end
         legacyCache.reverse = reverse
     end
     local function mapped(src)
@@ -118,6 +146,14 @@ local function legacySnapshot(char, econ)
     legacyCache.byChar[char] = snap
     return snap
 end
+local function getContainerSlotsQuick(bag)
+    local c = _G.C_Container
+    local fn = (c and c.GetContainerNumSlots) or _G.GetContainerNumSlots
+    if type(fn) ~= "function" then return 0 end
+    local ok, n = pcall(fn, bag)
+    if ok and safe(n) and tonumber(n) then return tonumber(n) end
+    return 0
+end
 local function getBagContainerIDs()
     local numBags = tonumber(_G.NUM_BAG_SLOTS) or 4
     local list, seen = {}, {}
@@ -129,33 +165,57 @@ local function getBagContainerIDs()
     local bagIdx = _G.Enum and _G.Enum.BagIndex
     local reagentBag = type(bagIdx) == "table" and tonumber(bagIdx.ReagentBag) or nil
     local bankBag1 = type(bagIdx) == "table" and tonumber(bagIdx.BankBag_1) or nil
-    if reagentBag and reagentBag > numBags and totalEquipped > numBags and reagentBag ~= bankBag1 and not seen[reagentBag] then
-        list[#list + 1] = reagentBag
-        seen[reagentBag] = true
+    local hasCharTabs = type(bagIdx) == "table" and tonumber(bagIdx.CharacterBankTab_1) ~= nil
+    if reagentBag and reagentBag > numBags and (bankBag1 == nil or reagentBag ~= bankBag1) and not seen[reagentBag] then
+        if totalEquipped > numBags or hasCharTabs or getContainerSlotsQuick(reagentBag) > 0 then
+            list[#list + 1] = reagentBag
+            seen[reagentBag] = true
+        end
     end
     return list, seen
 end
 local function getBankContainerIDs()
     local bagList, bagSet = getBagContainerIDs()
     local lastBag = bagList[#bagList] or (tonumber(_G.NUM_BAG_SLOTS) or 4)
-    local numBankBags = tonumber(_G.NUM_BANKBAGSLOTS) or 7
-    local list, seen = {}, {}
+    local rawBankBags = tonumber(_G.NUM_BANKBAGSLOTS)
+    local numBankBags = rawBankBags or 7
+    local list, seen, accountBankSet = {}, {}, {}
+    local bagIdx = _G.Enum and _G.Enum.BagIndex
+    if type(bagIdx) == "table" then
+        for ai = 1, 5 do
+            local aid = tonumber(bagIdx["AccountBankTab_" .. ai])
+            if aid then accountBankSet[aid] = true end
+        end
+    end
     local function add(bag)
-        if type(bag) == "number" and not seen[bag] and not bagSet[bag] then
+        if type(bag) == "number" and not seen[bag] and not bagSet[bag] and not accountBankSet[bag] then
             seen[bag] = true
             list[#list + 1] = bag
         end
     end
+    local hasCharTabs = type(bagIdx) == "table" and tonumber(bagIdx.CharacterBankTab_1) ~= nil
+    if hasCharTabs then
+        if tonumber(bagIdx.Bank) then add(tonumber(bagIdx.Bank)) end
+        for ti = 1, 9 do
+            local tid = tonumber(bagIdx["CharacterBankTab_" .. ti])
+            if tid then add(tid) end
+        end
+        return list
+    end
     add(-1)
-    local bagIdx = _G.Enum and _G.Enum.BagIndex
-    if type(bagIdx) == "table" then add(bagIdx.Bank) end
+    if type(bagIdx) == "table" then add(tonumber(bagIdx.Bank)) end
+    local reagentUnlocked = false
     if type(_G.IsReagentBankUnlocked) == "function" then
         local ok, unlocked = pcall(_G.IsReagentBankUnlocked)
-        if ok and safe(unlocked) and unlocked then add(-3) end
+        if ok and safe(unlocked) and unlocked == true then reagentUnlocked = true end
     end
-    local first = lastBag + 1
-    local last = first + numBankBags - 1
-    for bag = first, last do add(bag) end
+    if reagentUnlocked then add(-3) end
+    if numBankBags > 0 then
+        local bankBag1 = type(bagIdx) == "table" and tonumber(bagIdx.BankBag_1) or nil
+        local first = bankBag1 or (lastBag + 1)
+        local last = first + numBankBags - 1
+        for bag = first, last do add(bag) end
+    end
     return list
 end
 Inventory.GetBagContainerIDs = getBagContainerIDs
@@ -291,12 +351,23 @@ function Inventory.ScanMailbox()
     local mail={}; local n=_G.GetInboxNumItems(); if not safe(n) then return nil end
     local maxAtt=tonumber(_G.ATTACHMENTS_MAX_RECEIVE) or 12
     for i=1,tonumber(n) or 0 do
-        for slot=1,maxAtt do
-            local name,id,_,qty=_G.GetInboxItem(i,slot)
-            local link=_G.GetInboxItemLink and _G.GetInboxItemLink(i,slot)
-            if not safe(name) or not safe(id) or not safe(qty) or not safe(link) then return nil end
-            id=tonumber(id) or tonumber(type(link)=="string" and link:match("item:(%d+)"))
-            if id and id>0 then mail[id]=(mail[id] or 0)+(tonumber(qty) or 1) elseif slot==1 and not name then break end
+        local skipMail = false
+        if _G.GetInboxHeaderInfo then
+            local _, _, _, subj, _, cod, _, hItem = _G.GetInboxHeaderInfo(i)
+            if not safe(subj) or not safe(cod) or not safe(hItem) then return nil end
+            if subj == nil or (_G.RETRIEVING_DATA and subj == _G.RETRIEVING_DATA) then return nil end
+            if (tonumber(cod) or 0) > 0 then skipMail = true end
+            if hItem == false or (type(hItem) == "number" and hItem <= 0) then skipMail = true end
+        end
+        if not skipMail then
+            for slot=1,maxAtt do
+                local name,id,_,qty=_G.GetInboxItem(i,slot)
+                local link=_G.GetInboxItemLink and _G.GetInboxItemLink(i,slot)
+                if not safe(name) or not safe(id) or not safe(qty) or not safe(link) then return nil end
+                if _G.RETRIEVING_DATA and name == _G.RETRIEVING_DATA then return nil end
+                id=tonumber(id) or tonumber(type(link)=="string" and link:match("item:(%d+)"))
+                if id and id>0 then mail[id]=(mail[id] or 0)+(tonumber(qty) or 1) end
+            end
         end
     end
     return Inventory.AcceptMailboxSnapshot({items=mail})
@@ -355,14 +426,15 @@ function Inventory.ScanCurrentChar(opts)
     if not existing or not equal(existing,result) then Inventory.version=Inventory.version+1 end
     return result
 end
-local function transitFor(char, id, econFilter)
+local function transitFor(char, id, econFilter, aliasMap)
     local qty = 0
     for _, e in ipairs(db().inTransitMail or {}) do
-        if e.toChar == char and (tonumber(e.expiresAt) or 0)>now() and (not econFilter or e.econ == econFilter) then qty = qty + ((e.items and e.items[id]) or 0) end
+        local matchChar = (e.toChar == char) or (aliasMap and e.toChar and aliasMap[e.toChar] == char)
+        if matchChar and (tonumber(e.expiresAt) or 0)>now() and (not econFilter or e.econ == econFilter) then qty = qty + ((e.items and e.items[id]) or 0) end
     end
     return qty
 end
-local function canonicalInventoryChars(rawChars, explicitChar)
+canonicalInventoryChars = function(rawChars, explicitChar)
     local root = db()
     local inventories = root.inventory or {}
     local hostChars = _G.MerchantMasterDB and _G.MerchantMasterDB.chars or {}
@@ -375,7 +447,7 @@ local function canonicalInventoryChars(rawChars, explicitChar)
             if econ == "Normal-Horde" then hasRealNH = true; break end
         end
     end
-    local groups, groupMeta, twoWordByFirst = {}, {}, {}
+    local groups, groupMeta, twoWordByFirst, aliasToTarget = {}, {}, {}, {}
     for c in pairs(rawChars or {}) do
         if c == "Normal-Horde-Forever-Player" and hasRealNH and explicitChar ~= "Normal-Horde-Forever-Player" then
             -- Skip fallback placeholder when real Normal-Horde characters exist.
@@ -413,7 +485,12 @@ local function canonicalInventoryChars(rawChars, explicitChar)
             elseif cHost ~= cur.host then better = cHost > cur.host
             else better = c < cur.char end
             if better then
+                if cur and cur.char then
+                    aliasToTarget[cur.char] = c
+                end
                 groups[gk] = { char = c, act = cAct, space = cSpace, inv = cInv, upd = cUpd, host = cHost }
+            elseif cur and cur.char then
+                aliasToTarget[c] = cur.char
             end
         end
     end
@@ -422,17 +499,30 @@ local function canonicalInventoryChars(rawChars, explicitChar)
         if not meta.isTwoWord and groups[gk] then
             local cands = twoWordByFirst[meta.econLow .. "|" .. meta.shortLow]
             if cands and #cands == 1 and groups[cands[1]] then
-                local oldRec = hostChars[groups[gk].char]
-                local newRec = hostChars[groups[cands[1]].char]
+                local oldKey = groups[gk].char
+                local newKey = groups[cands[1]].char
+                local oldRec = hostChars[oldKey]
+                local newRec = hostChars[newKey]
                 if not (type(oldRec) == "table" and type(newRec) == "table" and oldRec.guid and newRec.guid and oldRec.guid ~= newRec.guid) then
+                    aliasToTarget[oldKey] = newKey
                     groups[gk] = nil
                 end
             end
         end
     end
+    local resolvedAlias = {}
+    for k, target in pairs(aliasToTarget) do
+        local cur = target
+        local guard = 0
+        while aliasToTarget[cur] and aliasToTarget[cur] ~= cur and guard < 8 do
+            cur = aliasToTarget[cur]
+            guard = guard + 1
+        end
+        resolvedAlias[k] = cur
+    end
     local out = {}
     for _, grp in pairs(groups) do out[grp.char] = true end
-    return out
+    return out, resolvedAlias
 end
 function Inventory.GetItemBreakdown(itemID, econFilter)
     itemID = tonumber(itemID); if not itemID or itemID <= 0 then return nil end
@@ -440,7 +530,7 @@ function Inventory.GetItemBreakdown(itemID, econFilter)
     local rawChars={}; for char in pairs(inventories) do rawChars[char]=true end
     local old=_G.MerchantMasterDB and _G.MerchantMasterDB.chars or {}; for char in pairs(old) do rawChars[char]=true end
     for _, pending in ipairs(root.inTransitMail or {}) do if pending.toChar then rawChars[pending.toChar]=true end end
-    local chars = canonicalInventoryChars(rawChars)
+    local chars, aliasMap = canonicalInventoryChars(rawChars)
     for char in pairs(chars) do
         local inv=inventories[char]; local econ=(inv and inv.econ) or charEconomy(char)
         if not econFilter or econ==econFilter then
@@ -454,7 +544,7 @@ function Inventory.GetItemBreakdown(itemID, econFilter)
             local stale=not inv.updatedAt or now()-(inv.updatedAt or 0)>86400
             if hasBank and (not inv.bankAt or now()-(inv.bankAt or 0)>86400) then stale=true end
             if hasMail and (not inv.mailAt or now()-(inv.mailAt or 0)>86400) then stale=true end
-            local b={char=char,shortName=short,bags=(inv.bags and inv.bags[itemID]) or 0,bank=(inv.bank and inv.bank[itemID]) or 0,mail=(inv.mail and inv.mail[itemID]) or 0,inTransit=transitFor(char,itemID,econFilter),ah=ah,gear=(inv.gear and inv.gear[itemID]) or 0,updatedAt=inv.updatedAt or 0,stale=stale}
+            local b={char=char,shortName=short,bags=(inv.bags and inv.bags[itemID]) or 0,bank=(inv.bank and inv.bank[itemID]) or 0,mail=(inv.mail and inv.mail[itemID]) or 0,inTransit=transitFor(char,itemID,econFilter,aliasMap),ah=ah,gear=(inv.gear and inv.gear[itemID]) or 0,updatedAt=inv.updatedAt or 0,stale=stale}
             total.byChar[#total.byChar+1]=b
             for _, k in ipairs({"bags","bank","mail","inTransit","ah","gear"}) do total[k]=total[k]+b[k] end
         end
