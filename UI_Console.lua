@@ -182,10 +182,13 @@ local function hasSnapshotsAny()
 end
 
 local function isSyncInSync()
-	if hasSnapshotExt() then return true end
 	if type(ns.HasRawSnapshots) == "function" and ns.HasRawSnapshots() == true then
 		return true
 	end
+	if ns.snapshotCleared == true then
+		return false
+	end
+	if hasSnapshotExt() then return true end
 	return false
 end
 
@@ -1305,6 +1308,21 @@ local function buildDatabaseView(parent)
 					ref.manualPartialScans or 0,
 					CE.FormatInt(localSnapRows)))
 			end
+		elseif addonState == "unloaded" then
+			dv.listHdr:SetText("SavedVariables Tables -- Click to inspect")
+			if dv.snapBadge and dv.snapBadge.SetVariant then
+				dv.snapBadge:SetVariant("orange", "Restart WoW")
+			end
+			dv.snapHeadline:SetText("Restart WoW to Load Data Pack")
+			dv.snapBody:SetText("MerchantMaster_Snapshots is enabled on disk, but WoW needs a full game restart (not just /reload) when a new or removed pack folder appears.")
+			dv.svHeadline:SetText("WoW SavedVariables Est: " .. CE.FormatBytes(storage.totalSavedBytes or 0))
+			dv.sumBody:SetText(format(
+				"SavedVariables Est: %s across %d tracked tables (MerchantMasterDB + MerchantMasterLedgerDB).\nIn-Game Live AH Scans: %d full, %d partial  |  Local AH Snapshots: %s items\nExternal Disk Pack: waiting for full WoW restart.",
+				CE.FormatBytes(storage.totalSavedBytes or 0),
+				#(storage.savedTables or {}),
+				ref.manualFullScans or 0,
+				ref.manualPartialScans or 0,
+				CE.FormatInt(localSnapRows)))
 		elseif addonState == "disabled" then
 			dv.listHdr:SetText("SavedVariables Tables -- Click to inspect")
 			if dv.snapBadge and dv.snapBadge.SetVariant then
@@ -1938,7 +1956,21 @@ local function buildSetupV2View(parent)
 
 		local statusTag
 		if not installed then
-			if addonState == "disabled" then
+			if ns.snapshotCleared == true then
+				tintOrb(0.24, 0.64, 0.98)
+				v2.stTitle:SetText(colorHex("hexBlue", "Database Cleared", pal))
+				v2.stBody:SetText("Price data was cleared (add-on kept intact). Open MerchantMasterSync and click Sync Now, then type /reload in WoW.")
+				setButtonLabel(v2.installBtn, "Download App")
+				if v2.installBtn.SetVariant then v2.installBtn:SetVariant("secondary") end
+				statusTag = colorHex("hexBlue", "Cleared - Click Sync Now", pal)
+			elseif addonState == "unloaded" then
+				tintOrb(0.96, 0.62, 0.14)
+				v2.stTitle:SetText(colorHex("hexWarning", "Restart WoW to Load", pal))
+				v2.stBody:SetText("MerchantMaster_Snapshots is enabled on disk, but WoW needs a full game restart (not just /reload) to load a newly added pack.")
+				setButtonLabel(v2.installBtn, "Download App")
+				if v2.installBtn.SetVariant then v2.installBtn:SetVariant("secondary") end
+				statusTag = colorHex("hexWarning", "Restart WoW Required", pal)
+			elseif addonState == "disabled" then
 				tintOrb(0.96, 0.62, 0.14)
 				v2.stTitle:SetText(colorHex("hexWarning", "Enable Pack in WoW", pal))
 				v2.stBody:SetText("SnapshotData.lua is on disk, but MerchantMaster_Snapshots is unchecked in Esc -> AddOns. Check it and click Reload UI.")
@@ -1977,7 +2009,7 @@ local function buildSetupV2View(parent)
 			if v2.showDownloadRow then
 				v2.stepRow:Hide()
 				v2.downloadRow:Show()
-			elseif not installed and addonState ~= "disabled" then
+			elseif not installed and addonState ~= "disabled" and addonState ~= "unloaded" and not ns.snapshotCleared then
 				v2.downloadRow:Hide()
 				v2.stepRow:SetText("1. Click Install    ->    2. Download & open MerchantMasterSync    ->    3. Type /reload in WoW")
 				v2.stepRow:Show()

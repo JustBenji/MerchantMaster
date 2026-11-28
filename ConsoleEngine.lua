@@ -442,11 +442,37 @@ local function findAddonExists(targetName)
 	return false
 end
 
+local function isAddonEnabledSafe(addonName)
+	local player = nil
+	if type(_G.UnitName) == "function" then
+		local okN, n = pcall(_G.UnitName, "player")
+		if okN and readable(n) and type(n) == "string" and n ~= "" then
+			player = n
+		end
+	end
+	if _G.C_AddOns and type(_G.C_AddOns.GetAddOnEnableState) == "function" then
+		local ok, st = pcall(_G.C_AddOns.GetAddOnEnableState, addonName, player)
+		if ok and readable(st) and type(st) == "number" then
+			return st > 0
+		end
+	end
+	if type(_G.GetAddOnEnableState) == "function" then
+		local ok, st = pcall(_G.GetAddOnEnableState, player, addonName)
+		if ok and readable(st) and type(st) == "number" then
+			return st > 0
+		end
+	end
+	return nil
+end
+
 local function getCompanionStatus(addonName, provider)
 	if provider ~= nil or isAddonLoadedSafe(addonName) then
 		return "loaded"
 	end
 	if findAddonExists(addonName) then
+		if isAddonEnabledSafe(addonName) == true then
+			return "unloaded"
+		end
 		return "disabled"
 	end
 	return "absent"

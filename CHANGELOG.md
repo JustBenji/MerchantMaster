@@ -2,6 +2,10 @@
 
 All notable player-facing changes to **MerchantMaster** are documented in this file.
 
+## [3.3.7] - 2026-11-28
+
+*   **Accurate `Restart WoW to Load` & `Database Cleared` Status Detection:** **MerchantMasterSync** and **Console -> Database** now check whether `MerchantMaster_Snapshots` is already enabled in `Esc -> AddOns` before warning that it is unchecked, telling players clearly when a full game restart is needed to pick up a restored add-on folder, and showing **Database Cleared** cleanly whenever data was cleared via **MerchantMasterSync**.
+
 ## [3.3.6] - 2026-11-28
 
 *   **Fixed `MerchantMasterSync` Early-Load `In-Sync` Detection:** Fixed a load-order issue where synced snapshots loaded in WoW (showing `Snap <age>` in the top capsule) while Console -> **MerchantMasterSync** still showed **Install**. The **MerchantMasterSync** tab now detects loaded snapshot data reliably and displays green **In-Sync** immediately.

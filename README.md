@@ -193,7 +193,7 @@ Inspect addon storage, switch themes, configure Mail presets, generate redacted 
 *   **Database Price Information (`Console -> Settings`):** Choose between **Manual** (*Pull in the actual price data*), **TSM Tool Sync** (*Pull in the latest price data by TSM, refresh 1x per hour*; validates that TSM is installed), and **MerchantMasterSync** (*Pull in the latest price data + historical data, refresh 1x per hour*; validates that MerchantMasterSync is in-sync). Only one database price source runs at a time.
 *   **Top Header Freshness Pill:** Displays the active market data source and age without clipping: `TSM <time>` (`TSM Light`), `Snap <time>` (`Local Snapshot`), or `AH <time>` (manual in-game scan), with the active refresh mode and timestamps shown on hover.
 *   **Database (`/mm db`):** Inspects WoW SavedVariables alongside the dedicated **AH Snapshot Storage (On Disk)** card (`SQLite DB`, `WAL`, `SHM`, `Sync Log`, row counts, active DB path, and combined total).
-*   Reports clearly if `MerchantMaster_Snapshots` is installed on disk but unchecked in **Esc -> AddOns**, with a manual **Refresh** button to retry loading.
+*   Reports clearly if `MerchantMaster_Snapshots` is unchecked in **Esc -> AddOns**, needs a full game restart (**Restart WoW to Load**), or had its price data cleared (**Database Cleared**).
 
 ---
 

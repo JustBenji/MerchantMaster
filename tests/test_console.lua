@@ -131,6 +131,18 @@ do
 	app.setTab("console_database")
 	assertCheck((dbViewStandalone.snapHeadline:GetText() or ""):find("Data Pack Unchecked in Esc -> AddOns", 1, true) ~= nil,
 		"Disabled companion shows Data Pack Unchecked in Esc -> AddOns in Database -> AH Snapshot Storage card")
+
+	-- Enabled-on-disk but unloaded companion (e.g. restored after deleting folder while WoW was running) shows Restart WoW guidance
+	hostEnv.setMockAddon("MerchantMaster_Snapshots", { enabled = true, loaded = false, memKB = 0, version = "1.1.0" })
+	assertCheck(CE.GetAddonState("MerchantMaster_Snapshots") == "unloaded",
+		"GetAddonState reports 'unloaded' when MerchantMaster_Snapshots is enabled on disk but needs full WoW restart")
+	UI.Refresh("test_unloaded")
+	assertCheck((dbViewStandalone.snapHeadline:GetText() or ""):find("Restart WoW to Load Data Pack", 1, true) ~= nil,
+		"Unloaded enabled companion shows Restart WoW to Load Data Pack in Database tab")
+	app.setTab("console_setup2")
+	assertCheck((su2Standalone.stTitle:GetText() or ""):find("Restart WoW to Load", 1, true) ~= nil
+		and (su2Standalone.stBody:GetText() or ""):find("full game restart", 1, true) ~= nil,
+		"Unloaded enabled companion shows Restart WoW to Load instead of falsely claiming Esc -> AddOns unchecked")
 	hostEnv.setMockAddon("MerchantMaster_Snapshots", nil)
 
 	-- Standalone fallback presets & OS-aware command builder
@@ -773,12 +785,25 @@ do
 	assertCheck((su2Lazy.stTitle:GetText() or ""):find("In-Sync", 1, true) ~= nil,
 		"RegisterSnapshotExtension calls consoleProvider.SyncExtensions and flips open MerchantMasterSync to In-Sync")
 
+	-- CLEARED marker from Delete Database shows Database Cleared even when companion extension shell stays loaded
+	ns.snapshotRaw = {}
+	ns.snapshotParsed = {}
+	ns.IngestSnapshotData("CLEARED", "_global", "1")
+	UI.SyncExtensions()
+	assertCheck((su2Lazy.stTitle:GetText() or ""):find("Database Cleared", 1, true) ~= nil,
+		"CLEARED marker shows Database Cleared instead of In-Sync while companion add-on shell stays loaded")
+	ns.IngestSnapshotData("META", "Normal-Horde", [[return {v=1,updatedAt=1795825338,source="blizzard",windowDays=30,itemCount=10}]])
+	UI.SyncExtensions()
+	assertCheck((su2Lazy.stTitle:GetText() or ""):find("In-Sync", 1, true) ~= nil,
+		"Ingesting fresh META after CLEARED clears ns.snapshotCleared and restores In-Sync")
+
 	-- Restore environment
 	if _G.C_AddOns then _G.C_AddOns.LoadAddOn = savedCLoad end
 	_G.LoadAddOn = savedGLoad
 	app.snapshotExtension = savedExt
 	ns.snapshotRaw = savedRaw
 	ns.snapshotParsed = savedParsed
+	ns.snapshotCleared = false
 	UI.SyncExtensions()
 	app.panel:Hide()
 end

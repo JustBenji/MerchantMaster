@@ -696,6 +696,7 @@ ns.snapshotRaw = ns.snapshotRaw or {}
 ns.snapshotParsed = ns.snapshotParsed or {}
 ns.snapshotHeatmapCache = ns.snapshotHeatmapCache or {}
 ns.snapshotSystem = ns.snapshotSystem or nil
+ns.snapshotCleared = ns.snapshotCleared or false
 
 local SNAPSHOT_META_ENV_MT = {
 	__newindex = function()
@@ -1022,6 +1023,10 @@ function ns.IngestSnapshotData(tag, econKey, rawData, apiVersion)
 	if type(tag) ~= "string" or type(econKey) ~= "string" or econKey == "" or type(rawData) ~= "string" then
 		return
 	end
+	if tag == "CLEARED" then
+		ns.snapshotCleared = true
+		return true
+	end
 	if tag == "SYSTEM" then
 		local sys = parseSnapshotSystem(rawData)
 		if sys then
@@ -1040,6 +1045,7 @@ function ns.IngestSnapshotData(tag, econKey, rawData, apiVersion)
 		and tag ~= "DEPTH" and tag ~= "VELOCITY" then
 		return
 	end
+	ns.snapshotCleared = false
 
 	local bucket = ns.snapshotRaw[econKey]
 	local hadBucketCache = bucket ~= nil and (
