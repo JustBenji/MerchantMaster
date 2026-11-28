@@ -24771,6 +24771,15 @@ _G.MerchantMasterAPI = {
 	end,
 }
 
+-- Hydrate snapshotExtension if MerchantMaster_Snapshots loaded before MerchantMasterAPI existed
+if app.snapshotExtension == nil and type(ns.HasRawSnapshots) == "function" and ns.HasRawSnapshots() then
+	app.snapshotExtension = {
+		apiVersion = 1,
+		version = "2.1.3",
+		supportsOsMode = true,
+	}
+end
+
 -- Shared hooks for UI_Professor.lua
 ns.matchProfKeyByName = matchProfKeyByName
 app.sameProfKeys = sameProfKeys

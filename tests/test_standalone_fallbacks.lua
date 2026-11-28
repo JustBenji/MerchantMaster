@@ -314,13 +314,17 @@ do
 	SlashCmdList.MERCHANTMASTER("snapshots")
 	local su2 = UIConsole._state.setupV2View
 	check(app.activeTab == "console_setup2" and UIConsole.GetActiveSubTab() == "console_setup2"
-		and su2 and (su2.winInstallBox:GetText() or ""):find("--sync-mode github --apply-task --sync-now", 1, true) ~= nil
+		and su2 and su2.tsmCard == nil
+		and (su2.winInstallBox:GetText() or ""):find("--sync-mode github --apply-task --sync-now", 1, true) ~= nil
 		and (su2.winRebuildBox:GetText() or ""):find("sync --source github --force", 1, true) ~= nil
 		and (su2.winUninstallBox:GetText() or ""):find("uninstall-task", 1, true) ~= nil
 		and (su2.linuxInstallBox:GetText() or ""):find("install_linux.py --sync-mode github", 1, true) ~= nil
-		and (su2.macInstallBox:GetText() or ""):find("--sync-mode github --apply-task --sync-now", 1, true) ~= nil
-		and su2.modeBtns and su2.modeBtns["local"] and su2.modeBtns["tsm"] and su2.modeBtns["none"],
-		"/mm snapshots opens Snapshot Sync standalone with OS commands and 3-way Price Refresh Mode")
+		and (su2.macInstallBox:GetText() or ""):find("--sync-mode github --apply-task --sync-now", 1, true) ~= nil,
+		"/mm snapshots opens MerchantMasterSync standalone with clean status orb and collapsed CLI boxes")
+	app.setTab("console_settings")
+	local sv = UIConsole._state.settingsControls
+	check(sv and sv.dbPriceCard and sv.modeBtns and sv.modeBtns["none"] and sv.modeBtns["tsm"] and sv.modeBtns["local"],
+		"Console -> Settings exposes Database Price Information 3-way selector standalone")
 	SlashCmdList.MERCHANTMASTER("github")
 	check(app.activeTab == "console_setup2" and UIConsole.GetActiveSubTab() == "console_setup2",
 		"/mm github opens Snapshot Sync standalone")

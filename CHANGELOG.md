@@ -2,6 +2,11 @@
 
 All notable player-facing changes to **MerchantMaster** are documented in this file.
 
+## [3.3.6] - 2026-11-28
+
+*   **Fixed `MerchantMasterSync` Early-Load `In-Sync` Detection:** Fixed a load-order issue where synced snapshots loaded in WoW (showing `Snap <age>` in the top capsule) while Console -> **MerchantMasterSync** still showed **Install**. The **MerchantMasterSync** tab now detects loaded snapshot data reliably and displays green **In-Sync** immediately.
+*   **Moved Price Refresh Mode to `Console -> Settings -> Database Price Information`:** Simplified **MerchantMasterSync** to focus solely on sync status (`Install` / `In-Sync`) and moved the 3-way price source selector into a dedicated **Database Price Information** section inside **Console -> Settings** (`Manual`, `TSM Tool Sync`, and `MerchantMasterSync`), blocking **TSM Tool Sync** with a clear error if TSM is not installed and referring players to **MerchantMasterSync** if data is not synced yet.
+
 ## [3.3.5] - 2026-11-28
 
 *   **MerchantMasterSync Apple-Style Tab (`/mm snapshots`):** Replaced the CLI wall on Console's **Snapshot Sync** tab with the clean **MerchantMasterSync** experience featuring a centered status orb (**Install** before setup, glowing green **In Sync** once active), a one-click **Install** release link for the new portable **MerchantMasterSync** desktop tray app (Windows, Linux, and macOS), the compact 3-way **Price Refresh Mode** bar (`Local Snapshot` | `TSM Light` | `None (Manual AH)`), and a collapsed-by-default **Terminal / Advanced** drawer for command-line power users.

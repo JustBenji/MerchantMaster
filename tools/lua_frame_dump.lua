@@ -5081,6 +5081,21 @@ if not cartAhOnly then
 	end
 	end
 
+	-- console-settings-goblin: Console -> Settings with Database Price Information category
+	if not onlyScenes or onlyScenes["console-settings-goblin"] then
+	do
+		sizeSkinViewport("goblin")
+		applySkin("goblin")
+		switchTab("console_settings")
+		if ns.UIConsole and ns.UIConsole.SyncSettings then ns.UIConsole.SyncSettings() end
+		if app.refreshSkinLayout then app.refreshSkinLayout() end
+		drainTimers(500)
+		flushPendingLayout()
+		if _G.GameTooltip and _G.GameTooltip.Hide then _G.GameTooltip:Hide() end
+		dumpScene("console-settings-goblin")
+	end
+	end
+
 	-- console-tooltips-goblin: Console -> Tooltip Setup with Green Lens live Example Tooltip preview
 	if not onlyScenes or onlyScenes["console-tooltips-goblin"] then
 	do

@@ -180,6 +180,7 @@ do
 		"/mm github opens console_setup2 standalone")
 	local su2 = UI._state.setupV2View
 	assertCheck(su2 and su2.frame and su2.frame:IsShown()
+		and su2.tsmCard == nil
 		and (su2.winInstallBox:GetText() or ""):find("--sync-mode github --apply-task --sync-now", 1, true) ~= nil
 		and (su2.linuxInstallBox:GetText() or ""):find("install_linux.py --sync-mode github", 1, true) ~= nil
 		and (su2.macInstallBox:GetText() or ""):find("--sync-mode github --apply-task --sync-now", 1, true) ~= nil
@@ -187,23 +188,7 @@ do
 		and (su2.winUninstallBox:GetText() or ""):find("uninstall-task", 1, true) ~= nil
 		and (su2.linuxRebuildBox:GetText() or ""):find("sync --source github --force", 1, true) ~= nil
 		and (su2.linuxUninstallBox:GetText() or ""):find("uninstall-task", 1, true) ~= nil,
-		"Snapshot Sync populates 1-line GitHub auto-sync, rebuild (--force), and turn-off (uninstall-task) commands")
-	local prevBgMode = _G.MerchantMasterDB and _G.MerchantMasterDB.backgroundPriceMode
-	su2.enableBtn:Click("LeftButton")
-	assertCheck((ns.GetBackgroundPriceMode and ns.GetBackgroundPriceMode() or (_G.MerchantMasterDB and _G.MerchantMasterDB.backgroundPriceMode)) == "local",
-		"Snapshot Sync Enable Local Snapshot button activates local snapshot mode")
-	su2.disableBtn:Click("LeftButton")
-	assertCheck((ns.GetBackgroundPriceMode and ns.GetBackgroundPriceMode() or (_G.MerchantMasterDB and _G.MerchantMasterDB.backgroundPriceMode)) == "none",
-		"Snapshot Sync Turn Off Snapshots button sets backgroundPriceMode = 'none'")
-	if ns.SetBackgroundPriceMode then
-		if prevBgMode then
-			ns.SetBackgroundPriceMode(prevBgMode)
-		elseif _G.MerchantMasterDB then
-			_G.MerchantMasterDB.backgroundPriceMode = nil
-			_G.MerchantMasterDB.useTSMPrices = false
-			if ns.InvalidatePriceCache then ns.InvalidatePriceCache() end
-		end
-	end
+		"MerchantMasterSync hides Price Refresh Mode and keeps CLI commands inside Terminal / Advanced")
 	app.setTab("dashboard")
 end
 
@@ -541,8 +526,8 @@ do
 		"Connected console_setup2 is active and setupView is removed")
 	assertCheck(su2Conn.advPanel and not su2Conn.advPanel:IsShown() and su2Conn.winCard and su2Conn.unixCard,
 		"Connected console_setup2 keeps Terminal / Advanced collapsed by default while keeping CLI cards built")
-	assertCheck((su2Conn.stTitle:GetText() or ""):find("In Sync", 1, true) ~= nil,
-		"Connected status title shows In Sync")
+	assertCheck((su2Conn.stTitle:GetText() or ""):find("In-Sync", 1, true) ~= nil,
+		"Connected status title shows In-Sync")
 	assertCheck((su2Conn.stBody:GetText() or ""):find("Snapshots: 19", 1, true) ~= nil
 		and (su2Conn.stBody:GetText() or ""):find("Disk: " .. CE.FormatBytes(5448576), 1, true) ~= nil,
 		"Connected stBody summarizes live snapshot count and total disk size")
@@ -721,6 +706,7 @@ end
 do
 	local savedExt = app.snapshotExtension
 	local savedRaw = ns.snapshotRaw
+	local savedParsed = ns.snapshotParsed
 	local savedCLoad = _G.C_AddOns and _G.C_AddOns.LoadAddOn
 	local savedGLoad = _G.LoadAddOn
 	local loadCalls = 0
@@ -730,6 +716,7 @@ do
 	UI.Hide()
 	app.snapshotExtension = nil
 	ns.snapshotRaw = {}
+	ns.snapshotParsed = {}
 	if type(ns.ResetSnapshotsLoadAttempt) == "function" then
 		ns.ResetSnapshotsLoadAttempt()
 	end
@@ -757,30 +744,41 @@ do
 	SlashCmdList.MERCHANTMASTER("builder")
 	local su2Lazy = UI._state.setupV2View
 	assertCheck(app.activeTab == "console_setup2" and UI.GetActiveSubTab() == "console_setup2"
-		and su2Lazy and (su2Lazy.stTitle:GetText() or ""):find("In Sync", 1, true) ~= nil,
-		"Connected /mm builder redirects to console_setup2 showing In Sync status")
+		and su2Lazy and (su2Lazy.stTitle:GetText() or ""):find("In-Sync", 1, true) ~= nil,
+		"Connected /mm builder redirects to console_setup2 showing In-Sync status")
+
+	-- Regression: even if app.snapshotExtension wasn't registered at load, raw snapshot data shows In-Sync
+	ns.snapshotRaw = savedRaw
+	ns.snapshotParsed = savedParsed
+	app.snapshotExtension = nil
+	UI.SyncExtensions()
+	assertCheck((su2Lazy.stTitle:GetText() or ""):find("In-Sync", 1, true) ~= nil,
+		"MerchantMasterSync still shows In-Sync when raw snapshot data is loaded without RegisterSnapshotExtension")
 
 	-- Part B: Late RegisterSnapshotExtension while console_setup2 is already open standalone
 	if _G.C_AddOns then _G.C_AddOns.LoadAddOn = function() return false end end
 	_G.LoadAddOn = function() return false end
 	app.snapshotExtension = nil
+	ns.snapshotRaw = {}
+	ns.snapshotParsed = {}
 	UI.SyncExtensions()
 	assertCheck((su2Lazy.stTitle:GetText() or ""):find("MerchantMasterSync", 1, true) ~= nil
 		and su2Lazy.installBtn and su2Lazy.installBtn.fs and su2Lazy.installBtn.fs:GetText() == "Install",
-		"SyncExtensions switches open MerchantMasterSync back to Install state when extension is cleared")
+		"SyncExtensions switches open MerchantMasterSync back to Install state when extension and raw data are absent")
 	MerchantMasterAPI.RegisterSnapshotExtension({
 		apiVersion = 1,
 		version = "1.1.0",
 		supportsOsMode = true,
 	})
-	assertCheck((su2Lazy.stTitle:GetText() or ""):find("In Sync", 1, true) ~= nil,
-		"RegisterSnapshotExtension calls consoleProvider.SyncExtensions and flips open MerchantMasterSync to In Sync")
+	assertCheck((su2Lazy.stTitle:GetText() or ""):find("In-Sync", 1, true) ~= nil,
+		"RegisterSnapshotExtension calls consoleProvider.SyncExtensions and flips open MerchantMasterSync to In-Sync")
 
 	-- Restore environment
 	if _G.C_AddOns then _G.C_AddOns.LoadAddOn = savedCLoad end
 	_G.LoadAddOn = savedGLoad
 	app.snapshotExtension = savedExt
 	ns.snapshotRaw = savedRaw
+	ns.snapshotParsed = savedParsed
 	UI.SyncExtensions()
 	app.panel:Hide()
 end
@@ -921,87 +919,90 @@ do
 	_G.MerchantMasterDB.priceSource = "auto"
 	_G.TSM_API = nil
 
+	-- Check MerchantMasterSync tab layout (collapsed Terminal/Advanced directly under statusCard, zero tsmCard)
 	app.togglePanel("console_setup2")
 	local su = UI._state.setupV2View
-	assertCheck(su ~= nil and su.tsmCard ~= nil and su.tsmStatusFs ~= nil and su.tsmSubFs ~= nil,
-		"Console -> Snapshot Sync exposes tsmCard, tsmStatusFs, and tsmSubFs")
-	assertCheck(su.tsmSwitch == nil and type(su.modeBtns) == "table"
-		and su.modeBtns["local"] ~= nil and su.modeBtns["tsm"] ~= nil and su.modeBtns["none"] ~= nil,
-		"Console -> Snapshot Sync exposes 3-way su.modeBtns (local, tsm, none)")
-	assertCheck(su.tsmCard:GetHeight() == 72,
-		"tsmCard height is 72px (got " .. tostring(su.tsmCard:GetHeight()) .. ")")
-	local _, _, _, _, tsmY = su.tsmCard:GetPoint(1)
-	assertCheck(tsmY == -280 and not su.advPanel:IsShown(),
-		"tsmCard sits below hero at -280 with advPanel collapsed by default (got " .. tostring(tsmY) .. ")")
+	assertCheck(su ~= nil and su.tsmCard == nil and su.modeBtns == nil,
+		"Console -> MerchantMasterSync no longer renders Price Refresh Mode card")
+	assertCheck(not su.advPanel:IsShown(), "Terminal / Advanced drawer starts collapsed")
 	su.advToggleBtn:Click("LeftButton")
-	local _, _, _, _, tsmExpY = su.tsmCard:GetPoint(1)
-	assertCheck(tsmExpY == -80 and su.advPanel:IsShown(),
-		"When Terminal / Advanced expands, tsmCard slides to -80 and advPanel reveals winCard/unixCard (got " .. tostring(tsmExpY) .. ")")
+	assertCheck(su.advPanel:IsShown() and su.winCard:IsShown() and su.unixCard:IsShown(),
+		"When Terminal / Advanced expands, advPanel reveals winCard and unixCard")
 	su.advToggleBtn:Click("LeftButton")
-	local _, _, _, _, tsmColY = su.tsmCard:GetPoint(1)
-	assertCheck(tsmColY == -280 and not su.advPanel:IsShown(),
-		"When Terminal / Advanced collapses, tsmCard returns cleanly to -280")
+	assertCheck(not su.advPanel:IsShown(),
+		"When Terminal / Advanced collapses, advPanel hides cleanly")
 
-	-- Standalone default (no snapshots, no TSM) -> Manual AH Only (Local OFF)
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("Manual AH Only (Local OFF)", 1, true) ~= nil,
-		"Standalone default status shows Manual AH Only (Local OFF)")
+	-- Check Console -> Settings -> Database Price Information (Manual, TSM Tool Sync, MerchantMasterSync)
+	app.setTab("console_settings")
+	local sv = UI._state.settingsControls
+	assertCheck(sv ~= nil and sv.dbPriceCard ~= nil and sv.dbPriceStatusFs ~= nil and sv.dbPriceFeedbackFs ~= nil
+		and type(sv.modeBtns) == "table" and sv.modeBtns["none"] ~= nil and sv.modeBtns["tsm"] ~= nil and sv.modeBtns["local"] ~= nil,
+		"Console -> Settings exposes Database Price Information card with Manual, TSM Tool Sync, and MerchantMasterSync")
+	assertCheck(sv.dbPriceCard:GetHeight() == 176,
+		"dbPriceCard height is 176px (got " .. tostring(sv.dbPriceCard:GetHeight()) .. ")")
+	assertCheck((sv.dbPriceStatusFs:GetText() or ""):find("Active: Manual", 1, true) ~= nil,
+		"Standalone default Database Price Information status shows Active: Manual")
 
-	-- Click Local Snapshot while not installed -> Local Snapshot (Not Installed)
-	su.modeBtns["local"]:Click("LeftButton")
-	assertCheck(_G.MerchantMasterDB.backgroundPriceMode == "local" and _G.MerchantMasterDB.useTSMPrices == false,
-		"Clicking Local Snapshot sets backgroundPriceMode='local' and useTSMPrices=false")
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("Local Snapshot (Not Installed)", 1, true) ~= nil,
-		"Status shows Local Snapshot (Not Installed) when extension is absent")
+	-- Clicking MerchantMasterSync while not synced blocks switch and shows Open MerchantMasterSync button
+	sv.modeBtns["local"]:Click("LeftButton")
+	assertCheck((_G.MerchantMasterDB.backgroundPriceMode == nil or _G.MerchantMasterDB.backgroundPriceMode == "none"),
+		"Clicking MerchantMasterSync when not synced does not enable local snapshot mode")
+	assertCheck((sv.dbPriceFeedbackFs:GetText() or ""):find("MerchantMasterSync", 1, true) ~= nil
+		and sv.openSyncTabBtn and sv.openSyncTabBtn:IsShown(),
+		"Blocked MerchantMasterSync click refers user to MerchantMasterSync tab with quick button")
+	sv.openSyncTabBtn:Click("LeftButton")
+	assertCheck(app.activeTab == "console_setup2",
+		"Open MerchantMasterSync -> button navigates straight to console_setup2")
+	app.setTab("console_settings")
 
-	-- Click TSM Light (no TSM_API) -> Waiting for TradeSkillMaster + explanatory subtext
-	su.modeBtns["tsm"]:Click("LeftButton")
-	assertCheck(_G.MerchantMasterDB.backgroundPriceMode == "tsm" and _G.MerchantMasterDB.useTSMPrices == true,
-		"Clicking TSM Light sets backgroundPriceMode='tsm' and useTSMPrices=true")
-	assertCheck(_G.MerchantMasterDB.priceSource == "auto",
-		"Clicking TSM Light keeps MerchantMasterDB.priceSource on 'auto'")
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("Waiting for TradeSkillMaster", 1, true) ~= nil,
-		"TSM Light status shows Waiting for TradeSkillMaster when TSM_API absent")
-	local tsmSubTxt = su.tsmSubFs and su.tsmSubFs:GetText() or ""
-	assertCheck(tsmSubTxt:find("TradeSkillMaster addon + TSM Desktop App", 1, true) ~= nil
-		and tsmSubTxt:find("never mix", 1, true) ~= nil,
-		"tsmSubFs explains local TSM addon + Desktop App requirement and mutual exclusivity")
+	-- Clicking TSM Tool Sync when TSM addon & TSM_API are absent blocks switch and shows error
+	sv.modeBtns["tsm"]:Click("LeftButton")
+	assertCheck((_G.MerchantMasterDB.backgroundPriceMode == nil or _G.MerchantMasterDB.backgroundPriceMode == "none"),
+		"Clicking TSM Tool Sync when TSM is not installed blocks mode switch")
+	assertCheck((sv.dbPriceFeedbackFs:GetText() or ""):find("TSM tool is not installed", 1, true) ~= nil
+		and (not sv.openSyncTabBtn or not sv.openSyncTabBtn:IsShown()),
+		"Blocked TSM Tool Sync click displays TSM tool is not installed error")
 
-	-- When TSM becomes available while in TSM mode -> TSM Light Active (Local OFF)
+	-- When TSM_API is available, TSM Tool Sync succeeds cleanly
 	_G.TSM_API = { GetCustomPriceValue = function() return 1000 end }
-	su.retheme()
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("TSM Light Active (Local OFF)", 1, true) ~= nil,
-		"TSM Light status shows TSM Light Active (Local OFF) when TSM is available")
-
-	-- Click None (Manual AH) -> backgroundPriceMode='none', useTSMPrices=false, priceSource='auto'
-	su.modeBtns["none"]:Click("LeftButton")
-	assertCheck(_G.MerchantMasterDB.backgroundPriceMode == "none" and _G.MerchantMasterDB.useTSMPrices == false,
-		"Clicking None (Manual AH) sets backgroundPriceMode='none' and useTSMPrices=false")
+	sv.modeBtns["tsm"]:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.backgroundPriceMode == "tsm" and _G.MerchantMasterDB.useTSMPrices == true,
+		"Clicking TSM Tool Sync when TSM is installed sets backgroundPriceMode='tsm' and useTSMPrices=true")
 	assertCheck(_G.MerchantMasterDB.priceSource == "auto",
-		"Clicking None (Manual AH) resets MerchantMasterDB.priceSource back to 'auto'")
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("Manual AH Only (Local OFF)", 1, true) ~= nil,
-		"Status shows Manual AH Only (Local OFF) in None mode")
+		"Clicking TSM Tool Sync keeps MerchantMasterDB.priceSource on 'auto'")
+	assertCheck((sv.dbPriceStatusFs:GetText() or ""):find("Active: TSM Tool Sync", 1, true) ~= nil,
+		"Database Price Information status shows Active: TSM Tool Sync when TSM is installed")
 
-	-- With extension installed on disk: stTitle reflects Active vs Paused by TSM Light vs OFF / Manual AH
+	-- Clicking Manual switches cleanly back to 'none'
+	sv.modeBtns["none"]:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.backgroundPriceMode == "none" and _G.MerchantMasterDB.useTSMPrices == false,
+		"Clicking Manual sets backgroundPriceMode='none' and useTSMPrices=false")
+	assertCheck((sv.dbPriceStatusFs:GetText() or ""):find("Active: Manual", 1, true) ~= nil,
+		"Database Price Information status shows Active: Manual")
+
+	-- With MerchantMasterSync installed/synced: switching to MerchantMasterSync succeeds cleanly and MerchantMasterSync tab shows In-Sync
 	app.snapshotExtension = savedExt
 	ns.snapshotRaw = savedRaw
 	ns.snapshotParsed = savedParsed
-	su.modeBtns["local"]:Click("LeftButton")
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("Local Snapshot Active", 1, true) ~= nil,
-		"Status shows Local Snapshot Active when extension is installed on disk")
-	assertCheck((su.stTitle:GetText() or ""):find("In Sync", 1, true) ~= nil,
-		"stTitle shows In Sync in Local Snapshot mode")
+	sv.modeBtns["local"]:Click("LeftButton")
+	assertCheck(_G.MerchantMasterDB.backgroundPriceMode == "local" and _G.MerchantMasterDB.useTSMPrices == false,
+		"Clicking MerchantMasterSync when synced activates local mode")
+	assertCheck((sv.dbPriceStatusFs:GetText() or ""):find("Active: MerchantMasterSync", 1, true) ~= nil,
+		"Database Price Information status shows Active: MerchantMasterSync")
+	assertCheck((su.stTitle:GetText() or ""):find("In-Sync", 1, true) ~= nil,
+		"MerchantMasterSync stTitle shows In-Sync")
 
-	su.modeBtns["tsm"]:Click("LeftButton")
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("TSM Light Active (Local OFF)", 1, true) ~= nil,
-		"Status shows TSM Light Active (Local OFF) even with extension on disk")
-	assertCheck((su.stTitle:GetText() or ""):find("Paused (TSM Light)", 1, true) ~= nil,
-		"stTitle shows Paused (TSM Light) when suppressed by TSM")
+	sv.modeBtns["tsm"]:Click("LeftButton")
+	assertCheck((sv.dbPriceStatusFs:GetText() or ""):find("Active: TSM Tool Sync", 1, true) ~= nil,
+		"Settings switches cleanly from MerchantMasterSync to TSM Tool Sync")
+	assertCheck((su.stTitle:GetText() or ""):find("In-Sync", 1, true) ~= nil,
+		"MerchantMasterSync hero still shows In-Sync even when TSM is chosen in Settings")
 
-	su.modeBtns["none"]:Click("LeftButton")
-	assertCheck((su.tsmStatusFs:GetText() or ""):find("Manual AH Only (Local OFF)", 1, true) ~= nil,
-		"Status shows Manual AH Only (Local OFF) with extension on disk")
-	assertCheck((su.stTitle:GetText() or ""):find("Paused (Manual AH Only)", 1, true) ~= nil,
-		"stTitle shows Paused (Manual AH Only) when suppressed by None mode")
+	sv.modeBtns["none"]:Click("LeftButton")
+	assertCheck((sv.dbPriceStatusFs:GetText() or ""):find("Active: Manual", 1, true) ~= nil,
+		"Settings switches cleanly from TSM Tool Sync back to Manual")
+	assertCheck((su.stTitle:GetText() or ""):find("In-Sync", 1, true) ~= nil,
+		"MerchantMasterSync hero still shows In-Sync even when Manual is chosen in Settings")
 
 	-- Verify ConsoleEngine settings fields documents backgroundPriceMode & useTSMPrices and keeps savedTables == 13
 	local stTsm = CE.CollectStorageSnapshot()

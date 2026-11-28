@@ -3,8 +3,8 @@
 --   1. Overview            (RAM, SavedVariables, Live AH scans, Health, optional Snapshot cards)
 --   2. Database            (WoW SavedVariables schema inspector + optional SQLite companion tables)
 --   3. Perf & Debug        (Zero-overhead opt-in runtime profiler & privacy-safe Debug Bundle)
---   4. MerchantMasterSync  (Apple-style Sync Companion, Price Refresh Mode & Advanced CLI)
---   5. Settings            (Synced /mm options, Leveling guide, tooltip settings)
+--   4. MerchantMasterSync  (Apple-style Sync Status, Install & Advanced CLI)
+--   5. Settings            (Database Price Information, /mm options, Leveling filter & tooltips)
 --   6. Mail                (Saved mail recipients, mailbox quick-pick buttons & safety net)
 --   7. Tooltip Setup       (Item tooltip sections, price format, modifier & live example preview)
 --   8. Addon UI            (Theme/skin, table style & price format switcher with live preview)
@@ -176,6 +176,25 @@ end
 local function hasSnapshotsAny()
 	if hasSnapshotExt() then return true end
 	if type(ns.HasSnapshots) == "function" and ns.HasSnapshots() then
+		return true
+	end
+	return false
+end
+
+local function isSyncInSync()
+	if hasSnapshotExt() then return true end
+	if type(ns.HasRawSnapshots) == "function" and ns.HasRawSnapshots() == true then
+		return true
+	end
+	return false
+end
+
+local function isTSMToolInstalled()
+	local api = rawget(_G, "TSM_API")
+	if type(api) == "table" and type(api.GetCustomPriceValue) == "function" then
+		return true
+	end
+	if type(ns.IsTSMAddonLoaded) == "function" and ns.IsTSMAddonLoaded() == true then
 		return true
 	end
 	return false
@@ -1716,116 +1735,13 @@ local function buildSetupV2View(parent)
 	stFeed:SetText("Public Feed: JustBenji/MerchantMaster-SnapshotData (tag: snapshots-live)")
 	v2.stFeed = stFeed
 
-	-- 2. Compact 3-Way Price Refresh Mode Card (Local Snapshot & TSM Light never mix)
-	local tsmCard = createSurfaceCard(frame, "glass_r12", "cardBg")
-	tsmCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -280)
-	tsmCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -280)
-	tsmCard:SetHeight(72)
-	addCardAccent(tsmCard, 0.24, 0.72, 0.98, 0.90)
-	v2.tsmCard = tsmCard
-
-	local modeLbl = makeFs(tsmCard, 12, "semibold", "text")
-	modeLbl:SetPoint("TOPLEFT", tsmCard, "TOPLEFT", 14, -10)
-	modeLbl:SetText("Price Refresh Mode:")
-	v2.modeLbl = modeLbl
-
-	v2.modeBtns = {}
-	do
-		local modeDefs = {
-			{
-				key = "local",
-				label = "Local Snapshot",
-				width = 118,
-				tipTitle = "Local Snapshot Mode",
-				tipLines = {
-					"Uses MerchantMaster_Snapshots for 15m background AH updates, 7x24 heatmaps, and 6-tier buyout depth.",
-					"Local Snapshot and TSM Light never mix (TSM stays completely off).",
-				},
-			},
-			{
-				key = "tsm",
-				label = "TSM Light",
-				width = 96,
-				tipTitle = "TSM Light Mode (Hourly Prices)",
-				tipLines = {
-					"Uses TradeSkillMaster addon + TSM Desktop App for hourly prices inside MerchantMaster tables with zero local storage.",
-					"Local Snapshot and TSM Light never mix (Local Snapshot, 7x24 heatmaps, and buyout depth are paused).",
-				},
-			},
-			{
-				key = "none",
-				label = "None (Manual AH)",
-				width = 132,
-				tipTitle = "Manual AH Only Mode",
-				tipLines = {
-					"Manual in-game Auction House scans only.",
-					"Both Local Snapshot background data and TSM Light are paused (they never mix).",
-				},
-			},
-		}
-		local prevBtn = nil
-		for _, def in ipairs(modeDefs) do
-			local btn = createButton(tsmCard, def.label, def.width, 24, {
-				variant = "secondary",
-				pill = true,
-				fontSize = 11,
-			})
-			if not prevBtn then
-				btn:SetPoint("TOPLEFT", tsmCard, "TOPLEFT", 146, -7)
-			else
-				btn:SetPoint("LEFT", prevBtn, "RIGHT", 6, 0)
-			end
-			local modeKey = def.key
-			btn:SetScript("OnClick", function()
-				if type(ns.SetBackgroundPriceMode) == "function" then
-					ns.SetBackgroundPriceMode(modeKey)
-				else
-					if type(_G.MerchantMasterDB) ~= "table" then _G.MerchantMasterDB = {} end
-					_G.MerchantMasterDB.backgroundPriceMode = modeKey
-					_G.MerchantMasterDB.useTSMPrices = (modeKey == "tsm")
-					if type(ns.InvalidatePriceCache) == "function" then
-						ns.InvalidatePriceCache()
-					end
-				end
-				local app = ns.app
-				if app and app.ui and app.ui.optSourceBtn and type(ns.CurrentSourceInfo) == "function" then
-					app.ui.optSourceBtn:SetText("Price Source: " .. ns.CurrentSourceInfo().label)
-				end
-				v2.retheme()
-				UI.SyncSettings()
-				if app and type(app.refresh) == "function" then
-					app.refresh()
-				end
-			end)
-			attachTooltip(btn, def.tipTitle, def.tipLines)
-			v2.modeBtns[modeKey] = btn
-			prevBtn = btn
-		end
-	end
-	v2.enableBtn = v2.modeBtns["local"]
-	v2.disableBtn = v2.modeBtns["none"]
-
-	local tsmStatusFs = makeFs(tsmCard, 11, "semibold", "textMuted", "RIGHT")
-	tsmStatusFs:SetPoint("TOPRIGHT", tsmCard, "TOPRIGHT", -14, -10)
-	tsmStatusFs:SetWidth(220)
-	tsmStatusFs:SetText("Manual AH Only (Local OFF)")
-	v2.tsmStatusFs = tsmStatusFs
-
-	local tsmSubFs = makeFs(tsmCard, 10, "regular", "textSecondary")
-	tsmSubFs:SetPoint("TOPLEFT", tsmCard, "TOPLEFT", 14, -36)
-	tsmSubFs:SetPoint("BOTTOMRIGHT", tsmCard, "BOTTOMRIGHT", -14, 6)
-	if tsmSubFs.SetJustifyV then tsmSubFs:SetJustifyV("TOP") end
-	if tsmSubFs.SetWordWrap then tsmSubFs:SetWordWrap(true) end
-	tsmSubFs:SetText("Manual in-game Auction House scans only. Both Local Snapshot background data and TSM Light are paused (Local Snapshot and TSM Light never mix).")
-	v2.tsmSubFs = tsmSubFs
-
-	-- 3. Collapsed-by-default Terminal / Advanced Drawer (PowerShell & Linux/macOS CLI commands)
+	-- 2. Collapsed-by-default Terminal / Advanced Drawer (PowerShell & Linux/macOS CLI commands)
 	local advToggleBtn = createButton(frame, "Terminal / Advanced >", 172, 24, {
 		variant = "secondary",
 		pill = true,
 		fontSize = 10,
 	})
-	advToggleBtn:SetPoint("TOPLEFT", tsmCard, "BOTTOMLEFT", 0, -8)
+	advToggleBtn:SetPoint("TOPLEFT", statusCard, "BOTTOMLEFT", 0, -10)
 	v2.advToggleBtn = advToggleBtn
 
 	local advHintFs = makeFs(frame, 10, "regular", "textMuted", "LEFT")
@@ -1939,7 +1855,6 @@ local function buildSetupV2View(parent)
 
 	local function applyDrawerLayout()
 		local open = v2.advExpanded == true
-		tsmCard:ClearAllPoints()
 		stTitle:ClearAllPoints()
 		stBody:ClearAllPoints()
 		stFeed:ClearAllPoints()
@@ -1961,8 +1876,6 @@ local function buildSetupV2View(parent)
 			stFeed:SetJustifyH("LEFT")
 			stFeed:SetPoint("BOTTOMLEFT", statusCard, "BOTTOMLEFT", 14, 6)
 			stFeed:SetPoint("BOTTOMRIGHT", statusCard, "BOTTOMRIGHT", -14, 6)
-			tsmCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -80)
-			tsmCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -80)
 			setButtonLabel(advToggleBtn, "Terminal / Advanced v")
 			advPanel:Show()
 		else
@@ -1979,8 +1892,6 @@ local function buildSetupV2View(parent)
 			stFeed:SetJustifyH("CENTER")
 			stFeed:SetPoint("BOTTOMLEFT", statusCard, "BOTTOMLEFT", 14, 10)
 			stFeed:SetPoint("BOTTOMRIGHT", statusCard, "BOTTOMRIGHT", -14, 10)
-			tsmCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -280)
-			tsmCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, -280)
 			setButtonLabel(advToggleBtn, "Terminal / Advanced >")
 			advPanel:Hide()
 		end
@@ -1996,56 +1907,6 @@ local function buildSetupV2View(parent)
 		if w <= 0 then w = 1000 end
 		local halfW = max(320, floor((w - 10) / 2))
 		winCard:SetWidth(halfW)
-	end
-
-	function v2.updateTsmStatus(pal)
-		pal = pal or getPal()
-		local mode = (type(ns.GetBackgroundPriceMode) == "function" and ns.GetBackgroundPriceMode()) or "none"
-		if type(v2.modeBtns) == "table" then
-			for k, btn in pairs(v2.modeBtns) do
-				if btn and type(btn.SetActive) == "function" then
-					btn:SetActive(k == mode)
-				end
-			end
-		end
-		if mode == "local" then
-			local hasLocal = hasSnapshotExt() or (type(ns.HasRawSnapshots) == "function" and ns.HasRawSnapshots() == true)
-			if v2.tsmStatusFs then
-				if hasLocal then
-					v2.tsmStatusFs:SetText(colorHex("hexGreen", "Local Snapshot Active", pal))
-				else
-					v2.tsmStatusFs:SetText(colorHex("hexWarning", "Local Snapshot (Not Installed)", pal))
-				end
-			end
-			if v2.tsmSubFs then
-				v2.tsmSubFs:SetText("Uses MerchantMaster_Snapshots for 15m background AH updates, 7x24 heatmaps, and 6-tier buyout depth. Local Snapshot and TSM Light never mix (TSM stays completely off).")
-			end
-		elseif mode == "tsm" then
-			local avail = false
-			if type(ns.IsTSMAvailable) == "function" then
-				avail = ns.IsTSMAvailable() == true
-			else
-				local api = rawget(_G, "TSM_API")
-				avail = type(api) == "table" and type(api.GetCustomPriceValue) == "function"
-			end
-			if v2.tsmStatusFs then
-				if avail then
-					v2.tsmStatusFs:SetText(colorHex("hexGreen", "TSM Light Active (Local OFF)", pal))
-				else
-					v2.tsmStatusFs:SetText(colorHex("hexWarning", "Waiting for TradeSkillMaster", pal))
-				end
-			end
-			if v2.tsmSubFs then
-				v2.tsmSubFs:SetText("Uses TradeSkillMaster addon + TSM Desktop App for hourly prices inside MerchantMaster tables with zero local storage. Local Snapshot and TSM Light never mix (Local Snapshot, 7x24 heatmaps, and buyout depth are paused).")
-			end
-		else
-			if v2.tsmStatusFs then
-				v2.tsmStatusFs:SetText(colorHex("hexMuted", "Manual AH Only (Local OFF)", pal))
-			end
-			if v2.tsmSubFs then
-				v2.tsmSubFs:SetText("Manual in-game Auction House scans only. Both Local Snapshot background data and TSM Light are paused (Local Snapshot and TSM Light never mix).")
-			end
-		end
 	end
 
 	local function tintOrb(r, g, b)
@@ -2068,11 +1929,12 @@ local function buildSetupV2View(parent)
 		if not CE then return end
 		local pal = getPal()
 		applyDrawerLayout()
-		v2.updateTsmStatus(pal)
-		local installed = hasSnapshotExt()
+		local installed = isSyncInSync()
 		local addonState = type(CE.GetAddonState) == "function" and CE.GetAddonState("MerchantMaster_Snapshots") or (installed and "loaded" or "absent")
 		local bgMode = (type(ns.GetBackgroundPriceMode) == "function" and ns.GetBackgroundPriceMode()) or "none"
-		local suppressed = type(ns.IsLocalSnapshotSuppressed) == "function" and ns.IsLocalSnapshotSuppressed()
+		if installed and v2._lastSys == nil and ns.Pricing and type(ns.Pricing.GetSnapshotSystemMeta) == "function" then
+			v2._lastSys = ns.Pricing.GetSnapshotSystemMeta()
+		end
 
 		local statusTag
 		if not installed then
@@ -2091,34 +1953,24 @@ local function buildSetupV2View(parent)
 				if v2.installBtn.SetVariant then v2.installBtn:SetVariant("primary") end
 				statusTag = colorHex("hexBlue", "Ready to Install", pal)
 			end
-		elseif suppressed and bgMode == "tsm" then
-			tintOrb(0.96, 0.62, 0.14)
-			v2.stTitle:SetText(colorHex("hexWarning", "Paused (TSM Light)", pal))
-			v2.stBody:SetText("Snapshot pack is ready on disk. Click Local Snapshot below to resume.")
-			setButtonLabel(v2.installBtn, "Download App")
-			if v2.installBtn.SetVariant then v2.installBtn:SetVariant("secondary") end
-			statusTag = colorHex("hexWarning", "Paused (TSM Light)", pal)
-		elseif suppressed and bgMode == "none" then
-			tintOrb(0.62, 0.65, 0.72)
-			v2.stTitle:SetText("Paused (Manual AH Only)")
-			v2.stBody:SetText("Snapshot pack is ready on disk. Click Local Snapshot below to resume.")
-			setButtonLabel(v2.installBtn, "Download App")
-			if v2.installBtn.SetVariant then v2.installBtn:SetVariant("secondary") end
-			statusTag = colorHex("hexMuted", "OFF (Manual AH)", pal)
 		else
 			tintOrb(0.19, 0.82, 0.35)
-			v2.stTitle:SetText(colorHex("hexGreen", "In Sync", pal))
+			v2.stTitle:SetText(colorHex("hexGreen", "In-Sync", pal))
 			local sys = v2._lastSys
 			if sys then
 				local diskTotal = max(((tonumber(sys.dbBytes) or 0) + (tonumber(sys.walBytes) or 0) + (tonumber(sys.shmBytes) or 0) + (tonumber(sys.logBytes) or 0)), tonumber(sys.localDataDirBytes) or 0) + (tonumber(sys.exportBytes) or 0)
 				v2.stBody:SetText(format("Snapshots: %s  |  Disk: %s  |  Every %dm  |  Last Sync: %s",
 					CE.FormatInt(sys.totalRuns or 0), CE.FormatBytes(diskTotal), sys.intervalMin or 15, CE.FormatTimestamp(sys.exportedAt)))
 			else
-				v2.stBody:SetText("Automatic hourly Auction House prices are active.")
+				v2.stBody:SetText("Automatic hourly Auction House prices are in-sync.")
 			end
 			setButtonLabel(v2.installBtn, "Download App")
 			if v2.installBtn.SetVariant then v2.installBtn:SetVariant("secondary") end
-			statusTag = colorHex("hexGreen", "In Sync", pal)
+			if bgMode ~= "local" then
+				statusTag = colorHex("hexGreen", "In-Sync", pal) .. "  |  " .. colorHex("hexMuted", "Select in Settings -> Database Price Information", pal)
+			else
+				statusTag = colorHex("hexGreen", "In-Sync", pal)
+			end
 		end
 
 		if not v2.advExpanded then
@@ -2129,7 +1981,7 @@ local function buildSetupV2View(parent)
 				v2.downloadRow:Hide()
 				v2.stepRow:SetText("1. Click Install    ->    2. Download & open MerchantMasterSync    ->    3. Type /reload in WoW")
 				v2.stepRow:Show()
-			elseif installed and not suppressed then
+			elseif installed then
 				v2.downloadRow:Hide()
 				v2.stepRow:SetText("Checks GitHub every 15m and updates prices automatically when WoW reloads.")
 				v2.stepRow:Show()
@@ -2145,7 +1997,7 @@ local function buildSetupV2View(parent)
 	function v2.refresh()
 		local CE = getCE()
 		if not CE then return end
-		local installed = hasSnapshotExt()
+		local installed = isSyncInSync()
 		v2._lastSys = installed and ns.Pricing and type(ns.Pricing.GetSnapshotSystemMeta) == "function"
 			and ns.Pricing.GetSnapshotSystemMeta() or nil
 
@@ -2182,10 +2034,187 @@ local function buildSettingsView(parent)
 	local sv = {
 		frame = frame,
 		checks = {},
+		modeBtns = {},
+		_dbFeedback = nil,
 	}
 
+	-- Top Category Card: Database Price Information (Manual | TSM Tool Sync | MerchantMasterSync)
+	local dbPriceCard = createSurfaceCard(frame, "glass_r12", "cardBg")
+	dbPriceCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+	dbPriceCard:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+	dbPriceCard:SetHeight(176)
+	do
+		local bar = dbPriceCard:CreateTexture(nil, "ARTWORK", nil, 2)
+		bar:SetPoint("TOPLEFT", dbPriceCard, "TOPLEFT", 2, -1)
+		bar:SetPoint("TOPRIGHT", dbPriceCard, "TOPRIGHT", -2, -1)
+		bar:SetHeight(2)
+		bar:SetColorTexture(0.24, 0.72, 0.98, 0.90)
+	end
+	sv.dbPriceCard = dbPriceCard
+
+	local dbPriceTitle = makeFs(dbPriceCard, 13, "semibold", "text")
+	dbPriceTitle:SetPoint("TOPLEFT", dbPriceCard, "TOPLEFT", 14, -10)
+	dbPriceTitle:SetText("Database Price Information")
+
+	local dbPriceStatusFs = makeFs(dbPriceCard, 11, "semibold", "textMuted", "RIGHT")
+	dbPriceStatusFs:SetPoint("TOPRIGHT", dbPriceCard, "TOPRIGHT", -14, -10)
+	dbPriceStatusFs:SetWidth(260)
+	dbPriceStatusFs:SetText("Active: Manual")
+	sv.dbPriceStatusFs = dbPriceStatusFs
+
+	local dbSep = createSeparator(dbPriceCard)
+	dbSep:SetPoint("TOPLEFT", dbPriceCard, "TOPLEFT", 12, -32)
+	dbSep:SetPoint("TOPRIGHT", dbPriceCard, "TOPRIGHT", -12, -32)
+
+	local dbPriceFeedbackFs = makeFs(dbPriceCard, 11, "regular", "textSecondary", "LEFT")
+	dbPriceFeedbackFs:SetPoint("TOPLEFT", dbPriceCard, "TOPLEFT", 14, -142)
+	dbPriceFeedbackFs:SetPoint("TOPRIGHT", dbPriceCard, "TOPRIGHT", -222, -142)
+	dbPriceFeedbackFs:SetHeight(24)
+	if dbPriceFeedbackFs.SetJustifyV then dbPriceFeedbackFs:SetJustifyV("MIDDLE") end
+	dbPriceFeedbackFs:SetText("Only one database price source is active at a time.")
+	sv.dbPriceFeedbackFs = dbPriceFeedbackFs
+
+	local openSyncTabBtn = createButton(dbPriceCard, "Open MerchantMasterSync ->", 196, 24, {
+		variant = "primary",
+		pill = true,
+		fontSize = 11,
+	})
+	openSyncTabBtn:SetPoint("TOPRIGHT", dbPriceCard, "TOPRIGHT", -14, -140)
+	openSyncTabBtn:Hide()
+	openSyncTabBtn:SetScript("OnClick", function()
+		if ns.app and type(ns.app.setTab) == "function" then
+			ns.app.setTab("console_setup2")
+		else
+			UI.Show("console_setup2")
+		end
+	end)
+	sv.openSyncTabBtn = openSyncTabBtn
+
+	local function syncDbPriceMode()
+		local pal = getPal()
+		local mode = (type(ns.GetBackgroundPriceMode) == "function" and ns.GetBackgroundPriceMode()) or "none"
+		for k, btn in pairs(sv.modeBtns) do
+			if btn and type(btn.SetActive) == "function" then
+				btn:SetActive(k == mode)
+			end
+		end
+		if mode == "local" then
+			if isSyncInSync() then
+				dbPriceStatusFs:SetText(colorHex("hexGreen", "Active: MerchantMasterSync", pal))
+			else
+				dbPriceStatusFs:SetText(colorHex("hexWarning", "MerchantMasterSync (Not Synced)", pal))
+			end
+		elseif mode == "tsm" then
+			if isTSMToolInstalled() then
+				dbPriceStatusFs:SetText(colorHex("hexGreen", "Active: TSM Tool Sync", pal))
+			else
+				dbPriceStatusFs:SetText(colorHex("hexWarning", "Error: TSM Tool Missing", pal))
+			end
+		else
+			dbPriceStatusFs:SetText(colorHex("hexMuted", "Active: Manual", pal))
+		end
+
+		if sv._dbFeedback then
+			local hk = (sv._dbFeedback.kind == "danger" and "hexDanger")
+				or (sv._dbFeedback.kind == "warning" and "hexWarning")
+				or "hexGreen"
+			dbPriceFeedbackFs:SetText(colorHex(hk, sv._dbFeedback.text, pal))
+			if sv._dbFeedback.showSyncLink then
+				openSyncTabBtn:Show()
+			else
+				openSyncTabBtn:Hide()
+			end
+		else
+			dbPriceFeedbackFs:SetText("Only one database price source is active at a time.")
+			openSyncTabBtn:Hide()
+		end
+	end
+	sv.syncDbPriceMode = syncDbPriceMode
+
+	do
+		local dbModeDefs = {
+			{
+				key = "none",
+				y = -42,
+				label = "Manual",
+				desc = "Pull in the actual price data",
+			},
+			{
+				key = "tsm",
+				y = -72,
+				label = "TSM Tool Sync",
+				desc = "Pull in the latest price data by TSM (Refresh is 1x per hour)",
+			},
+			{
+				key = "local",
+				y = -102,
+				label = "MerchantMasterSync",
+				desc = "Pull in the latest price data + historical data (Refresh is 1x per hour)",
+			},
+		}
+		for _, def in ipairs(dbModeDefs) do
+			local btn = createButton(dbPriceCard, def.label, 168, 24, {
+				variant = "secondary",
+				pill = true,
+				fontSize = 11,
+			})
+			btn:SetPoint("TOPLEFT", dbPriceCard, "TOPLEFT", 14, def.y)
+
+			local descFs = makeFs(dbPriceCard, 11, "regular", "textSecondary", "LEFT")
+			descFs:SetPoint("LEFT", btn, "RIGHT", 14, 0)
+			descFs:SetPoint("RIGHT", dbPriceCard, "RIGHT", -14, 0)
+			descFs:SetText(def.desc)
+
+			local modeKey = def.key
+			btn:SetScript("OnClick", function()
+				if modeKey == "tsm" and not isTSMToolInstalled() then
+					sv._dbFeedback = {
+						kind = "danger",
+						text = "Error: TSM tool is not installed. Install TradeSkillMaster + TSM Desktop App and /reload.",
+						showSyncLink = false,
+					}
+					syncDbPriceMode()
+					return
+				end
+				if modeKey == "local" and not isSyncInSync() then
+					sv._dbFeedback = {
+						kind = "warning",
+						text = "MerchantMasterSync is not in-sync yet. Open the MerchantMasterSync tab to install and sync first.",
+						showSyncLink = true,
+					}
+					syncDbPriceMode()
+					return
+				end
+
+				sv._dbFeedback = nil
+				if type(ns.SetBackgroundPriceMode) == "function" then
+					ns.SetBackgroundPriceMode(modeKey)
+				else
+					if type(_G.MerchantMasterDB) ~= "table" then _G.MerchantMasterDB = {} end
+					_G.MerchantMasterDB.backgroundPriceMode = modeKey
+					_G.MerchantMasterDB.useTSMPrices = (modeKey == "tsm")
+					if type(ns.InvalidatePriceCache) == "function" then
+						ns.InvalidatePriceCache()
+					end
+				end
+				local app = ns.app
+				if app and app.ui and app.ui.optSourceBtn and type(ns.CurrentSourceInfo) == "function" then
+					app.ui.optSourceBtn:SetText("Price Source: " .. ns.CurrentSourceInfo().label)
+				end
+				if state.setupV2View and type(state.setupV2View.retheme) == "function" then
+					state.setupV2View.retheme()
+				end
+				UI.SyncSettings()
+				if app and type(app.refresh) == "function" then
+					app.refresh()
+				end
+			end)
+			sv.modeBtns[modeKey] = btn
+		end
+	end
+
 	local leftCard = createSurfaceCard(frame, "glass_r12", "cardBg")
-	leftCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+	leftCard:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -184)
 	leftCard:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0)
 	leftCard:SetWidth(500)
 	sv.leftCard = leftCard
@@ -2448,6 +2477,11 @@ local function buildSettingsView(parent)
 		end)
 
 	state.settingsControls = {
+		dbPriceCard = dbPriceCard,
+		modeBtns = sv.modeBtns,
+		dbPriceStatusFs = dbPriceStatusFs,
+		dbPriceFeedbackFs = dbPriceFeedbackFs,
+		openSyncTabBtn = openSyncTabBtn,
 		econBtn = econBtn,
 		sourceBtn = sourceBtn,
 		minimapCheck = minimapCheck,
@@ -2458,6 +2492,7 @@ local function buildSettingsView(parent)
 	}
 
 	function sv.sync()
+		syncDbPriceMode()
 		local econLabel = (ns.CurrentEconomyInfo and ns.CurrentEconomyInfo().buttonLabel) or "Normal-Horde"
 		local srcLabel = (ns.CurrentSourceInfo and ns.CurrentSourceInfo().label) or "Auto"
 		setButtonLabel(econBtn, "Economy: " .. econLabel)
@@ -4815,8 +4850,8 @@ local function buildSubTabBar(root)
 		{ key = "console_overview", label = "Overview", width = 60, hint = "Addon RAM, SavedVariables, Live AH scans & health" },
 		{ key = "console_database", label = "Database", width = 62, hint = "WoW SavedVariables schema inspector" },
 		{ key = "console_perf", label = "Perf & Debug", width = 80, hint = "Opt-in runtime profiler & support debug bundle" },
-		{ key = "console_setup2", label = "MerchantMasterSync", width = 132, hint = "MerchantMasterSync desktop app & Price Refresh Mode" },
-		{ key = "console_settings", label = "Settings", width = 56, hint = "Market, inventory scope, Leveling filter & item tooltips" },
+		{ key = "console_setup2", label = "MerchantMasterSync", width = 132, hint = "MerchantMasterSync desktop app status & setup" },
+		{ key = "console_settings", label = "Settings", width = 56, hint = "Database Price Information, market, inventory scope & tooltips" },
 		{ key = "console_mail", label = "Mail", width = 38, hint = "Saved mail recipients, mailbox quick-pick buttons & send safety net" },
 		{ key = "console_tooltips", label = "Tooltip Setup", width = 80, hint = "Customize item tooltip sections, price format & live example preview" },
 		{ key = "console_ui", label = "Addon UI", width = 58, hint = "Window skins, dark/light mode, table styles & price formats with live preview" },
@@ -5015,6 +5050,8 @@ function UI.ApplyTheme()
 			state.overviewView.retheme()
 		elseif state.activeSubTab == "console_setup2" and state.setupV2View and type(state.setupV2View.retheme) == "function" then
 			state.setupV2View.retheme()
+		elseif state.activeSubTab == "console_settings" and state.settingsView and type(state.settingsView.sync) == "function" then
+			state.settingsView.sync()
 		elseif state.activeSubTab == "console_database" and state.databaseView and type(state.databaseView.renderRows) == "function" then
 			state.databaseView.renderRows()
 		elseif state.activeSubTab == "console_mail" and state.mailView and type(state.mailView.retheme) == "function" then
@@ -5054,6 +5091,7 @@ function UI.SyncExtensions()
 	if UI.IsShown() then
 		UI.Layout()
 		UI.Refresh("extension_changed")
+		UI.SyncSettings()
 	else
 		state.dirty = true
 	end
