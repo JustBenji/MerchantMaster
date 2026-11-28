@@ -3098,7 +3098,23 @@ function UI.Create(parent, opts)
         Render.layoutView(ctx, w, h)
     end
 
+    local function getWatchlistSig()
+        local WL = ns.Watchlist
+        if not (WL and type(WL.GetEntries) == "function") then return "0" end
+        local ok, entries = pcall(WL.GetEntries)
+        if not (ok and type(entries) == "table") then return "0" end
+        local acc = 0
+        for i = 1, #entries do
+            local e = entries[i]
+            if type(e) == "table" then
+                acc = acc + ((H.safeNum(e.itemID, 0) or 0) * 3 + (H.safeNum(e.spellID, 0) or 0) * 7) * i
+            end
+        end
+        return tostring(#entries) .. ":" .. tostring(acc)
+    end
+
     function view:ApplyTheme()
+        state.lastRenderSig = nil
         Render.applyThemeView(ctx)
     end
 
@@ -3106,6 +3122,7 @@ function UI.Create(parent, opts)
         state.lastNowOverride = nowOverride
         local Model = ns.DashboardBloombergModel
         if force then
+            state.lastRenderSig = nil
             if Model and type(Model.InvalidateCache) == "function" then Model.InvalidateCache() end
             if ns.DashboardBrief and type(ns.DashboardBrief.InvalidateCache) == "function" then
                 ns.DashboardBrief.InvalidateCache()
@@ -3115,6 +3132,43 @@ function UI.Create(parent, opts)
         local econKey = H.resolveEconKey(opts.getEconKey and opts.getEconKey())
         local freshness = (type(opts.getFreshnessText) == "function" and opts.getFreshnessText())
             or ((ns.Pricing and ns.Pricing.GetSnapshotFreshnessLabel and ns.Pricing.GetSnapshotFreshnessLabel(econKey)) or "Live")
+        local priceRev = (type(ns.GetPriceDataRevision) == "function" and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
+        local Store = ns.Analytics and ns.Analytics.Store
+        local storeVer = (Store and Store.version) or 0
+        local ahVer = (Store and Store.ahSalesVersion) or 0
+        local accVer = (Store and Store.accountingVersion) or 0
+        local gold = (_G.GetMoney and H.safeNum(_G.GetMoney(), 0)) or 0
+        local dbRef = type(_G.MerchantMasterDB) == "table" and _G.MerchantMasterDB or nil
+        local themeKey = ((ns.Theme and type(ns.Theme.GetKey) == "function") and tostring(ns.Theme.GetKey()))
+            or (dbRef and (tostring(dbRef.theme or "") .. ":" .. tostring(dbRef.uiSkin or "")))
+            or ""
+        local nowSecVal = (Store and type(Store.Now) == "function" and H.safeNum(Store.Now(), nil)) or (_G.time and _G.time()) or 0
+        local renderSig = table.concat({
+            tostring(econKey),
+            tostring(freshness),
+            tostring(priceRev),
+            tostring(storeVer),
+            tostring(ahVer),
+            tostring(accVer),
+            tostring(gold),
+            getWatchlistSig(),
+            tostring(state.rangeKey),
+            tostring(state.filterKey),
+            tostring(state.selectedKey),
+            tostring(state.pinnedKey),
+            tostring(state.chartStyle),
+            tostring(state.mode),
+            tostring(state.width),
+            tostring(state.height),
+            tostring(floor(nowSecVal / 86400)),
+            themeKey,
+        }, "|")
+        if not force and nowOverride == nil and state.snap ~= nil and state.lastRenderSig == renderSig then
+            if state.autoRotate and (not self.IsVisible or self:IsVisible()) then
+                armAutoTimer()
+            end
+            return
+        end
 
         ctx.greetingFs:SetText(H.getGreeting(opts.getPlayerName and opts.getPlayerName()))
         ctx.metaPill:SetVariant("neutral", econKey .. " | " .. tostring(freshness))
@@ -3131,7 +3185,8 @@ function UI.Create(parent, opts)
             if ok and type(res) == "table" then snap = res end
         end
         state.snap = snap or H.emptySnapshot(econKey, state.rangeKey, state.filterKey, freshness)
-        state.lastPriceRev = (type(ns.GetPriceDataRevision) == "function" and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
+        state.lastPriceRev = priceRev
+        state.lastRenderSig = (nowOverride == nil) and renderSig or nil
 
         local sel = H.findStock(state.snap, state.selectedKey)
         state.selectedStock = sel
@@ -3165,6 +3220,7 @@ function UI.Create(parent, opts)
     function view:SetRange(rangeKey, silent)
         if not C.RANGE_DAYS[rangeKey] then return end
         state.rangeKey = rangeKey
+        state.lastRenderSig = nil
         if type(_G.MerchantMasterDB) == "table" then
             _G.MerchantMasterDB.dashboardBriefRange = rangeKey
         end
@@ -3227,6 +3283,7 @@ function UI.Create(parent, opts)
     function view:SetChartStyle(style)
         local st = (style == "line") and "line" or "candles"
         state.chartStyle = st
+        state.lastRenderSig = nil
         if type(_G.MerchantMasterDB) == "table" then
             _G.MerchantMasterDB.dashboardChartStyle = st
         end
@@ -3252,6 +3309,7 @@ function UI.Create(parent, opts)
     end
 
     function view:Invalidate()
+        state.lastRenderSig = nil
         if ns.DashboardBloombergModel and type(ns.DashboardBloombergModel.InvalidateCache) == "function" then
             ns.DashboardBloombergModel.InvalidateCache()
         end

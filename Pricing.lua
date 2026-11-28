@@ -1154,32 +1154,87 @@ end
 _G.MERCHANTMASTER_LOAD_SNAPSHOTS = ns.IngestSnapshotData
 ns.Pricing.IngestSnapshotData = ns.IngestSnapshotData
 
+local function decodeLatestEntry(rest, metaUpdatedAt, metaSource)
+	local f1, f2, f3, f4, f5, f6 = string.match(rest, "^([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,%s]*)")
+	if f1 == nil then return nil end
+	local minB = decodeBase32(f1)
+	local mkt = decodeBase32(f2)
+	local hist = decodeBase32(f3)
+	local qty = decodeBase32(f4)
+	local numA = decodeBase32(f5)
+	local tsDelta = decodeBase32(f6)
+	return {
+		minBuyout = (minB > 0 and qty > 0) and minB or nil,
+		marketValue = mkt > 0 and mkt or nil,
+		historical = hist > 0 and hist or nil,
+		qty = qty,
+		numAuctions = numA,
+		updatedAt = metaUpdatedAt - tsDelta,
+		source = metaSource,
+	}
+end
+
 local function parseSnapshotLatestChunk(chunk, items, metaUpdatedAt, metaSource)
 	if type(chunk) ~= "string" or chunk == "" then return end
 	for entry in string.gmatch(chunk, "([^;\r\n]+)") do
 		local idStr, rest = string.match(entry, "^%s*(%d+):(.*)$")
 		local id = idStr and tonumber(idStr)
 		if id and id > 0 and rest then
-			local f1, f2, f3, f4, f5, f6 = string.match(rest, "^([^,]*),([^,]*),([^,]*),([^,]*),([^,]*),([^,%s]*)")
-			if f1 ~= nil then
-				local minB = decodeBase32(f1)
-				local mkt = decodeBase32(f2)
-				local hist = decodeBase32(f3)
-				local qty = decodeBase32(f4)
-				local numA = decodeBase32(f5)
-				local tsDelta = decodeBase32(f6)
-				items[id] = {
-					minBuyout = (minB > 0 and qty > 0) and minB or nil,
-					marketValue = mkt > 0 and mkt or nil,
-					historical = hist > 0 and hist or nil,
-					qty = qty,
-					numAuctions = numA,
-					updatedAt = metaUpdatedAt - tsDelta,
-					source = metaSource,
-				}
+			local rec = decodeLatestEntry(rest, metaUpdatedAt, metaSource)
+			if rec then
+				items[id] = rec
 			end
 		end
 	end
+end
+
+local function queryRawSnapshotLatestItem(raw, id)
+	local chunks = raw and raw.latestChunks
+	if not chunks or #chunks == 0 then return nil, nil end
+	local token = tostring(id) .. ":"
+	local matchedRest = nil
+	for i = 1, #chunks do
+		local chunk = chunks[i]
+		if type(chunk) == "string" and chunk ~= "" then
+			local pos = 1
+			while true do
+				local s, e = string.find(chunk, token, pos, true)
+				if not s then break end
+				local okPrefix = (s == 1)
+				if not okPrefix then
+					local prev = string.sub(chunk, s - 1, s - 1)
+					if prev == ";" or prev == "\n" or prev == "\r" then
+						okPrefix = true
+					elseif prev == " " or prev == "\t" then
+						local p = s - 1
+						while p >= 1 do
+							local ch = string.sub(chunk, p, p)
+							if ch == ";" or ch == "\n" or ch == "\r" then
+								okPrefix = true
+								break
+							end
+							if ch ~= " " and ch ~= "\t" then break end
+							p = p - 1
+						end
+						if p == 0 then okPrefix = true end
+					end
+				end
+				if okPrefix then
+					matchedRest = string.match(chunk, "^([^;\r\n]*)", e + 1)
+				end
+				pos = e + 1
+			end
+		end
+	end
+	if not matchedRest then return nil, nil end
+	local meta = raw.meta
+	local metaUpdatedAt = (meta and meta.updatedAt) or 0
+	local metaSource = (meta and meta.source ~= "" and meta.source) or "snapshot"
+	local rec = decodeLatestEntry(matchedRest, metaUpdatedAt, metaSource)
+	if not rec then return nil, nil end
+	local isListed = (rec.qty == nil or rec.qty > 0)
+	local liveMin = (isListed and rec.minBuyout and rec.minBuyout > 0) and rec.minBuyout or nil
+	return liveMin, rec
 end
 
 local function ensureHeat24Index(raw)
@@ -1394,7 +1449,13 @@ function ns.Pricing.GetAllAuctionHousesForItem(itemID, homeEconOverride)
 	for ek, raw in pairs(ns.snapshotRaw) do
 		if type(ek) == "string" and ek ~= "" and type(raw) == "table"
 			and ((raw.latestChunks and #raw.latestChunks > 0) or raw.meta ~= nil) then
-			local liveMin, rec = ns.QueryLocalSnapshot(id, ek, "minBuyout")
+			local isHome = (homeLower ~= nil and ek:lower() == homeLower)
+			local liveMin, rec
+			if isHome or (ns.snapshotParsed and ns.snapshotParsed[ek]) then
+				liveMin, rec = ns.QueryLocalSnapshot(id, ek, "minBuyout")
+			else
+				liveMin, rec = queryRawSnapshotLatestItem(raw, id)
+			end
 			local qty = (rec and tonumber(rec.qty)) or 0
 			local isListed = (qty > 0 and liveMin ~= nil and liveMin > 0)
 			local minB = isListed and liveMin or nil
@@ -1402,7 +1463,6 @@ function ns.Pricing.GetAllAuctionHousesForItem(itemID, homeEconOverride)
 			local numA = (isListed and rec and tonumber(rec.numAuctions)) or 0
 			local updatedAt = (rec and rec.updatedAt) or (raw.meta and raw.meta.updatedAt) or nil
 			local rsLabel, facLabel, rsRank, facRank = parseEconomyHouseInfo(ek)
-			local isHome = (homeLower ~= nil and ek:lower() == homeLower)
 			if isHome and minB then
 				homeMin = minB
 			end

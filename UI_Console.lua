@@ -773,12 +773,13 @@ local function buildOverviewView(parent)
 		end
 	end
 
-	function ov.refresh()
+	function ov.refresh(reason)
 		local CE = getCE()
 		if not CE then return end
 		local showSnap = hasSnapshotExt()
 		local showMapPins = hasMapPinsExt()
-		local storage = CE.CollectStorageSnapshot()
+		local forceFresh = (reason == "manual_btn" or reason == "extension_changed" or reason == "clear_probe")
+		local storage = CE.CollectStorageSnapshot({ useCache = not forceFresh })
 		local ref = CE.GetRefreshSummary()
 		local perf = CE.GetPerfSnapshot()
 		local sys = showSnap and storage.sysMeta or nil
@@ -1243,11 +1244,12 @@ local function buildDatabaseView(parent)
 		leftCard:SetWidth(max(360, floor((w - 10) * 0.48)))
 	end
 
-	function dv.refresh()
+	function dv.refresh(reason)
 		local CE = getCE()
 		if not CE then return end
 		local showSnap = hasSnapshotExt()
-		local storage = CE.CollectStorageSnapshot()
+		local forceFresh = (reason == "manual_btn" or reason == "extension_changed" or reason == "clear_probe")
+		local storage = CE.CollectStorageSnapshot({ useCache = not forceFresh })
 		local ds = storage.diskSummary or {}
 		local sys = showSnap and storage.sysMeta or nil
 		local ref = type(CE.GetRefreshSummary) == "function" and CE.GetRefreshSummary() or {}

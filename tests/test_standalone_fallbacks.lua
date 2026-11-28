@@ -47,6 +47,8 @@ end
 ---------------------------------------------------------------------------------------------------
 do
 	MerchantMasterDB.onboardingDismissed = nil
+	local prevDashModeOnboard = MerchantMasterDB.dashboardMode
+	MerchantMasterDB.dashboardMode = "classic"
 	MerchantMasterDB.hideWithAH = nil
 	MerchantMasterDB.autoOpenAtAH = nil
 	MerchantMasterDB.ahPrices = {}
@@ -86,6 +88,8 @@ do
 		"Dismissing onboarding card persists onboardingDismissed=true and hides card")
 	app.refresh()
 	check(not ui.dashOnboardingCard:IsShown(), "Onboarding card stays hidden on subsequent refresh once dismissed")
+	MerchantMasterDB.dashboardMode = prevDashModeOnboard
+	if app.syncDashboardMode then app.syncDashboardMode() end
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -153,6 +157,8 @@ do
 
 	-- Dashboard Daily Velocity Crafts card populates without snapshots
 	local origDashScope = MerchantMasterDB.dashboardScope
+	local origDashMode = MerchantMasterDB.dashboardMode
+	MerchantMasterDB.dashboardMode = "classic"
 	MerchantMasterDB.dashboardScope = "all"
 	app.setTab("dashboard")
 	app.refresh()
@@ -161,6 +167,8 @@ do
 		if row and row.IsShown and row:IsShown() and row.data ~= nil then dashPopulated = true; break end
 	end
 	MerchantMasterDB.dashboardScope = origDashScope
+	MerchantMasterDB.dashboardMode = origDashMode
+	if app.syncDashboardMode then app.syncDashboardMode() end
 	check(dashPopulated, "Dashboard Daily Velocity Crafts populates from Live AH velocity alone")
 end
 

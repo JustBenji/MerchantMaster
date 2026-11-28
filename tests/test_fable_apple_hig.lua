@@ -641,6 +641,8 @@ do
 		"Theme.CreateKpiCard defaults borderless (stroke == nil)")
 
 	-- Row 2 Bento headers: Title Case by default vs KNOWN CRAFTS / BEST KNOWN OPTIONS when enabled
+	local prevDashModeBento = MerchantMasterDB.dashboardMode
+	MerchantMasterDB.dashboardMode = "classic"
 	MerchantMasterDB.knownRecipesOnly = false
 	MerchantMasterDB.dashboardScope = "smart"
 	app.setTab("dashboard")
@@ -693,6 +695,8 @@ do
 		check(ui.dashLeftHdrFs:GetText() == "Daily Velocity Crafts" and ui.dashRightHdrFs:GetText() == "Monopoly Opportunities",
 			"Row 2 Bento headers restore Title Case after leaving knownRecipesOnly mode")
 	end
+	MerchantMasterDB.dashboardMode = prevDashModeBento
+	if app.syncDashboardMode then app.syncDashboardMode() end
 
 	-- 36px toast frame
 	check(ui.toast ~= nil and ui.toast.frame ~= nil, "Toast widget exposed on app.ui.toast")

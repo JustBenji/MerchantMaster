@@ -686,7 +686,13 @@ function CE.BuildSetupCommands(cfg)
 	return buildFallbackSetupCommands(opts)
 end
 
-function CE.CollectStorageSnapshot()
+local storageCache = nil
+
+function CE.InvalidateStorageCache()
+	storageCache = nil
+end
+
+function CE.CollectStorageSnapshot(opts)
 	local updateMem = (_G.C_AddOns and _G.C_AddOns.UpdateAddOnMemoryUsage) or _G.UpdateAddOnMemoryUsage
 	if type(updateMem) == "function" then
 		pcall(updateMem)
@@ -699,6 +705,42 @@ function CE.CollectStorageSnapshot()
 		and (queryAddonMemoryKB("MerchantMaster_MapPins") or 0) or 0
 
 	local mmDB = type(_G.MerchantMasterDB) == "table" and _G.MerchantMasterDB or {}
+	local cs = type(mmDB.consoleStats) == "table" and mmDB.consoleStats or {}
+	local storeMod = ns.Analytics and ns.Analytics.Store
+	local snapExt = CE.GetSnapshotExtension()
+	local hasSnapExt = (snapExt ~= nil)
+	local hasMapPins = CE.HasMapPinsExtension()
+	local hasSnap = hasSnapExt
+		or (type(ns.HasRawSnapshots) == "function" and ns.HasRawSnapshots() == true)
+		or (type(ns.HasSnapshots) == "function" and ns.HasSnapshots() == true)
+	local sysMeta = hasSnap and ns.Pricing and type(ns.Pricing.GetSnapshotSystemMeta) == "function"
+		and ns.Pricing.GetSnapshotSystemMeta() or nil
+	local now = (_G.time and _G.time()) or 0
+	local addonState = CE.GetAddonState("MerchantMaster_Snapshots")
+	local useCache = (type(opts) == "table" and opts.useCache == true)
+	local cacheSig = format("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+		tostring((ns.GetPriceDataRevision and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0),
+		tostring(storeMod and storeMod.version or 0),
+		tostring(storeMod and storeMod.accountingVersion or 0),
+		tostring(cs.fullScans or 0),
+		tostring(cs.partialScans or 0),
+		tostring(cs.singleRefreshes or 0),
+		tostring(cs.deepLotScans or 0),
+		tostring(hasSnap),
+		tostring(hasMapPins),
+		tostring(addonState),
+		tostring(sysMeta and sysMeta.exportedAt or 0) .. ":" .. tostring(sysMeta and sysMeta.totalRuns or 0) .. ":" .. tostring(sysMeta and sysMeta.errRuns or 0),
+		tostring(type(mmDB.shoppingList) == "table" and #mmDB.shoppingList or 0),
+		tostring(sysMeta and sysMeta.exportBytes or 0))
+	if useCache and storageCache and storageCache.sig == cacheSig and math.abs(now - (storageCache.at or 0)) < 10 then
+		local cached = storageCache.data
+		cached.ram.merchantMasterKB = mmMemKB
+		cached.ram.snapshotsKB = snapMemKB
+		cached.ram.mapPinsKB = mapPinsMemKB
+		cached.ram.totalKB = mmMemKB + snapMemKB + mapPinsMemKB
+		return cached
+	end
+
 	local profDB = type(mmDB.professor) == "table" and mmDB.professor or {}
 	local ledgerDB = type(_G.MerchantMasterLedgerDB) == "table" and _G.MerchantMasterLedgerDB or {}
 
@@ -799,9 +841,14 @@ function CE.CollectStorageSnapshot()
 			if type(d.r) == "table" then
 				ledgerRows = ledgerRows + #d.r
 			elseif type(d.s) == "string" and d.s ~= "" then
-				local cnt = 1
-				for _ in d.s:gmatch("\n") do cnt = cnt + 1 end
-				ledgerRows = ledgerRows + cnt
+				local mmCnt = tonumber(d.s:match("^MM1:(%d+):"))
+				if mmCnt then
+					ledgerRows = ledgerRows + mmCnt
+				else
+					local cnt = 1
+					for _ in d.s:gmatch("\n") do cnt = cnt + 1 end
+					ledgerRows = ledgerRows + cnt
+				end
 			end
 		end
 	end
@@ -823,12 +870,6 @@ function CE.CollectStorageSnapshot()
 		totalSavedBytes = totalSavedBytes + (row.estBytes or 0)
 	end
 
-	local snapExt = CE.GetSnapshotExtension()
-	local hasSnap = (snapExt ~= nil)
-		or (type(ns.HasRawSnapshots) == "function" and ns.HasRawSnapshots() == true)
-		or (type(ns.HasSnapshots) == "function" and ns.HasSnapshots() == true)
-	local sysMeta = hasSnap and ns.Pricing and type(ns.Pricing.GetSnapshotSystemMeta) == "function"
-		and ns.Pricing.GetSnapshotSystemMeta() or nil
 	local sqliteTables = {}
 	if hasSnap then
 		local extTables = (snapExt and type(snapExt.GetSQLiteTables) == "function")
@@ -923,7 +964,7 @@ function CE.CollectStorageSnapshot()
 		exportedAt = sysMeta and (tonumber(sysMeta.exportedAt) or 0) or 0,
 	}
 
-	return {
+	local result = {
 		ram = {
 			merchantMasterKB = mmMemKB,
 			snapshotsKB = snapMemKB,
@@ -937,6 +978,12 @@ function CE.CollectStorageSnapshot()
 		diskSummary = diskSummary,
 		staticCatalog = staticCatalog,
 	}
+	storageCache = {
+		sig = cacheSig,
+		at = now,
+		data = result,
+	}
+	return result
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -1262,6 +1309,7 @@ function CE.PreviewPruneLedger(days)
 end
 
 function CE.RunAction(actionKey, arg)
+	CE.InvalidateStorageCache()
 	local app = ns.app
 	local mmDB = type(_G.MerchantMasterDB) == "table" and _G.MerchantMasterDB or nil
 	local storeMod = ns.Analytics and ns.Analytics.Store

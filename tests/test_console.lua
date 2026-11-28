@@ -1258,4 +1258,67 @@ do
 	app.panel:Hide()
 end
 
+---------------------------------------------------------------------------------------------------
+-- 12. Storage Inspector Cache, Live Memory Re-Read & MM1 Packed Ledger Row Counting
+---------------------------------------------------------------------------------------------------
+do
+	local ledgerDB = _G.MerchantMasterLedgerDB
+	local hadLedger = (type(ledgerDB) == "table")
+	if not hadLedger then
+		ledgerDB = { days = {} }
+		_G.MerchantMasterLedgerDB = ledgerDB
+	end
+	local hadDays = (type(ledgerDB.days) == "table")
+	if not hadDays then ledgerDB.days = {} end
+	local prevDayEntry = ledgerDB.days["2099-01-01"]
+
+	CE.InvalidateStorageCache()
+	local baseSnap = CE.CollectStorageSnapshot({ forceFresh = true })
+	local function findLedgerRows(snap)
+		for _, row in ipairs((snap and snap.savedTables) or {}) do
+			if row.id == "MerchantMasterLedgerDB.days" then return row.rows end
+		end
+		return nil
+	end
+	local baseLedgerRows = findLedgerRows(baseSnap) or 0
+
+	ledgerDB.days["2099-01-01"] = { s = "MM1:4:row1\nrow2\nrow3\nrow4" }
+	CE.InvalidateStorageCache()
+	local packedSnap = CE.CollectStorageSnapshot({ forceFresh = true })
+	local packedLedgerRows = findLedgerRows(packedSnap)
+	assertCheck(packedLedgerRows == baseLedgerRows + 4,
+		"CollectStorageSnapshot parses MM1:<count>: packed ledger header (+4 rows), got "
+		.. tostring(packedLedgerRows) .. " vs base " .. tostring(baseLedgerRows))
+
+	local origUpdateMem = _G.UpdateAddOnMemoryUsage
+	local origCUpdateMem = _G.C_AddOns and _G.C_AddOns.UpdateAddOnMemoryUsage
+	local memCalls = 0
+	local wrappedUpdateMem = function(...)
+		memCalls = memCalls + 1
+		if type(origUpdateMem) == "function" then return origUpdateMem(...) end
+	end
+	_G.UpdateAddOnMemoryUsage = wrappedUpdateMem
+	if _G.C_AddOns then _G.C_AddOns.UpdateAddOnMemoryUsage = wrappedUpdateMem end
+
+	local snapA = CE.CollectStorageSnapshot({ useCache = true })
+	local snapB = CE.CollectStorageSnapshot({ useCache = true })
+	assertCheck(snapA == snapB and snapA.savedTables == snapB.savedTables,
+		"CollectStorageSnapshot({ useCache = true }) reuses cached savedTables across rapid calls")
+	assertCheck(memCalls == 2,
+		"CollectStorageSnapshot({ useCache = true }) still refreshes live UpdateAddOnMemoryUsage every call, got "
+		.. tostring(memCalls))
+
+	CE.InvalidateStorageCache()
+	local snapC = CE.CollectStorageSnapshot({ useCache = true })
+	assertCheck(snapC.savedTables ~= snapA.savedTables and memCalls == 3,
+		"InvalidateStorageCache forces fresh CollectStorageSnapshot savedTables scan")
+
+	_G.UpdateAddOnMemoryUsage = origUpdateMem
+	if _G.C_AddOns then _G.C_AddOns.UpdateAddOnMemoryUsage = origCUpdateMem end
+	ledgerDB.days["2099-01-01"] = prevDayEntry
+	if not hadDays then ledgerDB.days = nil end
+	if not hadLedger then _G.MerchantMasterLedgerDB = nil end
+	CE.InvalidateStorageCache()
+end
+
 print(string.format("CONSOLE_TESTS: PASS (%d assertions)", assertions))

@@ -36,7 +36,6 @@ local savedGetProfsInit = ns.GetPlayerProfessions
 ns.GetPlayerProfessions = function() return {} end
 app.setTab("recipes")
 app.panel:Show()
-provider.Invalidate()
 
 local box = tbl.scrollBox
 local pool, capacity = {}, 16
@@ -74,6 +73,8 @@ local function drain()
 	end
 end
 
+provider.Invalidate()
+drain()
 app.refresh()
 drain()
 local superRows = box._dp:GetCollection()

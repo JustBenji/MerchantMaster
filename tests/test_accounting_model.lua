@@ -618,3 +618,91 @@ do
 
     host.ItemName = prevItemName
 end
+
+-- Step 2 performance & parity regressions: LRU ledgerCache, decoupled search, and cold/warm GetItemDetail
+do
+    local brokenID = 12901
+    M.Invalidate()
+
+    -- (a) Multi-entry ledgerCache LRU preserves alternating period queries without IterDays rescan
+    local q30 = M.QueryLedger({ char = char, period = "30d" })
+    local qAll = M.QueryLedger({ char = char, period = "all" })
+    M.QueryLedger({ char = char, period = "7d" })
+    M.QueryLedger({ char = char, period = "14d" })
+    local origIter = S.IterDays
+    local iterCalls = 0
+    S.IterDays = function(...)
+        iterCalls = iterCalls + 1
+        return origIter(...)
+    end
+    local q30Hit = M.QueryLedger({ char = char, period = "30d" })
+    local qAllHit = M.QueryLedger({ char = char, period = "all" })
+    S.IterDays = origIter
+    check(iterCalls == 0, "4-entry ledgerCache LRU keeps 30d and all cached without IterDays rescan, got iterCalls=" .. tostring(iterCalls))
+    check(q30Hit.totalMatched == q30.totalMatched and q30Hit.totals.profit == q30.totals.profit,
+        "Cached 30d ledger preserves totalMatched and totals")
+    check(qAllHit.totalMatched == qAll.totalMatched and qAllHit.totals.profit == qAll.totals.profit,
+        "Cached all ledger preserves totalMatched and totals")
+
+    -- (b) Decoupled filters.search on items matches unfiltered baseline filtering on rows & totals
+    local unfilteredItems = M.Compute("items", { period = "all", char = char, knownCostOnly = false })
+    local searchedItems = M.Compute("items", { period = "all", char = char, search = "Item 12901", knownCostOnly = false })
+    check(#(searchedItems.rows or {}) == 1 and searchedItems.rows[1].itemID == brokenID,
+        "Decoupled items search matches exact item row for Item 12901")
+    local directRow = unfilteredItems.byItemID[brokenID]
+    check(searchedItems.totals and directRow
+        and searchedItems.totals.qtySold == directRow.sold
+        and searchedItems.totals.qtyBought == directRow.bought
+        and searchedItems.totals.gross == directRow.gross
+        and searchedItems.totals.spent == directRow.spent
+        and searchedItems.totals.profit == directRow.profit,
+        "Decoupled items search preserves exact totals")
+    local sellerSearch = M.Compute("items", { period = "all", search = "Seller B", knownCostOnly = false })
+    check(#(sellerSearch.rows or {}) == 1 and sellerSearch.rows[1].itemID == 101,
+        "Decoupled items search matches counterparty seller on cached base rows")
+
+    -- (c) Cold single-item GetItemDetail matches warm full-Compute GetItemDetail across all metrics & windows
+    local function assertDetailParity(itemID, queryFilters, label)
+        M.Invalidate()
+        for _, p in ipairs({ "7d", "30d", "all" }) do
+            local wf = {}
+            for k, v in pairs(queryFilters) do wf[k] = v end
+            wf.period = p
+            wf.knownCostOnly = false
+            M.Compute("items", wf)
+        end
+        local warm = M.GetItemDetail(itemID, queryFilters)
+
+        M.Invalidate()
+        local origIterDetail = S.IterDays
+        local coldIterCount = 0
+        S.IterDays = function(...)
+            coldIterCount = coldIterCount + 1
+            return origIterDetail(...)
+        end
+        local cold = M.GetItemDetail(itemID, queryFilters)
+        S.IterDays = origIterDetail
+
+        check(coldIterCount <= 1, label .. " cold GetItemDetail runs at most 1 IterDays pass, got " .. tostring(coldIterCount))
+        check(cold ~= nil and warm ~= nil, label .. " cold and warm details both returned")
+        check(cold.curBasis == warm.curBasis and cold.basisQty == warm.basisQty and cold.smartAvgBuy == warm.smartAvgBuy,
+            label .. " curBasis/basisQty/smartAvgBuy parity")
+        check(cold.expSinceSale == warm.expSinceSale and cold.canSinceSale == warm.canSinceSale and cold.saleRate == warm.saleRate,
+            label .. " expSinceSale/canSinceSale/saleRate parity")
+        check(cold.deBrokenQty == warm.deBrokenQty and cold.deSoldMatsQty == warm.deSoldMatsQty
+            and cold.deIndirectProfit == warm.deIndirectProfit and #(cold.deSoldOutputs or {}) == #(warm.deSoldOutputs or {}),
+            label .. " DE indirect fields parity")
+        check(#(cold.transactions or {}) == #(warm.transactions or {}),
+            label .. " transactions count parity")
+        for _, wk in ipairs({ "d7", "d30", "all" }) do
+            local cw, ww = cold.windows[wk], warm.windows[wk]
+            check(cw.sold == ww.sold and cw.bought == ww.bought
+                and cw.totalSales == ww.totalSales and cw.totalSpent == ww.totalSpent
+                and cw.profit == ww.profit and cw.deBrokenQty == ww.deBrokenQty
+                and cw.deSoldMatsQty == ww.deSoldMatsQty and cw.deIndirectProfit == ww.deIndirectProfit,
+                label .. " window " .. wk .. " parity")
+        end
+    end
+    assertDetailParity(brokenID, { period = "all", char = char }, "Green Lens")
+    assertDetailParity(101, { period = "all" }, "Item 101")
+end

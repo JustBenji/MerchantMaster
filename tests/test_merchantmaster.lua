@@ -1342,8 +1342,10 @@ for _, psr in ipairs(psHot) do
 end
 
 -- 15c. Dashboard displays Hot/Cold ratio + Current AH Qty + Sales/Day + [WH] button on missing recipes
+local prevDashMode15c = MerchantMasterDB.dashboardMode
+MerchantMasterDB.dashboardMode = "classic"
 MerchantMasterDB.dashboardScope = "all"
-SlashCmdList.MERCHANTMASTER("")
+SlashCmdList.MERCHANTMASTER("dashboard")
 local appTbl = ns.app
 if appTbl and appTbl.ui and appTbl.ui.dashCraftRows and appTbl.ui.dashCraftRows[1] and appTbl.ui.dashCraftRows[1].data then
 	local cRow1 = appTbl.ui.dashCraftRows[1]
@@ -1356,6 +1358,8 @@ if appTbl and appTbl.ui and appTbl.ui.dashCraftRows and appTbl.ui.dashCraftRows[
 			"Dashboard Top 5 Craft row displays Hot/Cold badge: " .. tostring(d1.demand.heatBadge))
 	end
 end
+MerchantMasterDB.dashboardMode = prevDashMode15c
+if appTbl and appTbl.syncDashboardMode then appTbl.syncDashboardMode() end
 
 -- 15d. Click [WH] button to open MerchantMasterWowheadWindow with pre-filled Wowhead Forever URL
 check(_G.MerchantMasterWowheadWindow ~= nil, "MerchantMasterWowheadWindow frame created")
@@ -1364,7 +1368,7 @@ local clickedWhBtn = false
 for _, f in ipairs(createdFrames) do
 	if f._regions then
 		for _, reg in ipairs(f._regions) do
-			if reg.GetText and (reg:GetText() or ""):find("WH", 1, true) and f:IsShown() and f._scripts and f._scripts.OnClick then
+			if reg.GetText and reg:GetText() == "WH" and f:IsShown() and f:GetParent() and f:GetParent().whBtn == f and f._scripts and f._scripts.OnClick then
 				if f._scripts.OnEnter then f._scripts.OnEnter(f) end
 				f:Click("LeftButton")
 				clickedWhBtn = true
@@ -1505,10 +1509,14 @@ do
 		"BuildDashboardInsights computes both knownProfitPerDay (Can Do) and potentialProfitPerDay (Potential)")
 	check(insPot.potentialProfitPerDay >= insKnown.knownProfitPerDay,
 		"Potential daily profit >= Known (Can Do) daily profit")
-	SlashCmdList.MERCHANTMASTER("")
+	local prevDashMode16c = MerchantMasterDB.dashboardMode
+	MerchantMasterDB.dashboardMode = "classic"
+	SlashCmdList.MERCHANTMASTER("dashboard")
 	local subProfitTxt = appTbl.ui.dashRoiFs and appTbl.ui.dashRoiFs:GetText() or ""
 	check(subProfitTxt:find("Known (Can Do):", 1, true) ~= nil and subProfitTxt:find("Potential:", 1, true) ~= nil,
 		"Dashboard KPI card displays side-by-side 'Known (Can Do)' vs 'Potential': " .. subProfitTxt)
+	MerchantMasterDB.dashboardMode = prevDashMode16c
+	if appTbl and appTbl.syncDashboardMode then appTbl.syncDashboardMode() end
 
 	-- Restore state
 	SlashCmdList.MERCHANTMASTER("known")
@@ -1744,6 +1752,8 @@ do
 	MerchantMasterDB.priceSource = "live"
 	ns.InvalidatePriceCache()
 
+	local prevDashModeKnown = MerchantMasterDB.dashboardMode
+	MerchantMasterDB.dashboardMode = "classic"
 	MerchantMasterDB.knownRecipesOnly = true
 	MerchantMasterDB.dashboardScope = "smart"
 	api.SetTab("dashboard")
@@ -1759,6 +1769,7 @@ do
 		"Right-hand Best Known Option row switches button from Set Price to Buy Mats")
 
 	MerchantMasterDB.knownRecipesOnly = false
+	MerchantMasterDB.dashboardMode = prevDashModeKnown
 	MerchantMasterDB.priceSource = prevPriceSource
 	app.char.knownSpells = prevKnownSpells
 	MerchantMasterDB.ahPrices["Normal-Horde"] = prevAHPool
@@ -3968,10 +3979,11 @@ end
 
 do
 	local app = ns.app
-	local oldTab, oldCrateRows = app.activeTab, ns.BuildCrateRows
+	local oldTab, oldCrateRows, oldDashMode = app.activeTab, ns.BuildCrateRows, MerchantMasterDB.dashboardMode
 	local crate = { crateID = 999001, crateName = "Test Crate", reagentName = "Strange Dust",
 		reagentQty = 20, tokens = 10 }
 	ns.BuildCrateRows = function() return { crate } end
+	MerchantMasterDB.dashboardMode = "classic"
 	app.panel:Show()
 	app.activeTab = "dashboard"
 	app.refresh()
@@ -3980,7 +3992,7 @@ do
 	check(label:find("Strange Dust 20x", 1, true) and label:find("Price unavailable", 1, true)
 		and not label:find("Buy AH", 1, true) and turnin.valFs:GetText() == "--",
 		"Dashboard labels an unpriced Crate as Price unavailable")
-	ns.BuildCrateRows, app.activeTab = oldCrateRows, oldTab
+	ns.BuildCrateRows, app.activeTab, MerchantMasterDB.dashboardMode = oldCrateRows, oldTab, oldDashMode
 end
 
 do
@@ -4051,8 +4063,9 @@ do
 	end
 
 	local craft, monopoly = recipeRow(regularFortRec), recipeRow(greaterFortRec)
-	local buildInsights = ns.BuildDashboardInsights
+	local buildInsights, oldDashMode = ns.BuildDashboardInsights, db.dashboardMode
 	ns.BuildDashboardInsights = function() return { topCrafts = { craft }, topOutliers = { monopoly } } end
+	db.dashboardMode = "classic"
 	app.setTab("dashboard")
 	ns.BuildDashboardInsights = buildInsights
 	local dashCraft, dashOutlier = ui.dashCraftRows[1], ui.dashOutlierRows[1]
@@ -4067,6 +4080,7 @@ do
 	dashOutlier.nameHover:Click("LeftButton")
 	checkPinned(dashOutlier, "recipe", monopoly.itemID, "Overview after clicking a different item")
 	provider.CloseQuickLook()
+	db.dashboardMode = oldDashMode
 
 	app.setTab("profit_spread")
 	ui.profitSpreadTable.setRows({ craft })
@@ -4867,6 +4881,8 @@ do
 		check(not GameTooltip:IsShown(), "repPlanTable col 3 OnLeave hides tooltip")
 
 		-- dashBasketRows name hover (crate + non-crate entries)
+		local prevDashModeBasket = db.dashboardMode
+		db.dashboardMode = "classic"
 		db.forgedTurnInQueue = { { crateID = 248687, count = 1 } }
 		db.shoppingList = { { itemID = 248687, name = "Waylaid Crate: Journeyman Ore", qty = 1 } }
 		app.setTab("dashboard")
@@ -4884,6 +4900,7 @@ do
 			"dashBasketRows nameHover shows crate item tooltip and crate breakdown")
 		basketCrateRow.nameHover:GetScript("OnLeave")(basketCrateRow.nameHover)
 		check(not GameTooltip:IsShown(), "dashBasketRows nameHover OnLeave hides tooltip")
+		db.dashboardMode = prevDashModeBasket
 
 		-- 6. Post-review checks (#17):
 		-- (a) app.invalidateRecipeStats("skills"/"known") invalidates BuildCrateTooltipData cache

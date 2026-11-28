@@ -3665,31 +3665,6 @@ do local _ = (function()
 			local smartFilterColdItems = (MerchantMasterDB and MerchantMasterDB.smartFilterColdItems ~= nil) and (MerchantMasterDB.smartFilterColdItems ~= false) or (db.smartFilterColdItems ~= false)
 			local subCraftMode = (MerchantMasterDB and MerchantMasterDB.subCraftMode) or db.subCraftMode or "smart"
 			local subCraftOverrides = (MerchantMasterDB and MerchantMasterDB.subCraftOverrides) or db.subCraftOverrides or {}
-			local dummyCtx = {
-				db = db,
-				profKey = profKey,
-				mns = ns,
-				legacy = legacy,
-				charLevel = effCharLv,
-				includeLockedForBrowse = true,
-				allowCooldowns = true,
-				allowedSources = { start = true, trainer = true, vendor = true, ah = true, camp = true, quest = true, gather = true },
-				goalMode = db.goalMode or "smart",
-				sellDays = db.sellDays or 3,
-				applyAHCut = applyAHCut,
-				smartFilterColdItems = smartFilterColdItems,
-				includeVendorSell = (db.includeVendorSell ~= false),
-				useDisenchantRecovery = (db.useDisenchantRecovery == true),
-				playerKnowsEnchanting = (MP.ScanPlayerProfessions and (MP.ScanPlayerProfessions().enchanting ~= nil)) or false,
-				subCraftMode = subCraftMode,
-				subCraftOverrides = subCraftOverrides,
-				trainerCosts = db.trainerCosts or {},
-				playerFaction = (MP.GetPlayerFactionCode and MP.GetPlayerFactionCode()) or "AH",
-				favorUnitPrice = liveFavorUnit,
-				standingID = 8,
-				itemOptionCache = {},
-				subEvCache = {},
-			}
 			local bPal = getProfPalette()
 			local brTextHex = colorHex(bPal and bPal.text, "ffffff")
 			local brSecHex = colorHex(bPal and bPal.textSecondary, "aeaeb2")
@@ -3698,36 +3673,121 @@ do local _ = (function()
 			local brBlueHex = colorHex(bPal and (bPal.textBlue or bPal.accentBlue), "0a84ff")
 			local brOrangeHex = colorHex(bPal and bPal.accentOrange, "ff9230")
 			local brRedHex = colorHex(bPal and bPal.accentRed, "ff453a")
-			local bRows = {}
-			for _, rec in ipairs(raw) do
-				local known = MP.IsRecipeKnownByPlayer(rec)
-				local isIntrinsicKnown = known or (rec.src == "start") or (rec.src == "gather")
-				if (not filterKnownOnly) or isIntrinsicKnown then
-					local effReq, effRlv = MP.GetEffectiveRecipeReqs(rec, db, profKey)
-					local ev = MP.EvaluateRecipeForSolver(rec, dummyCtx)
-					local fallbackFav = (rec.src == "camp") and ((rec.fav and rec.fav > 0) and rec.fav or 30) or nil
-					local srcDisplay = (ev and ev.sourceDisplay) or (ev and ev.unlockLabel)
-					if not srcDisplay then
-						if rec.src == "camp" then
-							srcDisplay = string.format("Vendor (%d Favor)", fallbackFav)
-						elseif rec.src == "vendor" then
-							local vEff
-							if ns.GetRecipeVendorBuyPrice then
-								vEff = ns.GetRecipeVendorBuyPrice(rec.ri, rec.rbuy, legacy.bartering)
-							end
-							if not vEff and rec.rbuy and rec.rbuy > 0 then
-								vEff = math.floor(rec.rbuy * (legacy.vendorMult or 1) + 0.5)
-							end
-							local vCoin = (vEff and vEff > 0) and formatMoney(vEff, true) or nil
-							srcDisplay = vCoin and ("Vendor (" .. vCoin .. ")") or "Vendor Scroll"
-						elseif rec.src == "trainer" then srcDisplay = "Trainer"
-						elseif rec.src == "ah" then srcDisplay = "AH Scroll"
-						elseif rec.src == "quest" then srcDisplay = "Quest"
-						elseif rec.src == "start" then srcDisplay = "Starter"
-						elseif rec.src == "gather" then srcDisplay = "World Veins"
-						else srcDisplay = rec.src or "Drop" end
+			local priceRev = (type(ns.GetPriceDataRevision) == "function" and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
+			local playerFaction = (MP.GetPlayerFactionCode and MP.GetPlayerFactionCode()) or "AH"
+			local playerKnowsEnchanting = (MP.ScanPlayerProfessions and (MP.ScanPlayerProfessions().enchanting ~= nil)) or false
+			local function smallMapSig(tbl)
+				if type(tbl) ~= "table" then return "" end
+				local parts = {}
+				for k, v in pairs(tbl) do
+					if type(v) == "table" then
+						parts[#parts + 1] = tostring(k) .. ":" .. smallMapSig(v)
+					elseif v ~= nil and v ~= false then
+						parts[#parts + 1] = tostring(k) .. "=" .. tostring(v)
 					end
-					if search == "" or rec.n:lower():find(search, 1, true) or (rec.src and rec.src:lower():find(search, 1, true)) or (srcDisplay and srcDisplay:lower():find(search, 1, true)) then
+				end
+				table.sort(parts)
+				return table.concat(parts, ",")
+			end
+			local trainerReqSig = table.concat({
+				smallMapSig(db.trainerCosts),
+				smallMapSig(db.trainerReqs and db.trainerReqs[profKey]),
+				smallMapSig(db.trainerReqsByName),
+				smallMapSig(db.liveThresholds),
+				smallMapSig(subCraftOverrides),
+			}, ";")
+			local knownSigAcc, knownSigCnt = 0, 0
+			for idx, rec in ipairs(raw) do
+				if MP.IsRecipeKnownByPlayer(rec) then
+					knownSigCnt = knownSigCnt + 1
+					knownSigAcc = knownSigAcc + (tonumber(rec.s) or idx) * (knownSigCnt % 17 + 1)
+				end
+			end
+			local browseCacheKey = table.concat({
+				tostring(profKey),
+				tostring(fromSkill),
+				tostring(effCharLv),
+				tostring(filterKnownOnly),
+				tostring(priceRev),
+				tostring(ns.GetItemMarketPrice),
+				tostring(ns.GetNumListed),
+				tostring(liveFavorUnit),
+				tostring(db.goalMode or "smart"),
+				tostring(db.sellDays or 3),
+				tostring(db.includeVendorSell ~= false),
+				tostring(db.useDisenchantRecovery == true),
+				tostring(applyAHCut),
+				tostring(smartFilterColdItems),
+				tostring(subCraftMode),
+				tostring(playerFaction),
+				tostring(playerKnowsEnchanting),
+				tostring(legacy.overtime),
+				tostring(legacy.bartering),
+				tostring(legacy.vendorMult),
+				tostring(legacy.favorYieldMult),
+				tostring(knownSigCnt) .. ":" .. tostring(knownSigAcc),
+				trainerReqSig,
+				brTextHex, brSecHex, brMutedHex, brGreenHex, brBlueHex, brOrangeHex, brRedHex,
+			}, "|")
+
+			local allRows
+			if papp._browseCache and papp._browseCache.key == browseCacheKey then
+				allRows = papp._browseCache.rows
+			else
+				local dummyCtx = {
+					db = db,
+					profKey = profKey,
+					mns = ns,
+					legacy = legacy,
+					charLevel = effCharLv,
+					includeLockedForBrowse = true,
+					allowCooldowns = true,
+					allowedSources = { start = true, trainer = true, vendor = true, ah = true, camp = true, quest = true, gather = true },
+					goalMode = db.goalMode or "smart",
+					sellDays = db.sellDays or 3,
+					applyAHCut = applyAHCut,
+					smartFilterColdItems = smartFilterColdItems,
+					includeVendorSell = (db.includeVendorSell ~= false),
+					useDisenchantRecovery = (db.useDisenchantRecovery == true),
+					playerKnowsEnchanting = playerKnowsEnchanting,
+					subCraftMode = subCraftMode,
+					subCraftOverrides = subCraftOverrides,
+					trainerCosts = db.trainerCosts or {},
+					playerFaction = playerFaction,
+					favorUnitPrice = liveFavorUnit,
+					standingID = 8,
+					itemOptionCache = {},
+					subEvCache = {},
+				}
+				allRows = {}
+				for _, rec in ipairs(raw) do
+					local known = MP.IsRecipeKnownByPlayer(rec)
+					local isIntrinsicKnown = known or (rec.src == "start") or (rec.src == "gather")
+					if (not filterKnownOnly) or isIntrinsicKnown then
+						local effReq, effRlv = MP.GetEffectiveRecipeReqs(rec, db, profKey)
+						local ev = MP.EvaluateRecipeForSolver(rec, dummyCtx)
+						local fallbackFav = (rec.src == "camp") and ((rec.fav and rec.fav > 0) and rec.fav or 30) or nil
+						local srcDisplay = (ev and ev.sourceDisplay) or (ev and ev.unlockLabel)
+						if not srcDisplay then
+							if rec.src == "camp" then
+								srcDisplay = string.format("Vendor (%d Favor)", fallbackFav)
+							elseif rec.src == "vendor" then
+								local vEff
+								if ns.GetRecipeVendorBuyPrice then
+									vEff = ns.GetRecipeVendorBuyPrice(rec.ri, rec.rbuy, legacy.bartering)
+								end
+								if not vEff and rec.rbuy and rec.rbuy > 0 then
+									vEff = math.floor(rec.rbuy * (legacy.vendorMult or 1) + 0.5)
+								end
+								local vCoin = (vEff and vEff > 0) and formatMoney(vEff, true) or nil
+								srcDisplay = vCoin and ("Vendor (" .. vCoin .. ")") or "Vendor Scroll"
+							elseif rec.src == "trainer" then srcDisplay = "Trainer"
+							elseif rec.src == "ah" then srcDisplay = "AH Scroll"
+							elseif rec.src == "quest" then srcDisplay = "Quest"
+							elseif rec.src == "start" then srcDisplay = "Starter"
+							elseif rec.src == "gather" then srcDisplay = "World Veins"
+							else srcDisplay = rec.src or "Drop" end
+						end
 						local effReqT, effYT, effGT, effGrT = MP.GetEffectiveThresholds(rec, db)
 						effReq = effReqT
 						local p = MP.GetSkillUpChance(rec, fromSkill, legacy.overtime, effReq, db)
@@ -3785,7 +3845,7 @@ do local _ = (function()
 								end
 							end
 						end
-						bRows[#bRows + 1] = {
+						allRows[#allRows + 1] = {
 							prof = profKey,
 							spellID = rec.s,
 							itemID = rec.i or 0,
@@ -3818,7 +3878,23 @@ do local _ = (function()
 							status = statusStr,
 							statusSort = statusSort,
 							ev = ev,
+							_searchText = (tostring(rec.n or "") .. "\0" .. tostring(rec.src or "") .. "\0" .. tostring(srcDisplay or "")):lower(),
 						}
+					end
+				end
+				papp._browseCache = { key = browseCacheKey, rows = allRows }
+			end
+
+			local bRows = {}
+			if search == "" then
+				for i = 1, #allRows do
+					bRows[i] = allRows[i]
+				end
+			else
+				for i = 1, #allRows do
+					local row = allRows[i]
+					if row._searchText:find(search, 1, true) then
+						bRows[#bRows + 1] = row
 					end
 				end
 			end
@@ -3831,6 +3907,7 @@ do local _ = (function()
 	end
 
 	function papp.resetFilters()
+		papp._browseCache = nil
 		local db = getProfDB()
 		local tab = mmApp.activeTab
 		if mmApp.resetSubCraftMode then mmApp.resetSubCraftMode() end

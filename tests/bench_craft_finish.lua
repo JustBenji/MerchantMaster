@@ -396,7 +396,7 @@ end
 local function setupCraftSession()
 	resetBags()
 	clearTimers()
-	app.setBuiltInAHBuyer(true)
+	if app.setBuiltInAHBuyer then app.setBuiltInAHBuyer(true) end
 	MerchantMasterDB.ahBuyerExtended = true
 	if app.panel and app.panel.Hide then app.panel:Hide() end
 

@@ -2259,6 +2259,7 @@ function Brief.Create(parent, opts)
     -- Theme & Skin Repaint (Dark, Light, and all 5 Warcraft Skins)
     -----------------------------------------------------------------------------------------------
     function view:ApplyTheme()
+        state.lastRenderSig = nil
         local pal = getPalette()
         applyFont(greetingFs, 15, "semibold")
         setTextColor(greetingFs, pal.text)
@@ -2283,15 +2284,47 @@ function Brief.Create(parent, opts)
     -- Full Data Refresh
     -----------------------------------------------------------------------------------------------
     function view:Refresh(force, nowOverride)
-        if force then Brief.InvalidateCache() end
+        if force then
+            state.lastRenderSig = nil
+            Brief.InvalidateCache()
+        end
         state.lastNowOverride = nowOverride
         local now = nowSec(nowOverride)
         local econKey = resolveEconKey(opts.getEconKey and opts.getEconKey())
+        local freshness = (type(opts.getFreshnessText) == "function" and opts.getFreshnessText())
+            or ((ns.Pricing and ns.Pricing.GetSnapshotFreshnessLabel and ns.Pricing.GetSnapshotFreshnessLabel(econKey)) or "Live")
+        local priceRev = (type(ns.GetPriceDataRevision) == "function" and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
+        local Store = ns.Analytics and ns.Analytics.Store
+        local storeVer = (Store and Store.version) or 0
+        local ahVer = (Store and Store.ahSalesVersion) or 0
+        local accVer = (Store and Store.accountingVersion) or 0
+        local gold = (_G.GetMoney and safeNum(_G.GetMoney(), 0)) or 0
+        local dbRef = type(_G.MerchantMasterDB) == "table" and _G.MerchantMasterDB or nil
+        local themeKey = ((ns.Theme and type(ns.Theme.GetKey) == "function") and tostring(ns.Theme.GetKey()))
+            or (dbRef and (tostring(dbRef.theme or "") .. ":" .. tostring(dbRef.uiSkin or "")))
+            or ""
+        local renderSig = table.concat({
+            tostring(econKey),
+            tostring(freshness),
+            tostring(priceRev),
+            tostring(storeVer),
+            tostring(ahVer),
+            tostring(accVer),
+            tostring(gold),
+            tostring(state.rangeKey),
+            tostring(state.wealthMode),
+            tostring(state.mode),
+            tostring(state.width),
+            tostring(state.height),
+            tostring(floor(now / 86400)),
+            themeKey,
+        }, "|")
+        if not force and nowOverride == nil and state.summary ~= nil and state.lastRenderSig == renderSig then
+            return
+        end
         local pal = getPalette()
 
         greetingFs:SetText(Brief.GetGreeting(nil, opts.getPlayerName and opts.getPlayerName()))
-        local freshness = (type(opts.getFreshnessText) == "function" and opts.getFreshnessText())
-            or ((ns.Pricing and ns.Pricing.GetSnapshotFreshnessLabel and ns.Pricing.GetSnapshotFreshnessLabel(econKey)) or "Live")
         metaPill:SetVariant("neutral", econKey .. " | " .. tostring(freshness))
         fitBannerHeader()
 
@@ -2305,7 +2338,8 @@ function Brief.Create(parent, opts)
         state.wealthSeries = wealthSeries
         state.effectiveWealthMode = wealthSeries.mode
         state.alerts = alerts
-        state.lastPriceRev = (type(ns.GetPriceDataRevision) == "function" and ns.GetPriceDataRevision()) or ns.priceCacheEpoch or 0
+        state.lastPriceRev = priceRev
+        state.lastRenderSig = (nowOverride == nil) and renderSig or nil
 
         -- Sync wealth toggle silently
         if wealthToggle and wealthToggle.SetActive then
@@ -2417,6 +2451,7 @@ function Brief.Create(parent, opts)
     function view:SetRange(rangeKey, silent)
         if not RANGE_DAYS[rangeKey] then return end
         state.rangeKey = rangeKey
+        state.lastRenderSig = nil
         if type(_G.MerchantMasterDB) == "table" then
             _G.MerchantMasterDB.dashboardBriefRange = rangeKey
         end
@@ -2429,6 +2464,7 @@ function Brief.Create(parent, opts)
 
     function view:SetWealthMode(mode, silent)
         state.wealthMode = (mode == "daily" or mode == "hourly") and mode or "auto"
+        state.lastRenderSig = nil
         if wealthToggle and wealthToggle.SetActive and (mode == "daily" or mode == "hourly") then
             wealthToggle:SetActive(mode, silent == true)
         elseif not silent then
@@ -2437,6 +2473,7 @@ function Brief.Create(parent, opts)
     end
 
     function view:Invalidate()
+        state.lastRenderSig = nil
         Brief.InvalidateCache()
     end
 

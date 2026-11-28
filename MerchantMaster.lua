@@ -2196,7 +2196,7 @@ tinsert(UISpecialFrames, panel:GetName())
 local winChrome = ns.Theme.DecorateMainWindow(panel, {
 	fableShell = true,
 	refreshAH = false,
-	onLayout = function() if app.layoutWindow then app.layoutWindow() end end,
+	onLayout = function() if app.layoutWindow then app.layoutWindow(true) end end,
 	baseW = PANEL_W,
 	baseH = PANEL_H,
 	defaultW = PANEL_W,
@@ -2472,7 +2472,9 @@ function app.syncUiSkinWidgets()
 	updateUiSkinButton(app.ui.uiSkinBtn)
 	updateUiSkinButton(app.ui.optUiSkinBtn)
 	if app.ui.optSlashFs and app.buildSlashHelp then app.ui.optSlashFs:SetText(app.buildSlashHelp()) end
-	if app.refreshSkinLayout then app.refreshSkinLayout() end
+	app._lastSkinLayoutSig = nil
+	app._lastLayoutGeomSig = nil
+	if app.refreshSkinLayout then app.refreshSkinLayout(true) end
 	if app.consoleProvider and app.consoleProvider.SyncSettings then app.consoleProvider.SyncSettings() end
 end
 
@@ -19192,7 +19194,6 @@ local function applyPanelLayout()
 	if app.ui.watchlistView and app.ui.watchlistView:IsShown() ~= showWatchlist then
 		app.ui.watchlistView:SetShown(showWatchlist)
 	end
-	if app.watchlistProvider then app.watchlistProvider.Layout(mainArea:GetWidth(), mainArea:GetHeight()) end
 	app.ui.profitSpreadView:SetShown(t == "profit_spread")
 	app.ui.outliersView:SetShown(t == "outliers")
 	app.ui.cratesView:SetShown(t == "crates")
@@ -19202,22 +19203,18 @@ local function applyPanelLayout()
 	if app.ui.recipesView and app.ui.recipesView:IsShown() ~= showRecipes then
 		app.ui.recipesView:SetShown(showRecipes)
 	end
-	if app.superListProvider then app.superListProvider.Layout(mainArea:GetWidth(), mainArea:GetHeight()) end
 	local showAllItems = (t == "all_items")
 	if app.ui.allItemsView and app.ui.allItemsView:IsShown() ~= showAllItems then
 		app.ui.allItemsView:SetShown(showAllItems)
 	end
-	if app.allItemsProvider then app.allItemsProvider.Layout(mainArea:GetWidth(), mainArea:GetHeight()) end
 	local showVendorCrafter = (t == "vendor_crafter")
 	if app.ui.vendorCrafterView and app.ui.vendorCrafterView:IsShown() ~= showVendorCrafter then
 		app.ui.vendorCrafterView:SetShown(showVendorCrafter)
 	end
-	if app.vendorCrafterProvider then app.vendorCrafterProvider.Layout(mainArea:GetWidth(), mainArea:GetHeight()) end
 	local showDisenchantCrafter = (t == "disenchant_crafter")
 	if app.ui.disenchantCrafterView and app.ui.disenchantCrafterView:IsShown() ~= showDisenchantCrafter then
 		app.ui.disenchantCrafterView:SetShown(showDisenchantCrafter)
 	end
-	if app.disenchantCrafterProvider then app.disenchantCrafterProvider.Layout(mainArea:GetWidth(), mainArea:GetHeight()) end
 	app.ui.repView:SetShown(t == "rep")
 	app.ui.calcView:SetShown(isCalcView)
 	if app.ui.deepAnalysisView then app.ui.deepAnalysisView:SetShown(t == "deep_analysis") end
@@ -19241,7 +19238,7 @@ local function applyPanelLayout()
 	elseif app.ui.consoleView then
 		app.ui.consoleView:SetShown(showConsole)
 	end
-	if panel:IsShown() and app.layoutWindow then app.layoutWindow() end
+	if (app._inRefresh or 0) == 0 and panel:IsShown() and app.layoutWindow then app.layoutWindow() end
 
 	-- Contextual Left Sidebar Panel Options
 	if activeMenu == "professor" then
@@ -19308,7 +19305,7 @@ local function applyPanelLayout()
 	if openDD and openDD:IsShown() and openDD.owner and not openDD.owner:IsShown() then
 		ns.Theme.CloseDropDown()
 	end
-	if app.refreshSkinLayout then app.refreshSkinLayout() end
+	if (app._inRefresh or 0) == 0 and app.refreshSkinLayout then app.refreshSkinLayout() end
 end
 app.applyPanelLayout = applyPanelLayout
 
@@ -19772,12 +19769,42 @@ do
 	header:SetPoint("TOPRIGHT", sidebar, "TOPRIGHT", 0, 0)
 	header:SetHeight(64)
 
-	function app.refreshSkinLayout()
+	local function syncSkinNavHighlight(on, pal)
+		local curActive = app.ui._activeNavKey
+		if app._lastSkinNavActive == curActive and app._lastSkinNavOn == on then return end
+		app._lastSkinNavActive = curActive
+		app._lastSkinNavOn = on
+		pal = pal or getPal()
+		for _, nb in ipairs(app.ui.navOrder or {}) do
+			local active = nb.key == curActive
+			material(nb, "skinActive", "nav_active", on and active)
+			perimeter(nb, on, active and pal.frameBorder or pal.frameInnerBorder)
+			nb.activeBg:SetShown(not on and active)
+		end
+	end
+
+	function app.refreshSkinLayout(force)
 		local on = T.IsCustomSkin and T.IsCustomSkin() or false
-		local pal = getPal()
-		local l, top, r, bottom = T.GetSkinInset()
 		local compact = app._minimized and app.activeTab ~= "bags"
 		panel._mmMinimized = compact and true or false
+		local isBags = (app.activeTab == "bags")
+		local skinKey = (T.GetSkin and T.GetSkin()) or "goblin"
+		local modeKey = (T.GetMode and T.GetMode()) or "dark"
+		local tableStyleKey = (T.GetTableStyle and T.GetTableStyle()) or "t5_ruled"
+		local sig = skinKey .. "|" .. modeKey .. "|" .. tableStyleKey .. "|" .. tostring(on) .. "|" .. tostring(compact) .. "|" .. tostring(isBags)
+		local forced = (force ~= nil and force ~= false)
+		if not forced and app._lastSkinLayoutSig == sig then
+			syncSkinNavHighlight(on)
+			if app.ui._syncSkinBasketCount then app.ui._syncSkinBasketCount() end
+			if on and compact then sidebar:Hide(); rightPane:Hide()
+			elseif compact and not isBags then sidebar:Show(); rightPane:Show() end
+			return
+		end
+		app._lastSkinLayoutSig = sig
+		app._lastSkinNavActive = app.ui._activeNavKey
+		app._lastSkinNavOn = on
+		local pal = getPal()
+		local l, top, r, bottom = T.GetSkinInset()
 		-- Minimized chrome needs a usable title strip inside its short shell.
 		if compact and on then top, bottom = 8, 8 end
 		sidebar:ClearAllPoints()
@@ -20086,8 +20113,8 @@ do
 		if winChrome.warcraftChrome and winChrome.warcraftChrome.Layout then winChrome.warcraftChrome:Layout() end
 		if app.syncSkinTiledCoords then app.syncSkinTiledCoords() end
 	end
-	T.RegisterWidget(controls, app.refreshSkinLayout)
-	panel:HookScript("OnSizeChanged", function() app.refreshSkinLayout() end)
+	T.RegisterWidget(controls, function() if app.refreshSkinLayout then app.refreshSkinLayout(true) end end)
+	panel:HookScript("OnSizeChanged", function() if app.refreshSkinLayout then app.refreshSkinLayout(true) end end)
 end
 
 if winChrome and winChrome.maximizeBtn and winChrome.maximizeBtn.HookScript then
@@ -20787,6 +20814,20 @@ local function refreshPanelImpl()
 	end
 
 	if t == "dashboard" then
+		local effDashScope = knownRecipesOnly and "known" or (db.dashboardScope or "smart")
+		app.ui.dashScopeBtn:SetText(findLabel(ns.DASHBOARD_SCOPES, effDashScope))
+		local dashMode = (app.syncDashboardMode and app.syncDashboardMode())
+			or (app.getDashboardMode and app.getDashboardMode())
+			or "brief"
+		if dashMode == "bloomberg" or dashMode == "brief" then
+			if app.ui.dashBloombergView and app.ui.dashBloombergView:IsShown() and app.ui.dashBloombergView.Refresh then
+				app.ui.dashBloombergView:Refresh(false)
+			elseif app.ui.dashBriefView and app.ui.dashBriefView:IsShown() and app.ui.dashBriefView.Refresh then
+				app.ui.dashBriefView:Refresh(false)
+			end
+			app.ui.statusText:SetText(scanBanner or string.format("%s - %s",
+				(dashMode == "bloomberg") and "GoblinTV" or "Morning Brief", econInfo.label))
+		else
 		if app.ui.dashOnboardingCard then
 			local showOnboard = app.shouldShowOnboarding()
 			app.ui.dashOnboardingCard:SetShown(showOnboard)
@@ -20794,8 +20835,6 @@ local function refreshPanelImpl()
 				app.ui.dashOnboardNoAutoOpenCheck:SetChecked(isAutoOpenAtAHDisabled())
 			end
 		end
-		local effDashScope = knownRecipesOnly and "known" or (db.dashboardScope or "smart")
-		app.ui.dashScopeBtn:SetText(findLabel(ns.DASHBOARD_SCOPES, effDashScope))
 		local ins = ns.BuildDashboardInsights({
 			dashboardScope = db.dashboardScope or "smart",
 			knownRecipesOnly = knownRecipesOnly,
@@ -21107,20 +21146,10 @@ local function refreshPanelImpl()
 		if app.syncDashboardBasketCard then
 			app.syncDashboardBasketCard()
 		end
-		if app.syncDashboardMode then app.syncDashboardMode() end
-		if app.ui.dashBloombergView and app.ui.dashBloombergView:IsShown() and app.ui.dashBloombergView.Refresh then
-			app.ui.dashBloombergView:Refresh(false)
-		end
-		if app.ui.dashBriefView and app.ui.dashBriefView:IsShown() and app.ui.dashBriefView.Refresh then
-			app.ui.dashBriefView:Refresh(false)
-		end
-
-		if panel:IsShown() and app.layoutWindow then
-			app.layoutWindow()
-		end
 
 		app.ui.statusText:SetText(scanBanner or string.format("Expected Profit: %s / day (%d Guaranteed + %d %s · %s)",
 			moneyText(ins.expectedProfitPerDay or 0, true), #ins.topCrafts, #ins.topOutliers, rightTag, econInfo.label))
+		end
 
 	elseif t == "watchlist" then
 		if app.watchlistProvider and app.watchlistProvider.Refresh then
@@ -21744,104 +21773,143 @@ local function refreshPanelImpl()
 end
 
 -- This path changes geometry only; it never calls refresh/evaluation providers.
-function app.layoutWindow()
-	if app.refreshSkinLayout then app.refreshSkinLayout() end
+function app.layoutWindow(force)
+	local forced = (force ~= false)
+	if app.refreshSkinLayout then app.refreshSkinLayout(forced == true) end
 	if not panel:IsShown() or app.activeTab == "bags" or app._minimized then return end
 	if app.syncToolbarCharScope then app.syncToolbarCharScope() end
 	local width = mainArea:GetWidth()
 	local height = mainArea:GetHeight()
-	local custom = ns.Theme.IsCustomSkin and ns.Theme.IsCustomSkin()
-	local kpiW = math.max(180, math.floor((width - 32) / 3))
-	for _, kpiList in ipairs({ app.ui.dashKpis, app.ui.spreadKpis, app.ui.cratesKpis, app.ui.forgedKpis }) do
-		if kpiList and #kpiList >= 2 then
-			kpiList[1].frame:SetWidth(kpiW)
-			kpiList[2].frame:SetWidth(kpiW)
+	local T = ns.Theme
+	local custom = T.IsCustomSkin and T.IsCustomSkin()
+	local t = app.activeTab
+	local activeDashMode = (t == "dashboard" and app.getDashboardMode) and app.getDashboardMode() or ""
+	local onboardShown = (t == "dashboard" and activeDashMode ~= "bloomberg" and activeDashMode ~= "brief"
+		and app.ui.dashOnboardingCard and app.ui.dashOnboardingCard:IsShown()) and true or false
+	local geomSig = string.format("%d|%d|%s|%s|%s|%s",
+		math.floor((width or 0) + 0.5),
+		math.floor((height or 0) + 0.5),
+		tostring(T.GetSkin and T.GetSkin() or ""),
+		tostring(T.GetMode and T.GetMode() or ""),
+		tostring(T.GetTableStyle and T.GetTableStyle() or ""),
+		tostring(custom == true))
+	local geomChanged = forced or (app._lastLayoutGeomSig ~= geomSig)
+	if geomChanged then
+		app._lastLayoutGeomSig = geomSig
+		app._viewLayoutSig = {}
+		local kpiW = math.max(180, math.floor((width - 32) / 3))
+		for _, kpiList in ipairs({ app.ui.dashKpis, app.ui.spreadKpis, app.ui.cratesKpis, app.ui.forgedKpis }) do
+			if kpiList and #kpiList >= 2 then
+				kpiList[1].frame:SetWidth(kpiW)
+				kpiList[2].frame:SetWidth(kpiW)
+			end
+		end
+		if app.syncSkinTiledCoords then app.syncSkinTiledCoords() end
+	end
+
+	app._viewLayoutSig = app._viewLayoutSig or {}
+	local viewSig = geomSig .. "|" .. tostring(activeDashMode) .. "|" .. tostring(onboardShown)
+	if not forced and app._viewLayoutSig[t] == viewSig then
+		return
+	end
+	app._viewLayoutSig[t] = viewSig
+
+	if t == "dashboard" then
+		if activeDashMode == "bloomberg" then
+			if app.ensureDashboardBloomberg then app.ensureDashboardBloomberg() end
+			if app.ui.dashBloombergView and app.ui.dashBloombergView.Layout then
+				app.ui.dashBloombergView:Layout(width, height)
+			end
+		elseif activeDashMode == "brief" then
+			if app.ensureDashboardBrief then app.ensureDashboardBrief() end
+			if app.ui.dashBriefView and app.ui.dashBriefView.Layout then
+				app.ui.dashBriefView:Layout(width, height)
+			end
+		else
+			local kpiW = math.max(180, math.floor((width - 32) / 3))
+			local dashHost = app.ui.dashClassicBody or app.ui.dashClassicWrap or app.ui.dashboardView
+			local dashKpis = app.ui.dashKpis
+			local dashGap = custom and 10 or 16
+			local dashKpiW = custom and math.floor((width - 20) / 3) or kpiW
+			for i = 1, 2 do dashKpis[i].frame:SetWidth(dashKpiW) end
+			dashKpis[2].frame:ClearAllPoints()
+			dashKpis[2].frame:SetPoint("TOPLEFT", dashKpis[1].frame, "TOPRIGHT", dashGap, 0)
+			dashKpis[3].frame:ClearAllPoints()
+			dashKpis[3].frame:SetPoint("TOPLEFT", dashKpis[2].frame, "TOPRIGHT", dashGap, 0)
+			dashKpis[3].frame:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, 0)
+			if app.ui.dashLeftCard then
+				local gap, top = custom and 9 or 16, custom and 78 or 120
+				local cardsTop = top
+				if onboardShown then
+					local obH = 82
+					app.ui.dashOnboardingCard:ClearAllPoints()
+					app.ui.dashOnboardingCard:SetPoint("TOPLEFT", dashHost, "TOPLEFT", 0, -top)
+					app.ui.dashOnboardingCard:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, -top)
+					app.ui.dashOnboardingCard:SetHeight(obH)
+					cardsTop = top + obH + gap
+				end
+				local halfW = math.max(240, math.floor((width - gap) / 2))
+				local dashH = math.max(360, (height or 642) - 38)
+				local availH = math.max(320, dashH - cardsTop)
+				local row2H = math.max(onboardShown and 190 or 238, math.floor((availH - gap) * 0.474))
+				if row2H > 286 then row2H = 286 end
+				if custom then row2H = math.max(150, math.floor((dashH - cardsTop - gap) / 2)) end
+				app.ui.dashLeftCard:ClearAllPoints()
+				app.ui.dashLeftCard:SetPoint("TOPLEFT", dashHost, "TOPLEFT", 0, -cardsTop)
+				app.ui.dashRightCard:ClearAllPoints()
+				app.ui.dashRightCard:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, -cardsTop)
+				app.ui.dashLeftCard:SetSize(halfW, row2H)
+				app.ui.dashRightCard:SetSize(halfW, row2H)
+				if app.ui.dashTurninCard then
+					app.ui.dashTurninCard:ClearAllPoints()
+					app.ui.dashTurninCard:SetPoint("TOPLEFT", dashHost, "TOPLEFT", 0, -cardsTop - row2H - gap)
+					app.ui.dashTurninCard:SetPoint("BOTTOMLEFT", dashHost, "BOTTOMLEFT", 0, 0)
+					app.ui.dashTurninCard:SetWidth(halfW)
+				end
+				if app.ui.dashBasketCard then
+					app.ui.dashBasketCard:ClearAllPoints()
+					app.ui.dashBasketCard:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, -cardsTop - row2H - gap)
+					app.ui.dashBasketCard:SetPoint("BOTTOMRIGHT", dashHost, "BOTTOMRIGHT", 0, 0)
+					app.ui.dashBasketCard:SetWidth(halfW)
+				end
+				local show5th = (row2H >= 280)
+				if app.ui.dashCraftRows and app.ui.dashCraftRows[5] then
+					app.ui.dashCraftRows[5]:SetShown(show5th and app.ui.dashCraftRows[5].data ~= nil)
+				end
+				if app.ui.dashOutlierRows and app.ui.dashOutlierRows[5] then
+					app.ui.dashOutlierRows[5]:SetShown(show5th and app.ui.dashOutlierRows[5].data ~= nil)
+				end
+			end
+			if app.refreshDashKpiLayout then app.refreshDashKpiLayout() end
+			if app.refreshDashRowIcons then app.refreshDashRowIcons() end
+		end
+	elseif t == "recipes" then
+		if app.superListProvider then app.superListProvider.Layout(width, height) end
+	elseif t == "vendor_crafter" then
+		if app.vendorCrafterProvider then app.vendorCrafterProvider.Layout(width, height) end
+	elseif t == "disenchant_crafter" then
+		if app.disenchantCrafterProvider then app.disenchantCrafterProvider.Layout(width, height) end
+	elseif t == "all_items" then
+		if app.allItemsProvider then app.allItemsProvider.Layout(width, height) end
+	elseif t == "watchlist" then
+		if app.watchlistProvider then app.watchlistProvider.Layout(width, height) end
+	elseif t == "sniper_gap" or t == "sniper_vendor" or t == "sniper_de" then
+		if app.sniperProvider and app.sniperProvider.Layout then app.sniperProvider.Layout() end
+	elseif type(t) == "string" and t:sub(1, 8) == "console_" then
+		if app.consoleProvider and app.consoleProvider.Layout then app.consoleProvider.Layout() end
+	elseif type(t) == "string" and t:sub(1, 3) == "an_" then
+		ns.Window.LayoutAnalytics(ns.Analytics, width, height)
+	elseif t == "deep_analysis" then
+		if ns.DeepAnalysis and ns.DeepAnalysis.Layout then ns.DeepAnalysis.Layout(width, height) end
+	elseif type(t) == "string" and t:sub(1, 5) == "prof_" then
+		if app.professorProvider and app.professorProvider.layout then app.professorProvider.layout() end
+	else
+		for _, tbl in ipairs(app.ui.resizeTables or {}) do
+			if tbl ~= app.ui.recipesTable and tbl ~= app.ui.vendorCrafterTable and tbl ~= app.ui.disenchantCrafterTable and (not tbl.resizeParent.IsVisible or tbl.resizeParent:IsVisible()) then
+				ns.Window.LayoutTable(tbl, tbl.headerBar:GetWidth(), tbl.professor and 0 or 1)
+			end
 		end
 	end
-	local dashHost = app.ui.dashClassicBody or app.ui.dashClassicWrap or app.ui.dashboardView
-	local dashKpis = app.ui.dashKpis
-	local dashGap = custom and 10 or 16
-	local dashKpiW = custom and math.floor((width - 20) / 3) or kpiW
-	for i = 1, 2 do dashKpis[i].frame:SetWidth(dashKpiW) end
-	dashKpis[2].frame:ClearAllPoints()
-	dashKpis[2].frame:SetPoint("TOPLEFT", dashKpis[1].frame, "TOPRIGHT", dashGap, 0)
-	dashKpis[3].frame:ClearAllPoints()
-	dashKpis[3].frame:SetPoint("TOPLEFT", dashKpis[2].frame, "TOPRIGHT", dashGap, 0)
-	dashKpis[3].frame:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, 0)
-	if app.ui.dashLeftCard then
-		local gap, top = custom and 9 or 16, custom and 78 or 120
-		local onboardShown = (app.ui.dashOnboardingCard and app.ui.dashOnboardingCard:IsShown()) and true or false
-		local cardsTop = top
-		if onboardShown then
-			local obH = 82
-			app.ui.dashOnboardingCard:ClearAllPoints()
-			app.ui.dashOnboardingCard:SetPoint("TOPLEFT", dashHost, "TOPLEFT", 0, -top)
-			app.ui.dashOnboardingCard:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, -top)
-			app.ui.dashOnboardingCard:SetHeight(obH)
-			cardsTop = top + obH + gap
-		end
-		local halfW = math.max(240, math.floor((width - gap) / 2))
-		local dashH = math.max(360, (height or 642) - 38)
-		local availH = math.max(320, dashH - cardsTop)
-		local row2H = math.max(onboardShown and 190 or 238, math.floor((availH - gap) * 0.474))
-		if row2H > 286 then row2H = 286 end
-		if custom then row2H = math.max(150, math.floor((dashH - cardsTop - gap) / 2)) end
-		app.ui.dashLeftCard:ClearAllPoints()
-		app.ui.dashLeftCard:SetPoint("TOPLEFT", dashHost, "TOPLEFT", 0, -cardsTop)
-		app.ui.dashRightCard:ClearAllPoints()
-		app.ui.dashRightCard:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, -cardsTop)
-		app.ui.dashLeftCard:SetSize(halfW, row2H)
-		app.ui.dashRightCard:SetSize(halfW, row2H)
-		if app.ui.dashTurninCard then
-			app.ui.dashTurninCard:ClearAllPoints()
-			app.ui.dashTurninCard:SetPoint("TOPLEFT", dashHost, "TOPLEFT", 0, -cardsTop - row2H - gap)
-			app.ui.dashTurninCard:SetPoint("BOTTOMLEFT", dashHost, "BOTTOMLEFT", 0, 0)
-			app.ui.dashTurninCard:SetWidth(halfW)
-		end
-		if app.ui.dashBasketCard then
-			app.ui.dashBasketCard:ClearAllPoints()
-			app.ui.dashBasketCard:SetPoint("TOPRIGHT", dashHost, "TOPRIGHT", 0, -cardsTop - row2H - gap)
-			app.ui.dashBasketCard:SetPoint("BOTTOMRIGHT", dashHost, "BOTTOMRIGHT", 0, 0)
-			app.ui.dashBasketCard:SetWidth(halfW)
-		end
-		local show5th = (row2H >= 280)
-		if app.ui.dashCraftRows and app.ui.dashCraftRows[5] then
-			app.ui.dashCraftRows[5]:SetShown(show5th and app.ui.dashCraftRows[5].data ~= nil)
-		end
-		if app.ui.dashOutlierRows and app.ui.dashOutlierRows[5] then
-			app.ui.dashOutlierRows[5]:SetShown(show5th and app.ui.dashOutlierRows[5].data ~= nil)
-		end
-	end
-	local activeDashMode = app.getDashboardMode and app.getDashboardMode() or "brief"
-	if activeDashMode == "bloomberg" and app.ensureDashboardBloomberg then
-		app.ensureDashboardBloomberg()
-	elseif activeDashMode == "brief" and app.ensureDashboardBrief then
-		app.ensureDashboardBrief()
-	end
-	if app.ui.dashBloombergView and app.ui.dashBloombergView.Layout then
-		app.ui.dashBloombergView:Layout(width, height)
-	end
-	if app.ui.dashBriefView and app.ui.dashBriefView.Layout then
-		app.ui.dashBriefView:Layout(width, height)
-	end
-	for _, tbl in ipairs(app.ui.resizeTables or {}) do
-		if tbl ~= app.ui.recipesTable and tbl ~= app.ui.vendorCrafterTable and tbl ~= app.ui.disenchantCrafterTable and (not tbl.resizeParent.IsVisible or tbl.resizeParent:IsVisible()) then
-			ns.Window.LayoutTable(tbl, tbl.headerBar:GetWidth(), tbl.professor and 0 or 1)
-		end
-	end
-	if app.syncSkinTiledCoords then app.syncSkinTiledCoords() end
-	if app.superListProvider then app.superListProvider.Layout(width, height) end
-	if app.vendorCrafterProvider then app.vendorCrafterProvider.Layout(width, height) end
-	if app.disenchantCrafterProvider then app.disenchantCrafterProvider.Layout(width, height) end
-	if app.allItemsProvider then app.allItemsProvider.Layout(width, height) end
-	if app.watchlistProvider then app.watchlistProvider.Layout(width, height) end
-	if app.sniperProvider and app.sniperProvider.Layout then app.sniperProvider.Layout() end
-	if app.consoleProvider and app.consoleProvider.Layout then app.consoleProvider.Layout() end
-	ns.Window.LayoutAnalytics(ns.Analytics, width, height)
-	if ns.DeepAnalysis and ns.DeepAnalysis.Layout then ns.DeepAnalysis.Layout(width, height) end
-	if app.professorProvider and app.professorProvider.layout then app.professorProvider.layout() end
-	if app.refreshDashKpiLayout then app.refreshDashKpiLayout() end
-	if app.refreshDashRowIcons then app.refreshDashRowIcons() end
 end
 
 function app.refresh()
@@ -21874,7 +21942,7 @@ function app.refresh()
 	if ok then
 		ns.EndEval()
 		if panelShown then
-			app.layoutWindow()
+			app.layoutWindow(false)
 			local superWarming = app.superListProvider and app.superListProvider.IsWarming and app.superListProvider.IsWarming()
 			local superWarm = app.superListProvider and app.superListProvider.HasWarmData and app.superListProvider.HasWarmData()
 			if app.activeTab ~= "recipes" and app.superListProvider then

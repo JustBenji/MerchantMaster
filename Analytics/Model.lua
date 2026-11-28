@@ -461,6 +461,11 @@ local function richItemRows(f,from,to)
             if not found then for name in pairs(d.buyers or {}) do if contains(name,needle) then found=true; break end end end
             if not found then for name in pairs(d.sellers or {}) do if contains(name,needle) then found=true; break end end end
             if not found then r._excluded=true end
+        else
+            local sBuyers,sSellers
+            for name in pairs(d.buyers or {}) do sBuyers=sBuyers or {}; sBuyers[#sBuyers+1]=strlower(tostring(name)) end
+            for name in pairs(d.sellers or {}) do sSellers=sSellers or {}; sSellers[#sSellers+1]=strlower(tostring(name)) end
+            r._searchBuyers=sBuyers; r._searchSellers=sSellers
         end
         if (f.groupBy=="specific" or f.groupBy=="level") and next(d.variants or {}) then
             local split={}
@@ -1239,33 +1244,76 @@ local function investments(f,from,to)
     tsort(recipes,function(a,b) return a.time>b.time end)
     return {pushes=pushes,recipes=recipes}
 end
-local cache,cacheOrder={},{}; local ledgerCache={}
+local cache,cacheOrder={},{}; local ledgerCache,ledgerCacheOrder={},{}
 function Model.Invalidate(kind)
     if kind=="snapshot" or kind=="writs" then
         for sig,value in pairs(cache) do if value._view~="items" then cache[sig]=nil end end
         return
     end
     Model.generation=Model.generation+1
-    cache={}; cacheOrder={}; ledgerCache={}
+    cache={}; cacheOrder={}; ledgerCache={}; ledgerCacheOrder={}
 end
 local function filterSetKey(value)
     if type(value)~="table" then return tostring(value or "") end
     local keys={}; for k,v in pairs(value) do if type(k)=="number" then keys[#keys+1]=tostring(type(v)=="boolean" and k or v) elseif v then keys[#keys+1]=tostring(k) end end; tsort(keys); return tconcat(keys,",")
 end
-function Model.Compute(view,filters)
-    filters=filters or {}; view=view or "overview"; local h=H()
+local function putLedgerCache(key,entry)
+    if not ledgerCache[key] then
+        ledgerCacheOrder[#ledgerCacheOrder+1]=key
+        if #ledgerCacheOrder>4 then
+            local evict=table.remove(ledgerCacheOrder,1)
+            ledgerCache[evict]=nil
+        end
+    end
+    ledgerCache[key]=entry
+    return entry
+end
+local function computeSig(view,filters)
+    local h=H()
     local priceSrc=_G.MerchantMasterDB and tostring(_G.MerchantMasterDB.priceSource or "auto") or "auto"
     local bgMode=_G.MerchantMasterDB and tostring(_G.MerchantMasterDB.backgroundPriceMode or "local") or "local"
     -- These views value synthetic/held items at current price; historical item ledgers do not.
     local marketView=view=="overview" or view=="ledger" or view=="portfolio"
     local priceRev=marketView and h and tostring((h.GetPriceDataRevision and h.GetPriceDataRevision()) or h.priceCacheEpoch or 0) or "0"
-    local sig=tconcat({view=="items" and (Store.accountingVersion or Store.version) or Store.version,view,filters.char or "all",filters.type or "all",filters.zone or "all",filters.period or "30d",filters.search or "",tostring(filters.knownCostOnly~=false),priceRev,marketView and (priceSrc..":"..bgMode) or ""},"|")
+    return tconcat({view=="items" and (Store.accountingVersion or Store.version) or Store.version,view,filters.char or "all",filters.type or "all",filters.zone or "all",filters.period or "30d",filters.search or "",tostring(filters.knownCostOnly~=false),priceRev,marketView and (priceSrc..":"..bgMode) or ""},"|")
         .."|"..Store.DayKey().."|"..tostring(filters.mode or filters.itemMode or "").."|"..tostring(filters.rankSeparate)
         .."|"..filterSetKey(filters.source or filters.sources).."|"..filterSetKey(filters.types).."|"..tostring(filters.groupBy).."|"..tostring(filters.minRarity).."|"..filterSetKey(filters.rarities)
         .."|"..tostring(filters.prof or filters.group).."|"..tostring(filters.econ).."|"..tostring(filters.faction).."|"..filterSetKey(filters.chars)
         .."|"..tostring(ns.Inventory and ns.Inventory.version or 0)
         .."|"..tostring(filters.offset).."|"..tostring(filters.limit).."|"..tostring(filters.coalesce)
+end
+function Model.Compute(view,filters)
+    filters=filters or {}; view=view or "overview"
+    local sig=computeSig(view,filters)
     if cache[sig] then return cache[sig] end
+    if view=="items" and (filters.search or "")~="" then
+        local baseFilters={}; for k,v in pairs(filters) do baseFilters[k]=v end; baseFilters.search=""
+        local base=Model.Compute("items",baseFilters)
+        local needle=strlower(filters.search or "")
+        local filtered,totals={}, {qtySold=0,qtyBought=0,gross=0,spent=0,fee=0,cogs=0,depLost=0,profit=0}
+        local byItemID={}
+        for _,row in ipairs(base.rows or {}) do
+            checkpoint()
+            local found=contains(row.name,needle)
+            if not found and row._searchBuyers then
+                for i=1,#row._searchBuyers do if strfind(row._searchBuyers[i],needle,1,true) then found=true; break end end
+            end
+            if not found and row._searchSellers then
+                for i=1,#row._searchSellers do if strfind(row._searchSellers[i],needle,1,true) then found=true; break end end
+            end
+            if found then
+                filtered[#filtered+1]=row
+                local id=tonumber(row.itemID)
+                if id and not byItemID[id] then byItemID[id]=row end
+                totals.qtySold=totals.qtySold+(row.sold or 0); totals.qtyBought=totals.qtyBought+(row.bought or 0)
+                for _,k in ipairs({"gross","spent","fee","cogs","depLost","profit"}) do totals[k]=totals[k]+(row[k] or 0) end
+            end
+        end
+        local value={rows=filtered,totals=totals,byItemID=byItemID,_view="items"}
+        cache[sig]=value; cacheOrder[#cacheOrder+1]=sig
+        if #cacheOrder>32 then cache[table.remove(cacheOrder,1)]=nil end
+        return value
+    end
     local from,to=Model.PeriodBounds(filters.period); local value
     if view=="items" then value=itemRows(filters,from,to)
     elseif view=="overview" then value=overview(filters,from,to)
@@ -1284,13 +1332,30 @@ function Model.Compute(view,filters)
     return value
 end
 
-local function ledgerRows(filters)
+local function ledgerCacheKey(filters)
     local h=H()
     local priceRev=tostring((h and h.GetPriceDataRevision and h.GetPriceDataRevision()) or (h and h.priceCacheEpoch) or 0)
-    local key=tconcat({tostring(Store.version),priceRev,tostring(filters.char),tostring(filters.econ),tostring(filters.faction),filterSetKey(filters.chars),tostring(filters.period),tostring(filters.type),tostring(filters.ledgerPreset),tostring(filters.zone),tostring(filters.search),filterSetKey(filters.sources or filters.source),filterSetKey(filters.types),tostring(filters.minRarity),filterSetKey(filters.rarities),tostring(filters.prof or filters.group),tostring(filters.coalesce)},"|")
-    local cached=ledgerCache[key]; if cached then return cached.rows,cached.totals end
+    return tconcat({tostring(Store.version),priceRev,tostring(filters.char),tostring(filters.econ),tostring(filters.faction),filterSetKey(filters.chars),tostring(filters.period),tostring(filters.type),tostring(filters.ledgerPreset),tostring(filters.zone),tostring(filters.search),filterSetKey(filters.sources or filters.source),filterSetKey(filters.types),tostring(filters.minRarity),filterSetKey(filters.rarities),tostring(filters.prof or filters.group),tostring(filters.coalesce)},"|")
+end
+local function hydrateLedgerRow(r)
+    local extra=r.extra or {}; local cp=extra.buyer or extra.seller or extra.counterparty or ""
+    local c={}; for k,v in pairs(r) do c[k]=v end
+    c.extra=extra; c.typeLabel=Model.TYPE_LABELS[r.type] or r.type; c.counterparty=cp; c.charShort=Model.CharShort(r.char)
+    c.itemName=(tonumber(r.itemID) or 0)>0 and Model.ItemName(r.itemID) or ""; c.name=c.itemName
+    c.icon=(tonumber(r.itemID) or 0)>0 and Model.ItemIcon(r.itemID) or nil; c.eid=extra.eid or r.eid; c.stackSize=extra.stackSize or r.qty; c.auctionsCount=extra.auctionsCount
+    if r.type=="DISENCHANT_BROKEN" or r.type=="DISENCHANT_RECEIVE" then
+        c.profit=0
+    elseif c.profit==nil and (r.type=="AH_SELL" or r.type=="VENDOR_SELL" or r.type=="COD_SELL" or r.type=="TRADE_SELL") then
+        c.profit=(tonumber(r.total) or 0)-(tonumber(r.cogs) or 0)-(tonumber(r.depLost) or 0)
+    end
+    return c
+end
+local function ledgerRows(filters)
+    local key=ledgerCacheKey(filters)
+    local cached=ledgerCache[key]; if cached then return cached.rows,cached end
     local from,to=Model.PeriodBounds(filters.period); local rows={}; local needle=strlower(filters.search or "")
-    local days={}; for d in pairs(db().days or {}) do if d>=from and d<=to then days[#days+1]=d end end; tsort(days,function(a,b)return a>b end)
+    local hasProfFilter=tostring(filters.prof or filters.group or "")
+    local profNeedle=(hasProfFilter~="" and hasProfFilter~="all") and strlower(hasProfFilter) or nil
     local function add(r)
         local extra=r.extra or {}; local cp=extra.buyer or extra.seller or extra.counterparty or ""
         local sourceOK=selectedSource(r,filters)
@@ -1299,33 +1364,25 @@ local function ledgerRows(filters)
         local typeOK=not filters.types or filters.types[r.type]==true or isTradeGold
         local match=selectedChar(r.char,filters) and (not filters.econ or (r.econ or Store.DeriveEcon(r.char))==filters.econ)
             and typeGroupOK and (not filters.zone or filters.zone=="all" or r.zone==filters.zone or r.where==filters.zone)
-            and typeOK and sourceOK and (needle=="" or contains(Model.ItemName(r.itemID),needle) or contains(r.where,needle) or contains(r.type,needle) or contains(Model.TYPE_LABELS[r.type] or "",needle) or contains(r.char,needle) or contains(cp,needle) or contains(type(extra.deOrigin)=="table" and extra.deOrigin.srcName or "",needle))
-        local prof=tostring(filters.prof or filters.group or "")
-        if match and prof~="" and prof~="all" then
-            if not professionMatches(r.itemID,strlower(prof)) then match=false end
+            and typeOK and sourceOK
+        if match and needle~="" then
+            match=contains(Model.ItemName(r.itemID),needle) or contains(r.where,needle) or contains(r.type,needle) or contains(Model.TYPE_LABELS[r.type] or "",needle) or contains(r.char,needle) or contains(cp,needle) or contains(type(extra.deOrigin)=="table" and extra.deOrigin.srcName or "",needle)
         end
-        local quality
-        if filters.minRarity or filters.rarities then quality=_G.C_Item and _G.C_Item.GetItemQualityByID and _G.C_Item.GetItemQualityByID(r.itemID); if not quality and _G.GetItemInfo then local _,_,q=_G.GetItemInfo(r.itemID); quality=q end end
-        if match and filters.minRarity and (tonumber(quality) or -1)<tonumber(filters.minRarity) then match=false end
-        if match and filters.rarities and not filters.rarities[tonumber(quality) or 0] then match=false end
-        if match then
-            local c={}; for k,v in pairs(r) do c[k]=v end
-            c.extra=extra; c.typeLabel=Model.TYPE_LABELS[r.type] or r.type; c.counterparty=cp; c.charShort=Model.CharShort(r.char)
-            c.itemName=r.itemID>0 and Model.ItemName(r.itemID) or ""; c.name=c.itemName
-            c.icon=r.itemID>0 and Model.ItemIcon(r.itemID) or nil; c.eid=extra.eid or r.eid; c.stackSize=extra.stackSize or r.qty; c.auctionsCount=extra.auctionsCount
-            if r.type=="DISENCHANT_BROKEN" or r.type=="DISENCHANT_RECEIVE" then
-                c.profit=0
-            elseif c.profit==nil and (r.type=="AH_SELL" or r.type=="VENDOR_SELL" or r.type=="COD_SELL" or r.type=="TRADE_SELL") then
-                c.profit=(tonumber(r.total) or 0)-(tonumber(r.cogs) or 0)-(tonumber(r.depLost) or 0)
-            end
-            rows[#rows+1]=c
+        if match and profNeedle then
+            if not professionMatches(r.itemID,profNeedle) then match=false end
         end
+        if match and (filters.minRarity or filters.rarities) then
+            local quality=_G.C_Item and _G.C_Item.GetItemQualityByID and _G.C_Item.GetItemQualityByID(r.itemID); if not quality and _G.GetItemInfo then local _,_,q=_G.GetItemInfo(r.itemID); quality=q end
+            if filters.minRarity and (tonumber(quality) or -1)<tonumber(filters.minRarity) then match=false end
+            if filters.rarities and not filters.rarities[tonumber(quality) or 0] then match=false end
+        end
+        if match then rows[#rows+1]=r end
     end
     Store.IterDays(from,to,function(_,list) for _,r in ipairs(list) do add(r) end end,{desc=true})
     if not filters.type or filters.type=="all" or filters.type=="loot" then
         for day,chars in pairs(db().loot or {}) do if day>=from and day<=to then for char,counters in pairs(chars) do
-            if selectedChar(char,filters) then for key,count in pairs(counters) do
-                local id,src,zone=key:match("^(%d+)|([^|]+)|(.*)$"); id=tonumber(id)
+            if selectedChar(char,filters) then for keyStr,count in pairs(counters) do
+                local id,src,zone=keyStr:match("^(%d+)|([^|]+)|(.*)$"); id=tonumber(id)
                 if id then
                     local money=src=="Money"; local unit=money and count or Model.MarketOrVendorPrice(id)
                     add({time=dayEnd(day),char=char,econ=Store.DeriveEcon(char),type=money and "MONEY_LOOT" or src=="Mob" and "LOOT" or "GATHER",where=zone.." ("..src..")",zone=zone,itemID=id,qty=money and 1 or count,unit=unit,total=money and count or 0,extra={source=src}})
@@ -1333,54 +1390,64 @@ local function ledgerRows(filters)
             end end
         end end end
     end
-    tsort(rows,function(a,b) if a.time==b.time then local ao=(a.extra and a.extra.replayOrder) or 0; local bo=(b.extra and b.extra.replayOrder) or 0; if ao==bo then return tostring(a.eid or "")>tostring(b.eid or "") end; return ao>bo end return a.time>b.time end)
-    ledgerCache={}; ledgerCache[key]={rows=rows}; return rows
+    tsort(rows,function(a,b) if a.time==b.time then local ao=(a.extra and a.extra.replayOrder) or 0; local bo=(b.extra and b.extra.replayOrder) or 0; if ao==bo then return tostring((a.extra and a.extra.eid) or a.eid or "")>tostring((b.extra and b.extra.eid) or b.eid or "") end; return ao>bo end return a.time>b.time end)
+    local entry=putLedgerCache(key,{rows=rows})
+    return rows,entry
 end
 function Model.QueryLedger(filters,cursor,limit)
     filters=filters or {}; cursor=max(0,floor(tonumber(cursor) or tonumber(filters.offset) or 0)); limit=tonumber(limit) or tonumber(filters.limit) or 500
     if limit<0 then limit=0 end
-    local matchedRows=ledgerRows(filters); local all=matchedRows
+    local matchedRows,cached=ledgerRows(filters); local all=matchedRows; local isCoalesced=false
     if filters.coalesce and Store.CoalesceRows then
-        local eventCounts,eventStackSizes={},{}
-        for _,raw in ipairs(matchedRows) do
-            local e=raw.extra or {}; local eventID=tostring(Store.EventID(raw)); local count=tonumber(e.auctionsCount or raw.auctionsCount) or 1
-            eventCounts[eventID]=count; eventStackSizes[eventID]=tonumber(e.stackSize) or (tonumber(raw.qty) or 0)/max(1,count)
-        end
-        all=Store.CoalesceRows(all,300)
-        for _,r in ipairs(all) do
-            local count=0; for _,eid in ipairs(r.rawEventIDs or {}) do count=count+(eventCounts[tostring(eid)] or 1) end
-            r.auctionsCount=count>0 and count or 1; r.stackSize=(r.extra and r.extra.stackSize) or eventStackSizes[tostring((r.rawEventIDs or {})[1])] or r.qty
-        end
-    end
-    local h=H()
-    local cacheKey=tconcat({tostring(Store.version),tostring((h and h.GetPriceDataRevision and h.GetPriceDataRevision()) or (h and h.priceCacheEpoch) or 0),tostring(filters.char),tostring(filters.econ),tostring(filters.faction),filterSetKey(filters.chars),tostring(filters.period),tostring(filters.type),tostring(filters.ledgerPreset),tostring(filters.zone),tostring(filters.search),filterSetKey(filters.sources or filters.source),filterSetKey(filters.types),tostring(filters.minRarity),filterSetKey(filters.rarities),tostring(filters.prof or filters.group),tostring(filters.coalesce)},"|")
-    local cached=ledgerCache[cacheKey]; local totals=cached and cached.queryTotals
-    if not totals then totals={qty=0,inflow=0,outflow=0,net=0,fee=0,cogs=0,profit=0}
-    for _,r in ipairs(matchedRows) do
-        local isFromBid=(r.type=="AH_BUY" and r.extra and r.extra.fromBid==true)
-        local amount=isFromBid and 0 or (tonumber(r.total) or 0); local fee=tonumber(r.extra and r.extra.fee) or 0
-        totals.qty=totals.qty+(tonumber(r.qty) or 0); totals.net=totals.net+amount; totals.fee=totals.fee+fee
-        totals.cogs=totals.cogs+(tonumber(r.cogs) or 0)
-        if amount>0 then totals.inflow=totals.inflow+amount else totals.outflow=totals.outflow-min(0,amount) end
-        local sale=r.type=="AH_SELL" or r.type=="VENDOR_SELL" or r.type=="COD_SELL" or r.type=="TRADE_SELL"
-        local rowProfit
-        if r.type=="DISENCHANT_BROKEN" or r.type=="DISENCHANT_RECEIVE" then
-            rowProfit=0
+        isCoalesced=true
+        if cached.coalescedRows then
+            all=cached.coalescedRows
         else
-            rowProfit=tonumber(r.profit)
-            if rowProfit==nil then
-                if sale then rowProfit=amount-(tonumber(r.cogs) or 0)-(tonumber(r.depLost) or 0)
-                elseif r.type=="AH_EXPIRE" or r.type=="AH_CANCEL" then rowProfit=-(tonumber(r.extra and r.extra.depLost) or tonumber(r.depLost) or 0)
-                else rowProfit=0 end
+            local hydrated={}; local eventCounts,eventStackSizes={},{}
+            for i=1,#matchedRows do
+                local raw=matchedRows[i]; hydrated[i]=hydrateLedgerRow(raw)
+                local e=raw.extra or {}; local eventID=tostring(Store.EventID(raw)); local count=tonumber(e.auctionsCount or raw.auctionsCount) or 1
+                eventCounts[eventID]=count; eventStackSizes[eventID]=tonumber(e.stackSize) or (tonumber(raw.qty) or 0)/max(1,count)
             end
+            all=Store.CoalesceRows(hydrated,300)
+            for _,r in ipairs(all) do
+                local count=0; for _,eid in ipairs(r.rawEventIDs or {}) do count=count+(eventCounts[tostring(eid)] or 1) end
+                r.auctionsCount=count>0 and count or 1; r.stackSize=(r.extra and r.extra.stackSize) or eventStackSizes[tostring((r.rawEventIDs or {})[1])] or r.qty
+            end
+            cached.coalescedRows=all
         end
-        totals.profit=totals.profit+rowProfit
-        if r.auctionsCount==nil and r.extra then r.auctionsCount=r.extra.auctionsCount end
     end
-    cached=cached or {rows=matchedRows}; cached.queryTotals=totals; ledgerCache[cacheKey]=cached
+    local totals=cached and cached.queryTotals
+    if not totals then
+        totals={qty=0,inflow=0,outflow=0,net=0,fee=0,cogs=0,profit=0}
+        for _,r in ipairs(matchedRows) do
+            local isFromBid=(r.type=="AH_BUY" and r.extra and r.extra.fromBid==true)
+            local amount=isFromBid and 0 or (tonumber(r.total) or 0); local fee=tonumber(r.extra and r.extra.fee) or 0
+            totals.qty=totals.qty+(tonumber(r.qty) or 0); totals.net=totals.net+amount; totals.fee=totals.fee+fee
+            totals.cogs=totals.cogs+(tonumber(r.cogs) or 0)
+            if amount>0 then totals.inflow=totals.inflow+amount else totals.outflow=totals.outflow-min(0,amount) end
+            local sale=r.type=="AH_SELL" or r.type=="VENDOR_SELL" or r.type=="COD_SELL" or r.type=="TRADE_SELL"
+            local rowProfit
+            if r.type=="DISENCHANT_BROKEN" or r.type=="DISENCHANT_RECEIVE" then
+                rowProfit=0
+            else
+                rowProfit=tonumber(r.profit)
+                if rowProfit==nil then
+                    if sale then rowProfit=amount-(tonumber(r.cogs) or 0)-(tonumber(r.depLost) or 0)
+                    elseif r.type=="AH_EXPIRE" or r.type=="AH_CANCEL" then rowProfit=-(tonumber(r.extra and r.extra.depLost) or tonumber(r.depLost) or 0)
+                    else rowProfit=0 end
+                end
+            end
+            totals.profit=totals.profit+rowProfit
+        end
+        if cached then cached.queryTotals=totals end
     end
     local page={}; local stop=limit==math.huge and #all or min(#all,cursor+limit)
-    for i=cursor+1,stop do page[#page+1]=all[i] end
+    if isCoalesced then
+        for i=cursor+1,stop do page[#page+1]=all[i] end
+    else
+        for i=cursor+1,stop do page[#page+1]=hydrateLedgerRow(all[i]) end
+    end
     return {rows=page,totalMatched=#matchedRows,cursor=cursor,limit=limit,hasMore=stop<#all,totals=totals}
 end
 function Model.GetItemStats(itemID,filters)
@@ -1434,52 +1501,408 @@ function Model.PrepareTooltipIndexes(done)
     end
     if _G.C_Timer and _G.C_Timer.After then _G.C_Timer.After(0,step) else step() end
 end
+local function getCachedItemRow(id,f,itemLevel,variant)
+    local req={}
+    for k,v in pairs(f or {}) do req[k]=v end
+    if not itemLevel and not variant and req.knownCostOnly==nil then req.knownCostOnly=false end
+    local cached=cache[computeSig("items",req)]
+    if not cached then return nil end
+    if itemLevel then
+        for _,candidate in ipairs(cached.rows or {}) do
+            if tonumber(candidate.itemID)==id and tonumber(candidate.itemLevel)==itemLevel then return candidate end
+        end
+        return false
+    elseif variant then
+        for _,candidate in ipairs(cached.rows or {}) do
+            if tonumber(candidate.itemID)==id and candidate.variant==variant then return candidate end
+        end
+        return false
+    end
+    return (cached.byItemID and cached.byItemID[id]) or false
+end
 function Model.GetItemDetail(itemKey,filters)
     filters=filters or {}; local keyText=tostring(type(itemKey)=="table" and itemKey.itemID or itemKey or "")
     local id=tonumber(type(itemKey)=="table" and itemKey.itemID) or tonumber(keyText:match("item:(%d+)")) or tonumber(keyText:match("^(%d+)[|:]")) or tonumber(keyText)
     local itemLevel=tonumber(type(itemKey)=="table" and itemKey.itemLevel) or tonumber(filters.itemLevel)
     local variant=(type(itemKey)=="table" and (itemKey.variant or itemKey.itemString)) or keyText:match("^%d+[|:](.+)$") or filters.variant
     if not id then return nil end
+
     local statsFilters={}; for k,v in pairs(filters) do statsFilters[k]=v end
     if itemLevel then statsFilters.groupBy="level"; statsFilters.itemLevel=itemLevel
     elseif variant then statsFilters.groupBy="specific" end
-    local function levelMatches(candidate) return tonumber(candidate.itemLevel) == itemLevel end
-    local s
-    if itemLevel then for _,candidate in ipairs((Model.Compute("items",statsFilters).rows or {})) do if tonumber(candidate.itemID)==id and levelMatches(candidate) then s=candidate; break end end
-    elseif variant then for _,candidate in ipairs((Model.Compute("items",statsFilters).rows or {})) do if tonumber(candidate.itemID)==id and candidate.variant==variant then s=candidate; break end end
-    else s=Model.GetItemStats(id,statsFilters) end
+    if not itemLevel and not variant and statsFilters.knownCostOnly==nil then statsFilters.knownCostOnly=false end
+
+    local cachedS=getCachedItemRow(id,statsFilters,itemLevel,variant)
+    local winKeys={"7d","30d","all"}
+    local winMap={ ["7d"]="d7", ["30d"]="d30", ["all"]="all" }
+    local cachedWin={}
+    local needStats=(cachedS==nil)
+    for _,period in ipairs(winKeys) do
+        local wf={}; for k,v in pairs(statsFilters) do wf[k]=v end; wf.period=period
+        local cw=getCachedItemRow(id,wf,itemLevel,variant)
+        cachedWin[period]=cw
+        if cw==nil then needStats=true end
+    end
+
+    local txFilters={}; for k,v in pairs(filters) do txFilters[k]=v end
+    txFilters.period=filters.period or "all"; txFilters.type="all"
+    local txFrom,txTo=Model.PeriodBounds(txFilters.period)
+
+    local specs={}
+    local d180
+    if needStats then
+        local now=nowSec(); d180=Store.DayKey(now-179*86400); local meta=rowMeta(id,statsFilters)
+        local itemExcluded=false
+        if statsFilters.minRarity or statsFilters.rarities then
+            local q=_G.C_Item and _G.C_Item.GetItemQualityByID and _G.C_Item.GetItemQualityByID(id)
+            if not q and _G.GetItemInfo then local _,_,iq=_G.GetItemInfo(id); q=iq end
+            if statsFilters.minRarity and (tonumber(q) or -1)<tonumber(statsFilters.minRarity) then itemExcluded=true end
+            if statsFilters.rarities and not statsFilters.rarities[tonumber(q) or 0] then itemExcluded=true end
+        end
+        local profStr=tostring(statsFilters.prof or statsFilters.group or "")
+        if not itemExcluded and profStr~="" and profStr~="all" then
+            if not professionMatches(id,strlower(profStr)) then itemExcluded=true end
+        end
+        local function makeSpec(key,fObj,from,to,fullStats)
+            local scanFrom=from<d180 and from or d180
+            return {
+                key=key,f=fObj,from=from,to=to,scanFrom=scanFrom,fullStats=fullStats,excluded=itemExcluded,
+                meta=meta,sold=0,gross=0,fee=0,cogs=0,depLost=0,bought=0,spent=0,estUnits=0,
+                posted=0,expired=0,cancelled=0,ahSold=0,expiredPeriod=0,sold180=0,expired180=0,
+                recentSold=0,recentExpired=0,buys={},lastSoldTs=0,lastBuyTs=0,
+                deBrokenQty=0,deBrokenCost=0,deSoldMatsQty=0,deIndirectGross=0,deIndirectFee=0,deIndirectCogs=0,deIndirectProfit=0,
+                byOutput={},hasDirect=false,hasDE=false,
+            }
+        end
+        if cachedS==nil then
+            local sf,st=Model.PeriodBounds(statsFilters.period)
+            specs[#specs+1]=makeSpec("s",statsFilters,sf,st,true)
+        end
+        for _,period in ipairs(winKeys) do
+            if cachedWin[period]==nil then
+                local wf={}; for k,v in pairs(statsFilters) do wf[k]=v end; wf.period=period
+                local wFrom,wTo=Model.PeriodBounds(period)
+                specs[#specs+1]=makeSpec(period,wf,wFrom,wTo,false)
+            end
+        end
+    end
+
+    local sourceFiltered=(statsFilters.source and statsFilters.source~="all") or statsFilters.sources~=nil
+    if #specs>0 and not sourceFiltered and not itemLevel and not variant then
+        for day,econs in pairs(db().roll or {}) do
+            for _,sp in ipairs(specs) do
+                local inPeriod=(not sp.excluded) and day>=sp.from and day<=sp.to
+                local inRecent=sp.fullStats and day>=d180 and day<=sp.to
+                if inPeriod or inRecent then
+                    for ck,items in pairs(econs) do
+                        local r=items[id]
+                        if r and rollKeyMatches(ck,sp.f) then
+                            if inPeriod then
+                                sp.hasDirect=true
+                                sp.sold=sp.sold+(r.sold or 0); sp.gross=sp.gross+(r.gross or 0); sp.fee=sp.fee+(r.fee or 0)
+                                sp.cogs=sp.cogs+(r.cogs or 0); sp.depLost=sp.depLost+(r.depLost or 0)
+                                sp.bought=sp.bought+(r.bought or 0); sp.spent=sp.spent+(r.spent or 0)
+                                sp.estUnits=sp.estUnits+(r.estUnits or 0)
+                                sp.posted=sp.posted+(r.posted or 0); sp.expired=sp.expired+(r.expired or 0); sp.cancelled=sp.cancelled+(r.cancelled or 0)
+                                sp.ahSold=sp.ahSold+(r.ahSold or 0)
+                            end
+                            if inRecent then
+                                sp.recentSold=sp.recentSold+(r.sold or 0)
+                                sp.recentExpired=sp.recentExpired+(r.expired or 0)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local minScanFrom,maxScanTo=txFrom,txTo
+    for _,sp in ipairs(specs) do
+        if not sp.excluded then
+            if sp.scanFrom<minScanFrom then minScanFrom=sp.scanFrom end
+            if sp.to>maxScanTo then maxScanTo=sp.to end
+        end
+    end
+
+    local buyers,sellers,transactions={},{},{}
+    local cachedItemLevel
+    if _G.GetItemInfo then
+        local _,_,_,lvl=_G.GetItemInfo(id)
+        cachedItemLevel=tonumber(lvl)
+    end
+    local txNeedle=strlower(txFilters.search or "")
+    local txProfStr=tostring(txFilters.prof or txFilters.group or "")
+    local txProfExcluded=txProfStr~="" and txProfStr~="all" and not professionMatches(id,strlower(txProfStr))
+    local txRarityExcluded=false
+    if not txProfExcluded and (txFilters.minRarity or txFilters.rarities) then
+        local q=_G.C_Item and _G.C_Item.GetItemQualityByID and _G.C_Item.GetItemQualityByID(id)
+        if not q and _G.GetItemInfo then local _,_,iq=_G.GetItemInfo(id); q=iq end
+        if txFilters.minRarity and (tonumber(q) or -1)<tonumber(txFilters.minRarity) then txRarityExcluded=true end
+        if txFilters.rarities and not txFilters.rarities[tonumber(q) or 0] then txRarityExcluded=true end
+    end
+    local function resolveRowVariantAndLevel(extra)
+        local rowVariant=tostring(extra.variant or extra.itemString or "base")
+        local rowLevel=tonumber(extra.itemLevel or extra.level)
+        if not rowLevel and type(extra.itemString)=="string" and extra.itemString:find("item:",1,true) and _G.GetDetailedItemLevelInfo then
+            local ok,lvl=pcall(_G.GetDetailedItemLevelInfo,extra.itemString)
+            if ok then rowLevel=tonumber(lvl) end
+        end
+        if not rowLevel then rowLevel=cachedItemLevel end
+        return rowVariant,rowLevel
+    end
+    local itemNameStr
+    local function getItemNameStr()
+        if not itemNameStr then itemNameStr=Model.ItemName(id) end
+        return itemNameStr
+    end
+    local function maybeRecordTx(r,day,extra,rowVariant,rowLevel)
+        if txProfExcluded or txRarityExcluded or day<txFrom or day>txTo then return end
+        if not selectedChar(r.char,txFilters) then return end
+        if txFilters.econ and (r.econ or Store.DeriveEcon(r.char))~=txFilters.econ then return end
+        if txFilters.zone and txFilters.zone~="all" and r.zone~=txFilters.zone and r.where~=txFilters.zone then return end
+        if not selectedSource(r,txFilters) then return end
+        if txNeedle~="" then
+            local cp=extra.buyer or extra.seller or extra.counterparty or ""
+            local ok=contains(getItemNameStr(),txNeedle) or contains(r.where,txNeedle) or contains(r.type,txNeedle)
+                or contains(Model.TYPE_LABELS[r.type] or "",txNeedle) or contains(r.char,txNeedle) or contains(cp,txNeedle)
+                or contains(type(extra.deOrigin)=="table" and extra.deOrigin.srcName or "",txNeedle)
+            if not ok then return end
+        end
+        if (variant and rowVariant~=variant) or (itemLevel and rowLevel~=itemLevel) then return end
+        local buyer,seller=extra.buyer,extra.seller
+        if buyer then local b=buyers[buyer] or {name=buyer,qty=0,total=0}; buyers[buyer]=b; b.qty=b.qty+(r.qty or 0); b.total=b.total+(r.total or 0) end
+        if seller then local b=sellers[seller] or {name=seller,qty=0,total=0}; sellers[seller]=b; b.qty=b.qty+(r.qty or 0); b.total=b.total+abs(r.total or 0) end
+        local hRow=hydrateLedgerRow(r)
+        transactions[#transactions+1]={eid=hRow.eid,time=hRow.time,type=hRow.type,charShort=hRow.charShort,counterparty=hRow.counterparty,qty=hRow.qty,unit=hRow.unit,total=hRow.total,cogs=hRow.cogs,profit=hRow.profit,where=hRow.where,extra=hRow.extra}
+    end
+
+    local function processEventForSpec(sp,r,day,rid,extra,rowVariant,rowLevel)
+        if sp.excluded or day<sp.scanFrom or day>sp.to then return end
+        if not selectedChar(r.char,sp.f) then return end
+        if sp.f.econ and (r.econ or Store.DeriveEcon(r.char))~=sp.f.econ then return end
+        if not selectedSource(r,sp.f) then return end
+        local typ=r.type; local qty=tonumber(r.qty) or 0
+        local isSale=(typ=="AH_SELL" or typ=="VENDOR_SELL" or typ=="COD_SELL" or typ=="TRADE_SELL")
+        if isSale and day>=sp.from and day<=sp.to then
+            local origList=(type(extra.deOrigins)=="table" and #extra.deOrigins>0 and extra.deOrigins)
+                or (type(extra.deOrigin)=="table" and (tonumber(extra.deOrigin.srcItemID) or 0)>0 and {extra.deOrigin} or nil)
+            if origList and qty>0 then
+                local feeVal=tonumber(extra.fee) or 0
+                local gross=tonumber(extra.gross) or (tonumber(r.total) or 0)+feeVal
+                local outName
+                for _,orig in ipairs(origList) do
+                    if tonumber(orig.srcItemID)==id then
+                        local oQty=tonumber(orig.qty) or 0
+                        if oQty>0 then
+                            sp.hasDE=true
+                            local ratio=min(1,max(0,oQty/qty))
+                            local pGross=floor(gross*ratio+0.5)
+                            local pFee=floor(feeVal*ratio+0.5)
+                            local pCogs=tonumber(orig.srcCost)
+                            if pCogs==nil then pCogs=floor((tonumber(r.cogs) or 0)*ratio+0.5) else pCogs=floor(pCogs+0.5) end
+                            local pProfit=pGross-pFee-pCogs
+                            sp.deSoldMatsQty=sp.deSoldMatsQty+oQty
+                            sp.deIndirectGross=sp.deIndirectGross+pGross
+                            sp.deIndirectFee=sp.deIndirectFee+pFee
+                            sp.deIndirectCogs=sp.deIndirectCogs+pCogs
+                            sp.deIndirectProfit=sp.deIndirectProfit+pProfit
+                            local outRec=sp.byOutput[rid]
+                            if not outRec then
+                                outName=outName or Model.ItemName(rid)
+                                outRec={itemID=rid,name=outName,qty=0,gross=0,fee=0,cogs=0,profit=0}
+                                sp.byOutput[rid]=outRec
+                            end
+                            outRec.qty=outRec.qty+oQty; outRec.gross=outRec.gross+pGross; outRec.fee=outRec.fee+pFee
+                            outRec.cogs=outRec.cogs+pCogs; outRec.profit=outRec.profit+pProfit
+                        end
+                    end
+                end
+            end
+        end
+        if rid~=id then return end
+        local variantMatch=true
+        if itemLevel then variantMatch=(rowLevel==itemLevel)
+        elseif variant then variantMatch=(rowVariant==variant) end
+        sp.hasDirect=true
+        local isBuy=(typ=="AH_BUY" or typ=="VENDOR_BUY" or typ=="COD_BUY" or typ=="TRADE_BUY" or typ=="VENDOR_BUYBACK")
+        if day>=sp.from and day<=sp.to then
+            if variantMatch then
+                if typ=="AH_SELL" then sp.ahSold=sp.ahSold+qty
+                elseif typ=="AH_EXPIRE" then sp.expiredPeriod=sp.expiredPeriod+qty
+                elseif typ=="AH_CANCEL" then sp.cancelled=sp.cancelled+qty
+                elseif typ=="AH_POST" then sp.posted=sp.posted+qty end
+                if isSale then
+                    local feeVal=tonumber(extra.fee) or 0
+                    local gross=tonumber(extra.gross) or (tonumber(r.total) or 0)+feeVal
+                    if sourceFiltered or itemLevel or variant then
+                        sp.sold=sp.sold+qty; sp.gross=sp.gross+gross; sp.fee=sp.fee+feeVal
+                        sp.cogs=sp.cogs+(tonumber(r.cogs) or 0); sp.depLost=sp.depLost+(tonumber(r.depLost) or 0)
+                    end
+                    if sp.fullStats then
+                        local unit=qty>0 and gross/qty or (tonumber(r.unit) or 0)
+                        sp.minSell=min(sp.minSell or unit,unit); sp.maxSell=max(sp.maxSell or unit,unit)
+                        if (r.time or 0)>=sp.lastSoldTs then sp.lastSoldTs=r.time; sp.lastSoldUnit=unit; sp.lastSoldTo=extra.buyer or extra.counterparty end
+                        if (r.time or 0)>=(sp.lastSoldTs or 0) then sp.expSinceSale=0; sp.canSinceSale=0 end
+                    end
+                elseif isBuy then
+                    local spent=abs(tonumber(r.total) or 0)
+                    if sourceFiltered or itemLevel or variant then
+                        sp.bought=sp.bought+qty; sp.spent=sp.spent+spent; sp.cogs=sp.cogs+(tonumber(r.cogs) or 0)
+                    end
+                    if sp.fullStats then
+                        local unit=qty>0 and spent/qty or (tonumber(r.unit) or 0)
+                        sp.minBuy=min(sp.minBuy or unit,unit); sp.maxBuy=max(sp.maxBuy or unit,unit)
+                        sp.buys[#sp.buys+1]={time=r.time,replayOrder=tonumber(extra.replayOrder or r.replayOrder),sequence=#sp.buys+1,qty=qty,total=spent,unit=qty>0 and spent/qty or r.unit,from=extra.seller or extra.counterparty}
+                        if (r.time or 0)>=sp.lastBuyTs then sp.lastBuyTs=r.time; sp.lastBuyUnit=qty>0 and spent/qty or r.unit; sp.lastBuyFrom=extra.seller or extra.counterparty end
+                    end
+                elseif typ=="AH_POST" or typ=="AH_CANCEL" or typ=="AH_EXPIRE" then
+                    if sourceFiltered or itemLevel or variant then
+                        local dl=tonumber(r.depLost) or tonumber(extra.depLost) or 0
+                        sp.depLost=sp.depLost+dl
+                    end
+                end
+            end
+            if typ=="DISENCHANT_BROKEN" then
+                sp.deBrokenQty=sp.deBrokenQty+qty
+                sp.deBrokenCost=sp.deBrokenCost+(tonumber(r.cogs) or tonumber(extra.deSrcCost) or 0)
+            end
+        elseif sp.fullStats and isBuy and variantMatch then
+            local spent=abs(tonumber(r.total) or 0)
+            sp.buys[#sp.buys+1]={time=r.time,replayOrder=tonumber(extra.replayOrder or r.replayOrder),sequence=#sp.buys+1,qty=qty,total=spent,unit=qty>0 and spent/qty or r.unit,from=extra.seller or extra.counterparty}
+        end
+        if sp.fullStats and variantMatch and day>=d180 then
+            if typ=="AH_SELL" then sp.sold180=sp.sold180+qty elseif typ=="AH_EXPIRE" then sp.expired180=sp.expired180+qty end
+            if (typ=="AH_EXPIRE" or typ=="AH_CANCEL") and (r.time or 0)>=(sp.lastSoldTs or 0) then
+                if typ=="AH_EXPIRE" then sp.expSinceSale=(sp.expSinceSale or 0)+qty else sp.canSinceSale=(sp.canSinceSale or 0)+qty end
+            end
+        end
+    end
+
+    Store.IterDays(minScanFrom,maxScanTo,function(day,list)
+        for _,r in ipairs(list) do
+            local rid=tonumber(r.itemID)
+            local extra=r.extra
+            local hasDE=(extra~=nil and (extra.deOrigins~=nil or extra.deOrigin~=nil))
+            if rid==id or hasDE then
+                extra=extra or {}
+                local rv,rl
+                if rid==id then rv,rl=resolveRowVariantAndLevel(extra) end
+                if rid==id then maybeRecordTx(r,day,extra,rv,rl) end
+                if #specs>0 then
+                    for _,sp in ipairs(specs) do
+                        processEventForSpec(sp,r,day,rid,extra,rv,rl)
+                    end
+                end
+            end
+        end
+    end)
+
+    for day,chars in pairs(db().loot or {}) do
+        if day>=txFrom and day<=txTo then
+            for char,counters in pairs(chars) do
+                if selectedChar(char,txFilters) then
+                    for keyStr,count in pairs(counters) do
+                        local lid,src,zone=keyStr:match("^(%d+)|([^|]+)|(.*)$")
+                        if tonumber(lid)==id then
+                            local money=src=="Money"; local unit=money and count or Model.MarketOrVendorPrice(id)
+                            local r={time=dayEnd(day),char=char,econ=Store.DeriveEcon(char),type=money and "MONEY_LOOT" or src=="Mob" and "LOOT" or "GATHER",where=zone.." ("..src..")",zone=zone,itemID=id,qty=money and 1 or count,unit=unit,total=money and count or 0,extra={source=src}}
+                            local rv,rl=resolveRowVariantAndLevel(r.extra)
+                            maybeRecordTx(r,day,r.extra,rv,rl)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    tsort(transactions,function(a,b) if a.time==b.time then local ao=(a.extra and a.extra.replayOrder) or 0; local bo=(b.extra and b.extra.replayOrder) or 0; if ao==bo then return tostring(a.eid or "")>tostring(b.eid or "") end; return ao>bo end return a.time>b.time end)
+
+    local function finalizeSpec(sp)
+        if not sp then return nil end
+        if sp.excluded then return {} end
+        if (sp.f.knownCostOnly~=false) and not sp.f.rankSeparate and sp.estUnits>0 and not sp.hasDE then return {} end
+        if ((sp.f.source and sp.f.source~="all") or sp.f.sources) and not sp.hasDirect and not sp.hasDE then return {} end
+        if not sp.hasDirect and not sp.hasDE then return {} end
+        local r={itemID=id}
+        r.sold=sp.sold; r.gross=sp.gross; r.fee=sp.fee; r.cogs=sp.cogs; r.depLost=sp.depLost; r.bought=sp.bought; r.spent=sp.spent
+        r.profit=r.gross-r.fee-r.cogs-r.depLost
+        r.avgBuy=r.bought>0 and r.spent/r.bought or nil
+        r.avgSell=r.sold>0 and r.gross/r.sold or nil
+        r.avgProfit=r.sold>0 and r.profit/r.sold or nil
+        r.deBrokenQty=sp.deBrokenQty; r.deBrokenCost=sp.deBrokenCost; r.deSoldMatsQty=sp.deSoldMatsQty
+        r.deIndirectGross=sp.deIndirectGross; r.deIndirectFee=sp.deIndirectFee; r.deIndirectCogs=sp.deIndirectCogs; r.deIndirectProfit=sp.deIndirectProfit
+        local outs={}; for _,o in pairs(sp.byOutput) do outs[#outs+1]=o end
+        tsort(outs,function(a,b)
+            if a.profit~=b.profit then return a.profit>b.profit end
+            if a.qty~=b.qty then return a.qty>b.qty end
+            return (a.itemID or 0)<(b.itemID or 0)
+        end)
+        r.deSoldOutputs=outs
+        if sp.fullStats then
+            if sp.f.char and sp.f.char~="all" then r.curBasisQty,r.curBasis=Store.Basis(Store.DeriveEcon(sp.f.char),id)
+            elseif sp.f.econ then r.curBasisQty,r.curBasis=Store.Basis(sp.f.econ,id)
+            elseif sp.f.chars then
+                local seenEcon={}; local basisQty,basisCost=0,0
+                for char,selected in pairs(sp.f.chars) do if selected then local econ=Store.DeriveEcon(char); if not seenEcon[econ] then seenEcon[econ]=true; local qty,unit=Store.Basis(econ,id); basisQty=basisQty+qty; basisCost=basisCost+qty*unit end end end
+                r.curBasisQty=basisQty; r.curBasis=basisQty>0 and basisCost/basisQty or 0
+            else local _,activeEcon=Store.CurrentCharAndEcon(); r.curBasisQty,r.curBasis=Store.Basis(activeEcon or Store.DeriveEcon(""),id) end
+            local needed=r.curBasisQty or 0
+            if ns.Inventory and ns.Inventory.GetItemBreakdown then
+                local economy=sp.f.econ or (sp.f.char and sp.f.char~="all" and Store.DeriveEcon(sp.f.char))
+                local breakdown=ns.Inventory.GetItemBreakdown(id,economy)
+                if breakdown then
+                    local inventoryQty,hasSnapshot=0,false
+                    for _,entry in ipairs(breakdown.byChar or {}) do if selectedChar(entry.char,sp.f) then
+                        if db().inventory and db().inventory[entry.char] then hasSnapshot=true end
+                        inventoryQty=inventoryQty+(entry.bags or 0)+(entry.bank or 0)+(entry.mail or 0)+(entry.inTransit or 0)+(entry.ah or 0)+(entry.gear or 0)
+                    end end
+                    if hasSnapshot then needed=inventoryQty end
+                end
+            end
+            tsort(sp.buys,function(a,b)
+                if a.time~=b.time then return a.time>b.time end
+                local ao,bo=a.replayOrder or 0,b.replayOrder or 0
+                if ao~=bo then return ao>bo end
+                return (a.sequence or 0)>(b.sequence or 0)
+            end)
+            local paid,covered=0,0
+            for _,b in ipairs(sp.buys) do local take=min(max(0,needed-covered),b.qty); if take>0 then paid=paid+take*b.unit; covered=covered+take end; if covered>=needed then break end end
+            if covered>0 then r.smartAvgBuy=paid/covered end
+            local lifetime=sp.f.period=="all" or (not sp.f.period and sp.from=="0000-00-00")
+            r.minBuy=sp.minBuy or (lifetime and sp.meta.minBuy); r.maxBuy=sp.maxBuy or (lifetime and sp.meta.maxBuy)
+            r.minSell=sp.minSell or (lifetime and sp.meta.minSell); r.maxSell=sp.maxSell or (lifetime and sp.meta.maxSell)
+            local counts=sourceFiltered and {sold=sp.sold180,expired=sp.expired180} or {sold=sp.recentSold,expired=sp.recentExpired}
+            r.saleRate=counts.sold+counts.expired>0 and counts.sold/(counts.sold+counts.expired) or nil
+            if sourceFiltered then
+                r.sellThrough=(sp.ahSold+sp.expiredPeriod)>=3 and sp.ahSold/(sp.ahSold+sp.expiredPeriod) or nil
+            else
+                local closedTotal=r.sold+sp.expired+sp.cancelled
+                r.sellThrough=(sp.posted>=5 and closedTotal>0) and r.sold/closedTotal or nil
+            end
+            r.expSinceSale=sp.expSinceSale or sp.meta.expSinceSale or 0; r.canSinceSale=sp.canSinceSale or sp.meta.canSinceSale or 0
+            r.lastSoldTs=(sp.lastSoldTs or 0)>0 and sp.lastSoldTs or sp.meta.lastSoldTs; r.lastSoldUnit=sp.lastSoldUnit or sp.meta.lastSoldUnit
+            r.lastBuyTs=(sp.lastBuyTs or 0)>0 and sp.lastBuyTs or sp.meta.lastBuyTs; r.lastBuyUnit=sp.lastBuyUnit or sp.meta.lastBuyUnit
+        end
+        return r
+    end
+
+    local finalizedByKey={}
+    for _,sp in ipairs(specs) do finalizedByKey[sp.key]=finalizeSpec(sp) end
+    local s=(cachedS and cachedS~=false and cachedS) or finalizedByKey["s"]
     if not s then s={itemID=id} end
-    local detail={itemID=id,name=Model.ItemName(id),icon=Model.ItemIcon(id),curBasis=s.curBasis,basisQty=s.curBasisQty,smartAvgBuy=s.smartAvgBuy,
+    local detail={itemID=id,name=getItemNameStr(),icon=Model.ItemIcon(id),curBasis=s.curBasis,basisQty=s.curBasisQty,smartAvgBuy=s.smartAvgBuy,
         expSinceSale=s.expSinceSale or 0,canSinceSale=s.canSinceSale or 0,saleRate=s.saleRate,sellThrough=s.sellThrough,lastSoldTs=s.lastSoldTs,lastSoldUnit=s.lastSoldUnit,
         lastBuyTs=s.lastBuyTs,lastBuyUnit=s.lastBuyUnit,minBuy=s.minBuy,maxBuy=s.maxBuy,minSell=s.minSell,maxSell=s.maxSell,
         deBrokenQty=s.deBrokenQty or 0,deBrokenCost=s.deBrokenCost or 0,deSoldMatsQty=s.deSoldMatsQty or 0,
         deIndirectGross=s.deIndirectGross or 0,deIndirectFee=s.deIndirectFee or 0,deIndirectCogs=s.deIndirectCogs or 0,
         deIndirectProfit=s.deIndirectProfit or 0,deSoldOutputs=s.deSoldOutputs or {},
-        topBuyers={},topSellers={},transactions={}}
+        topBuyers={},topSellers={},transactions=transactions}
     detail.windows={}
-    for _,period in ipairs({"7d","30d","all"}) do
-        local windowFilters={}; for k,v in pairs(statsFilters) do windowFilters[k]=v end; windowFilters.period=period
-        local rows
-        if itemLevel then for _,candidate in ipairs((Model.Compute("items",windowFilters).rows or {})) do if tonumber(candidate.itemID)==id and levelMatches(candidate) then rows=candidate; break end end
-        elseif variant then for _,candidate in ipairs((Model.Compute("items",windowFilters).rows or {})) do if tonumber(candidate.itemID)==id and candidate.variant==variant then rows=candidate; break end end end
-        if not rows then if itemLevel or variant then rows={} else rows=Model.GetItemStats(id,windowFilters) or {} end end
-        detail.windows[period=="7d" and "d7" or period=="30d" and "d30" or "all"]={sold=rows.sold or 0,avgSell=rows.avgSell,totalSales=rows.gross or 0,bought=rows.bought or 0,avgBuy=rows.avgBuy,totalSpent=rows.spent or 0,profit=rows.profit or 0,avgProfit=rows.avgProfit,deBrokenQty=rows.deBrokenQty or 0,deSoldMatsQty=rows.deSoldMatsQty or 0,deIndirectProfit=rows.deIndirectProfit or 0}
+    for _,period in ipairs(winKeys) do
+        local cw=cachedWin[period]
+        local rows=(cw and cw~=false and cw) or finalizedByKey[period] or {}
+        detail.windows[winMap[period]]={sold=rows.sold or 0,avgSell=rows.avgSell,totalSales=rows.gross or 0,bought=rows.bought or 0,avgBuy=rows.avgBuy,totalSpent=rows.spent or 0,profit=rows.profit or 0,avgProfit=rows.avgProfit,deBrokenQty=rows.deBrokenQty or 0,deSoldMatsQty=rows.deSoldMatsQty or 0,deIndirectProfit=rows.deIndirectProfit or 0}
     end
-    local buyers,sellers={},{}; local txFilters={}; for k,v in pairs(filters) do txFilters[k]=v end; txFilters.period=filters.period or "all"; txFilters.type="all"
-    local all=ledgerRows(txFilters)
-    for _,r in ipairs(all) do if tonumber(r.itemID)==id then
-        local e=r.extra or {}; local buyer=e.buyer; local seller=e.seller
-        local rowVariant=tostring(e.variant or e.itemString or "base")
-        local rowLevel=tonumber(e.itemLevel or e.level)
-        if not rowLevel and e.itemString and _G.GetDetailedItemLevelInfo then rowLevel=tonumber(_G.GetDetailedItemLevelInfo(e.itemString)) end
-        if not rowLevel and _G.GetItemInfo then local _,_,_,level=_G.GetItemInfo(id); rowLevel=tonumber(level) end
-        if (variant and rowVariant~=variant) or (itemLevel and rowLevel~=itemLevel) then -- ignore other item groups
-        else
-        if buyer then local b=buyers[buyer] or {name=buyer,qty=0,total=0}; buyers[buyer]=b; b.qty=b.qty+(r.qty or 0); b.total=b.total+(r.total or 0) end
-        if seller then local b=sellers[seller] or {name=seller,qty=0,total=0}; sellers[seller]=b; b.qty=b.qty+(r.qty or 0); b.total=b.total+abs(r.total or 0) end
-        detail.transactions[#detail.transactions+1]={eid=r.eid,time=r.time,type=r.type,charShort=r.charShort,counterparty=r.counterparty,qty=r.qty,unit=r.unit,total=r.total,cogs=r.cogs,profit=r.profit,where=r.where,extra=r.extra}
-        end
-    end end
     local function top(map,target) for _,v in pairs(map) do target[#target+1]=v end; tsort(target,function(a,b)return a.qty>b.qty end); while #target>3 do table.remove(target) end end
     top(buyers,detail.topBuyers); top(sellers,detail.topSellers)
     detail.inventory=ns.Inventory and ns.Inventory.GetItemBreakdown(id,filters.econ)

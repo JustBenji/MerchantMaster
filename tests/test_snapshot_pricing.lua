@@ -1376,6 +1376,60 @@ end)()
 	nowTs = savedNow
 end)()
 
+-- 20. GetAllAuctionHousesForItem avoids unpacking non-home economies into ns.snapshotParsed
+do
+	local savedRaw = ns.snapshotRaw
+	local savedParsed = ns.snapshotParsed
+	ns.snapshotRaw = {}
+	ns.snapshotParsed = {}
+
+	local tsBase = nowTs - 120
+	local function loadHouse(ek, minB, mkt, qty, numA, delta)
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("META", ek,
+			string.format([[return {v=1,updatedAt=%d,source="blizzard",windowDays=30,itemCount=1}]], tsBase))
+		local payload = "95222:" .. table.concat({
+			encB32(minB), encB32(mkt), encB32(mkt), encB32(qty), encB32(numA), encB32(delta),
+		}, ",")
+		_G.MERCHANTMASTER_LOAD_SNAPSHOTS("LATEST", ek, "13468:" .. table.concat({
+			encB32(50000), encB32(50000), encB32(50000), encB32(10), encB32(2), encB32(0),
+		}, ",") .. ";" .. payload)
+	end
+
+	loadHouse("Normal-Horde", 11000, 12000, 15, 3, 10)
+	loadHouse("Normal-Alliance", 22000, 24000, 25, 5, 20)
+	loadHouse("PvP-Horde", 33000, 35000, 7, 2, 30)
+	ns.snapshotParsed = {}
+	ns.InvalidatePriceCache()
+
+	local res = ns.Pricing.GetAllAuctionHousesForItem(95222, "Normal-Horde")
+	check(type(res) == "table" and res.totalHouses == 3 and type(res.rows) == "table" and #res.rows == 3,
+		"GetAllAuctionHousesForItem returns all 3 seeded economies")
+	check(ns.snapshotParsed["Normal-Alliance"] == nil and ns.snapshotParsed["PvP-Horde"] == nil,
+		"GetAllAuctionHousesForItem leaves non-home economies unparsed in ns.snapshotParsed")
+
+	local byEcon = {}
+	for _, r in ipairs(res.rows) do byEcon[r.economy] = r end
+	check(byEcon["Normal-Horde"] and byEcon["Normal-Horde"].listed == true
+		and byEcon["Normal-Horde"].minBuyout == 11000 and byEcon["Normal-Horde"].marketValue == 12000
+		and byEcon["Normal-Horde"].qty == 15 and byEcon["Normal-Horde"].numAuctions == 3
+		and byEcon["Normal-Horde"].updatedAt == tsBase - 10,
+		"GetAllAuctionHousesForItem exact values for home Normal-Horde")
+	check(byEcon["Normal-Alliance"] and byEcon["Normal-Alliance"].listed == true
+		and byEcon["Normal-Alliance"].minBuyout == 22000 and byEcon["Normal-Alliance"].marketValue == 24000
+		and byEcon["Normal-Alliance"].qty == 25 and byEcon["Normal-Alliance"].numAuctions == 5
+		and byEcon["Normal-Alliance"].updatedAt == tsBase - 20,
+		"GetAllAuctionHousesForItem exact zero-unpack values for Normal-Alliance")
+	check(byEcon["PvP-Horde"] and byEcon["PvP-Horde"].listed == true
+		and byEcon["PvP-Horde"].minBuyout == 33000 and byEcon["PvP-Horde"].marketValue == 35000
+		and byEcon["PvP-Horde"].qty == 7 and byEcon["PvP-Horde"].numAuctions == 2
+		and byEcon["PvP-Horde"].updatedAt == tsBase - 30,
+		"GetAllAuctionHousesForItem exact zero-unpack values for PvP-Horde")
+
+	ns.snapshotRaw = savedRaw
+	ns.snapshotParsed = savedParsed
+	ns.InvalidatePriceCache()
+end
+
 -- Restore globals/state
 _G.TSM_API = origTSM
 _G.Auctionator = origAuctionator

@@ -3146,7 +3146,7 @@ function provider.Refresh(context)
             uiCache.boundDatasetSig=sig
             uiCache.boundFilterKey=fKey
             uiCache.boundMetaEpoch=uiCache.metaEpoch
-        elseif uiCache.viewWasHidden then
+        else
             uiCache.viewWasHidden=false
             rebindStaleRows()
         end
