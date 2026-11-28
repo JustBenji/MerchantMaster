@@ -3235,9 +3235,19 @@ local function runStage5AuctionatorParityTests()
 		"ConfirmPostCommodity called with exact params")
 	bagState[0][1] = nil
 	markBagsDirty()
+	searchCalls = {}
 	ns.MarketScan.HandleEvent("AUCTION_HOUSE_AUCTION_CREATED", 55501)
-	check(sl.items[1].status == "done" and sl.items[1].remaining == 0 and sl.activeIndex == 2,
-		"AUCTION_HOUSE_AUCTION_CREATED marks item 1 done and auto-advances to item 2")
+	tab.Render()
+	check(sl.items[1].status == "done" and sl.items[1].remaining == 0 and sl.activeIndex == 1
+		and #searchCalls >= 1 and searchCalls[1].key.itemID == sl.items[1].itemID,
+		"AUCTION_HOUSE_AUCTION_CREATED marks item 1 done, stays on item 1, and refreshes same item")
+	check(stripColors(tab.activeFs:GetText()) == "No Item Selected"
+		and tab.iconDropBtn.countFs:GetText() == ""
+		and stripColors(tab.spotSubFs:GetText()):find("Posted!", 1, true) ~= nil
+		and tab.postBtn:GetText() == "Item Posted"
+		and not tab.postBtn:IsEnabled()
+		and tab.sellRefreshBtn:IsEnabled(),
+		"Single post clears top-left slot as posted confirmation while keeping Refresh enabled and 'Item Posted' when pending items remain")
 	check((of.GetState().notice or ""):find("Daily Potion Ax5", 1, true) ~= nil
 		and (of.GetState().notice or ""):find("each)", 1, true) ~= nil,
 		"Posted summary matches ComposeAuctionPostedMessage format for qty>1, got: " .. tostring(of.GetState().notice))
@@ -3622,6 +3632,11 @@ local function runStage5AuctionatorParityTests()
 		and tab.sellPricesRows[1]._listing and tab.sellPricesRows[1]._listing.containsOwnerItem == true
 		and stripColors(tab.sellPricesRows[1].c5:GetText()) == "Yes",
 		"Fix #5: Post-completion Current Prices immediately displays player's new listing (Owned? = Yes)")
+	check(tab.postBtn:GetText() == "All Posted!" and of.GetSellPrimaryAction().label == "All Posted!"
+		and not tab.postBtn:IsEnabled()
+		and stripColors(tab.activeFs:GetText()) == "No Item Selected"
+		and stripColors(tab.spotMetaFs:GetText()):find("Posted", 1, true) ~= nil,
+		"Completing all items clears top-left slot, updates button to 'All Posted!', and keeps Current Prices on posted item")
 
 	-- Fix #8: Action row geometry (postBtn + sellRefreshBtn height 30 + context-only cancelBtn hidden) & non-clipped spotSubFs/activeFs
 	check(tab.sellRefreshBtn:GetWidth() >= 56 and tab.sellRefreshBtn:GetHeight() == 30

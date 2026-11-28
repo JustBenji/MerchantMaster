@@ -11450,10 +11450,10 @@ do
 		if not cur or cur.status == "done" or cur.status == "skipped" or (cur.remaining or 0) <= 0 then
 			local hasOtherPending = OrderFlow.HasOtherPendingSellItem(sl.activeIndex)
 			if hasOtherPending then
-				local lbl = (cur and cur.status == "skipped") and "Skipped" or "Item Done"
+				local lbl = (cur and cur.status == "skipped") and "Skipped" or "Item Posted"
 				return { label = lbl, enabled = false, wideConfirm = false, state = "item_done", action = "none" }
 			end
-			return { label = "All Sold!", enabled = false, wideConfirm = false, state = "done", action = "none" }
+			return { label = "All Posted!", enabled = false, wideConfirm = false, state = "done", action = "none" }
 		end
 		if cur.channel == "vendor" then
 			local canVend = orderFlow.env.atVendor and getSellableBagCount(cur.itemID, true, cur.itemLink) > 0
@@ -11558,7 +11558,7 @@ do
 		if stayOnItem and p.itemIndex and atAH() then
 			sl.activeIndex = p.itemIndex
 			OrderFlow.ScanSellItemMarket(p.itemIndex, "post_refresh")
-		else
+		elseif sl.postAllActive then
 			local nextIdx = selectNextPendingSellInternal((p.itemIndex or 1) + 1, "ah")
 			if nextIdx and atAH() then
 				if sl.items[nextIdx] then sl.items[nextIdx].bidPrice = 0 end
@@ -11569,6 +11569,15 @@ do
 					local refreshIdx = (p.itemIndex and sl.items[p.itemIndex]) and p.itemIndex or nil
 					dispatchSellScanInternal(sl.lastItemInfo, refreshIdx, "post_complete_refresh")
 				end
+			end
+		else
+			sl.postAllActive = false
+			if p.itemIndex and sl.items[p.itemIndex] then
+				sl.activeIndex = p.itemIndex
+			end
+			if atAH() and sl.lastItemInfo then
+				local refreshIdx = (p.itemIndex and sl.items[p.itemIndex]) and p.itemIndex or nil
+				dispatchSellScanInternal(sl.lastItemInfo, refreshIdx, "post_complete_refresh")
 			end
 		end
 

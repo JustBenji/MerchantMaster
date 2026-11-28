@@ -1270,11 +1270,12 @@ local function buildUI()
 				local of = getOrderFlow()
 				local sl = of and of.GetState and of.GetState().stages.sell
 				local cur = sl and sl.items and sl.items[sl.activeIndex]
+				local slotCur = (cur and cur.status ~= "done" and (cur.remaining or 0) > 0) and cur or nil
 				GameTooltip:SetOwner(self, "ANCHOR_TOP")
-				if cur and cur.itemLink and GameTooltip.SetHyperlink then
-					pcall(GameTooltip.SetHyperlink, GameTooltip, cur.itemLink)
-				elseif cur and cur.itemID and cur.itemID > 0 and GameTooltip.SetItemByID then
-					pcall(GameTooltip.SetItemByID, GameTooltip, cur.itemID)
+				if slotCur and slotCur.itemLink and GameTooltip.SetHyperlink then
+					pcall(GameTooltip.SetHyperlink, GameTooltip, slotCur.itemLink)
+				elseif slotCur and slotCur.itemID and slotCur.itemID > 0 and GameTooltip.SetItemByID then
+					pcall(GameTooltip.SetItemByID, GameTooltip, slotCur.itemID)
 				else
 					GameTooltip:AddLine("MM Sell Item Slot", 1.0, 0.85, 0.35)
 					GameTooltip:AddLine("Drag a bag item here to stage it for sale.", 0.90, 0.92, 0.94, true)
@@ -3568,19 +3569,24 @@ function AHSellTab.Render()
 		end
 	end
 
-	-- Active Item preview + Drop Slot
-	local titleStr, subStr = formatSellTitle(of, cur)
+	-- Active Item preview + Drop Slot (empty slot when fully posted while keeping Current Prices on posted item)
+	local slotCur = (cur and cur.status ~= "done" and (cur.remaining or 0) > 0) and cur or nil
+	local titleStr, subStr = formatSellTitle(of, slotCur)
+	local postedCleared = (slotCur == nil and cur ~= nil and cur.status == "done")
+	if postedCleared then
+		subStr = "Posted! Select another item from Bags below."
+	end
 	AHSellTab.activeFs:SetText(titleStr)
 	AHSellTab.spotSubFs:SetText(palHex("hexMuted", "98989d") .. subStr .. "|r")
-	if cur and cur.itemID then
-		AHSellTab.iconDropBtn.tex:SetTexture(resolveIconTex(cur.itemID, cur.spellID))
-		local r, g, b = getQualityRGB(cur.quality)
+	if slotCur and slotCur.itemID then
+		AHSellTab.iconDropBtn.tex:SetTexture(resolveIconTex(slotCur.itemID, slotCur.spellID))
+		local r, g, b = getQualityRGB(slotCur.quality)
 		AHSellTab.iconDropBtn.plate:SetStroke(r, g, b, 0.95)
-		local qDisp = (postQty > 0) and postQty or (cur.remaining or 0)
+		local qDisp = (postQty > 0) and postQty or (slotCur.remaining or 0)
 		AHSellTab.iconDropBtn.countFs:SetText((qDisp and qDisp > 1) and tostring(qDisp) or "")
 		if AHSellTab.spotMetaFs then
 			local kindTag = isCommItem and "Commodity" or "Equipment"
-			local scanTag = (sl.pendingSearch and sl.pendingSearch.itemID == cur.itemID)
+			local scanTag = (sl.pendingSearch and sl.pendingSearch.itemID == slotCur.itemID)
 				and (palHex("hexInfo", "56d4e8") .. "Scanning AH...|r")
 				or (palHex("hexPositive", "30d158") .. "AH Ready|r")
 			AHSellTab.spotMetaFs:SetText(palHex("hexSecondary", "c8d0ca") .. kindTag .. "  |  |r" .. scanTag)
@@ -3590,7 +3596,14 @@ function AHSellTab.Render()
 		AHSellTab.iconDropBtn.plate:SetStroke(goldBorder[1], goldBorder[2], goldBorder[3], 0.65)
 		AHSellTab.iconDropBtn.countFs:SetText("")
 		if AHSellTab.spotMetaFs then
-			AHSellTab.spotMetaFs:SetText(palHex("hexMuted", "98989d") .. "Waiting for item|r")
+			if postedCleared then
+				local scanTag = (sl.pendingSearch and sl.pendingSearch.itemID == cur.itemID)
+					and (palHex("hexInfo", "56d4e8") .. "Scanning AH...|r")
+					or (palHex("hexPositive", "30d158") .. "Posted  |  AH Ready|r")
+				AHSellTab.spotMetaFs:SetText(scanTag)
+			else
+				AHSellTab.spotMetaFs:SetText(palHex("hexMuted", "98989d") .. "Waiting for item|r")
+			end
 		end
 	end
 
